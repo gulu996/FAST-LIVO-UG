@@ -7,7 +7,7 @@ import time
 import rospy
 from sensor_time_msgs.msg import RawSerialFrame
 from sensor_time_msgs.srv import HostMonotonicToLocal
-from uwb_serial_driver.exclusive_serial import open_locked
+from uwb_serial_driver.exclusive_serial import DEFAULT_DTR, DEFAULT_RTS, open_locked
 from uwb_serial_driver.msg import UwbRange, UwbRangeArray, UwbStatus
 from uwb_serial_driver.parser import RangeFilter, UwbParser
 
@@ -17,6 +17,8 @@ class UwbSerialNode:
         self.source = rospy.get_param("~source", "serial")
         self.port = rospy.get_param("~port", "/dev/uwb")
         self.baud = int(rospy.get_param("~baud", 115200))
+        self.dtr = bool(rospy.get_param("~dtr", DEFAULT_DTR))
+        self.rts = bool(rospy.get_param("~rts", DEFAULT_RTS))
         self.replay_file = rospy.get_param("~replay_file", "")
         self.replay_mode = rospy.get_param("~replay_mode", "preserve")
         self.replay_rate_hz = float(rospy.get_param("~replay_rate_hz", 10.0))
@@ -132,10 +134,16 @@ class UwbSerialNode:
         while not self.stop_event.is_set() and not rospy.is_shutdown():
             fd = -1
             try:
-                fd = open_locked(self.port, self.baud)
+                fd = open_locked(self.port, self.baud, self.dtr, self.rts)
                 self.serial_open = True
                 self.reconnect_count += 1
-                rospy.loginfo("UWB owns %s at %d baud", self.port, self.baud)
+                rospy.loginfo(
+                    "UWB owns %s at %d baud, DTR=%s RTS=%s",
+                    self.port,
+                    self.baud,
+                    self.dtr,
+                    self.rts,
+                )
                 while not self.stop_event.is_set() and not rospy.is_shutdown():
                     try:
                         chunk = os.read(fd, 512)

@@ -2,6 +2,8 @@
   <arg name="source" default="serial"/>
   <arg name="port" default="/dev/uwb"/>
   <arg name="baud" default="115200"/>
+  <arg name="dtr" default="true"/>
+  <arg name="rts" default="false"/>
   <arg name="replay_file" default=""/>
   <arg name="replay_mode" default="preserve"/>
   <arg name="replay_loop" default="false"/>
@@ -12,6 +14,8 @@
     <param name="source" value="$(arg source)"/>
     <param name="port" value="$(arg port)"/>
     <param name="baud" value="$(arg baud)"/>
+    <param name="dtr" value="$(arg dtr)" type="bool"/>
+    <param name="rts" value="$(arg rts)" type="bool"/>
     <param name="replay_file" value="$(arg replay_file)"/>
     <param name="replay_mode" value="$(arg replay_mode)"/>
     <param name="replay_loop" value="$(arg replay_loop)"/>

@@ -42,6 +42,10 @@ class SoftwareSimulationTest(unittest.TestCase):
             String,
         )
         self.assertIn("RECORDING", recording.data)
+        self.assertEqual(
+            ["/sensor_time/events", "/gnss/raw", "/uwb/raw"],
+            rospy.get_param("/session_recorder/effective_required_topics"),
+        )
         nodes = rosnode.get_node_names()
         self.assertIn("/sensor_time_bridge", nodes)
         self.assertIn("/gnss_serial_driver", nodes)

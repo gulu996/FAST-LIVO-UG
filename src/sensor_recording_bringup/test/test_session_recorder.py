@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+import importlib.util
+import os
+import threading
+import unittest
+from unittest import mock
+
+from sensor_recording_bringup.recorder_gate import RecorderGate
+
+
+SCRIPT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "scripts", "session_recorder.py")
+)
+SPEC = importlib.util.spec_from_file_location("session_recorder_under_test", SCRIPT)
+MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MODULE)
+
+
+class RecordingPublisher:
+    def __init__(self):
+        self.messages = []
+
+    def publish(self, message):
+        self.messages.append(message)
+
+
+class ExitedProcess:
+    def __init__(self, return_code):
+        self.return_code = return_code
+
+    def poll(self):
+        return self.return_code
+
+
+def ready_recorder(dry_run=True):
+    recorder = MODULE.SessionRecorder.__new__(MODULE.SessionRecorder)
+    recorder.shutting_down = False
+    recorder.failed = False
+    recorder.process = None
+    recorder.gate = RecorderGate(["/sensor_time/events", "/uwb/raw"])
+    recorder.gate.update_time(23, True)
+    recorder.gate.mark_topic("/sensor_time/events")
+    recorder.gate.mark_topic("/uwb/raw")
+    recorder.current_session = 0
+    recorder.bag_prefix = "test"
+    recorder.output_dir = "/tmp"
+    recorder.dry_run = dry_run
+    recorder.topics = ["/sensor_time/events", "/uwb/raw"]
+    recorder.status_pub = RecordingPublisher()
+    recorder.last_status = None
+    recorder.lock = threading.Lock()
+    return recorder
+
+
+class SessionRecorderTest(unittest.TestCase):
+    def test_ready_is_published_before_recording(self):
+        recorder = ready_recorder()
+        with mock.patch.object(MODULE.rospy, "loginfo"):
+            recorder._maybe_start()
+        self.assertEqual(
+            ["READY", "RECORDING session=23"],
+            recorder.status_pub.messages,
+        )
+        self.assertEqual("DRY_RUN", recorder.process)
+
+    def test_rosbag_start_failure_publishes_error(self):
+        recorder = ready_recorder(dry_run=False)
+        with mock.patch.object(
+            MODULE.subprocess, "Popen", side_effect=OSError("not found")
+        ), mock.patch.object(MODULE.rospy, "logerr"):
+            recorder._maybe_start()
+        self.assertEqual("READY", recorder.status_pub.messages[0])
+        self.assertTrue(
+            recorder.status_pub.messages[-1].startswith(
+                "ERROR rosbag start failed:"
+            )
+        )
+        self.assertTrue(recorder.failed)
+
+    def test_unexpected_rosbag_exit_publishes_error(self):
+        recorder = ready_recorder(dry_run=False)
+        recorder.process = ExitedProcess(9)
+        with mock.patch.object(MODULE.rospy, "logerr"):
+            recorder._check_process(None)
+        self.assertEqual(
+            "ERROR rosbag exited unexpectedly code=9",
+            recorder.status_pub.messages[-1],
+        )
+        self.assertTrue(recorder.failed)
+
+
+if __name__ == "__main__":
+    unittest.main()

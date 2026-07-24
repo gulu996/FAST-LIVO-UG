@@ -21,5 +21,6 @@ install(DIRECTORY config launch data
 if(CATKIN_ENABLE_TESTING)
   find_package(rostest REQUIRED)
   catkin_add_nosetests(test/test_recorder_gate.py)
+  catkin_add_nosetests(test/test_session_recorder.py)
   add_rostest(test/software_simulation.test)
 endif()

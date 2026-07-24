@@ -18,6 +18,8 @@
   <arg name="uwb_source" default="serial"/>
   <arg name="uwb_port" default="/dev/uwb"/>
   <arg name="uwb_baud" default="115200"/>
+  <arg name="uwb_dtr" default="true"/>
+  <arg name="uwb_rts" default="false"/>
   <arg name="uwb_replay_file" default=""/>
   <arg name="record_profile" default="both"/>
   <arg name="output_dir" default="/tmp"/>
@@ -83,6 +85,8 @@
       <arg name="source" value="$(arg uwb_source)"/>
       <arg name="port" value="$(arg uwb_port)"/>
       <arg name="baud" value="$(arg uwb_baud)"/>
+      <arg name="dtr" value="$(arg uwb_dtr)"/>
+      <arg name="rts" value="$(arg uwb_rts)"/>
       <arg name="replay_file" value="$(arg uwb_replay_file)"/>
     </include>
   </group>

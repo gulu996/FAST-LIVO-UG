@@ -6,7 +6,10 @@ import threading
 import time
 
 import rospy
-from sensor_recording_bringup.recorder_gate import RecorderGate
+from sensor_recording_bringup.recorder_gate import (
+    RecorderGate,
+    effective_required_topics,
+)
 from sensor_time_msgs.msg import TimeStatus
 from std_msgs.msg import String
 
@@ -45,17 +48,13 @@ class SessionRecorder:
         self.profile = rospy.get_param("~record_profile", "both")
         self.dry_run = bool(rospy.get_param("~dry_run", False))
         enabled_topics = rospy.get_param("~enabled_topics", [])
-        self.required_topics = rospy.get_param("~required_topics", [])
-        if not self.required_topics:
-            self.required_topics = ["/sensor_time/events"]
-            if rospy.get_param("~enable_livox", False):
-                self.required_topics.append("/livox/lidar")
-            if rospy.get_param("~enable_camera", False):
-                self.required_topics.append("/left_camera/image")
-            if rospy.get_param("~enable_gnss", False):
-                self.required_topics.append("/gnss/raw")
-            if rospy.get_param("~enable_uwb", False):
-                self.required_topics.append("/uwb/raw")
+        self.required_topics = effective_required_topics(
+            rospy.get_param("~required_topics", []),
+            enable_livox=rospy.get_param("~enable_livox", False),
+            enable_camera=rospy.get_param("~enable_camera", False),
+            enable_gnss=rospy.get_param("~enable_gnss", False),
+            enable_uwb=rospy.get_param("~enable_uwb", False),
+        )
         if enabled_topics:
             self.topics = list(dict.fromkeys(enabled_topics))
         elif self.profile == "raw":
@@ -68,10 +67,29 @@ class SessionRecorder:
         self.process = None
         self.current_session = 0
         self.shutting_down = False
+        self.failed = False
         self.lock = threading.Lock()
+        self.last_status = None
         self.status_pub = rospy.Publisher(
             "/sensor_recording/status", String, queue_size=2, latch=True
         )
+        rospy.set_param(
+            "/session_recorder/effective_required_topics", self.required_topics
+        )
+        rospy.loginfo(
+            "Recorder required topics: %s", ", ".join(self.required_topics)
+        )
+        try:
+            os.makedirs(self.output_dir, exist_ok=True)
+            if not os.path.isdir(self.output_dir) or not os.access(
+                self.output_dir, os.W_OK
+            ):
+                raise OSError("output directory is not writable")
+        except OSError as error:
+            self._publish_status(
+                "ERROR output directory {}: {}".format(self.output_dir, error)
+            )
+            raise
         self.time_sub = rospy.Subscriber(
             "/sensor_time/status", TimeStatus, self.time_callback, queue_size=5
         )
@@ -80,9 +98,17 @@ class SessionRecorder:
                              callback_args=topic, queue_size=1)
             for topic in self.required_topics
         ]
-        os.makedirs(self.output_dir, exist_ok=True)
-        self.status_pub.publish("WAIT_LOCAL")
+        self.process_timer = rospy.Timer(
+            rospy.Duration(0.5), self._check_process
+        )
+        self._publish_status(self.gate.status())
         rospy.on_shutdown(self.shutdown)
+
+    def _publish_status(self, status):
+        if status == self.last_status:
+            return
+        self.last_status = status
+        self.status_pub.publish(status)
 
     def topic_callback(self, _message, topic):
         with self.lock:
@@ -97,7 +123,11 @@ class SessionRecorder:
             self._maybe_start()
 
     def _maybe_start(self):
-        if self.shutting_down or self.process is not None or not self.gate.ready():
+        if self.shutting_down or self.failed or self.process is not None:
+            return
+        gate_status = self.gate.status()
+        self._publish_status(gate_status)
+        if gate_status != "READY":
             return
         self.current_session = self.gate.session_id
         stamp = time.strftime("%Y%m%d_%H%M%S")
@@ -105,26 +135,54 @@ class SessionRecorder:
             self.bag_prefix, self.current_session, stamp
         )
         output = os.path.join(self.output_dir, basename)
-        if self.dry_run:
-            self.process = "DRY_RUN"
-        else:
-            command = ["rosbag", "record", "--output-name", output] + self.topics
-            self.process = subprocess.Popen(command, preexec_fn=os.setsid)
-        self.status_pub.publish("RECORDING session={}".format(self.current_session))
+        try:
+            if self.dry_run:
+                self.process = "DRY_RUN"
+            else:
+                command = ["rosbag", "record", "--output-name", output] + self.topics
+                self.process = subprocess.Popen(command, preexec_fn=os.setsid)
+        except (OSError, subprocess.SubprocessError) as error:
+            self.process = None
+            self.failed = True
+            self._publish_status("ERROR rosbag start failed: {}".format(error))
+            rospy.logerr("Cannot start rosbag: %s", error)
+            return
+        self._publish_status(
+            "RECORDING session={}".format(self.current_session)
+        )
         rospy.loginfo("Recorder started for LOCAL session=%d", self.current_session)
+
+    def _check_process(self, _event):
+        with self.lock:
+            if (
+                self.shutting_down
+                or self.process is None
+                or self.process == "DRY_RUN"
+            ):
+                return
+            return_code = self.process.poll()
+            if return_code is None:
+                return
+            self.process = None
+            self.failed = True
+            self._publish_status(
+                "ERROR rosbag exited unexpectedly code={}".format(return_code)
+            )
+            rospy.logerr("rosbag exited unexpectedly with code %d", return_code)
 
     def _stop_bag(self):
         if self.process is None:
             return
         if self.process != "DRY_RUN":
-            os.killpg(os.getpgid(self.process.pid), signal.SIGINT)
-            try:
-                self.process.wait(timeout=15.0)
-            except subprocess.TimeoutExpired:
-                os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
-                self.process.wait(timeout=5.0)
+            if self.process.poll() is None:
+                os.killpg(os.getpgid(self.process.pid), signal.SIGINT)
+                try:
+                    self.process.wait(timeout=15.0)
+                except subprocess.TimeoutExpired:
+                    os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
+                    self.process.wait(timeout=5.0)
         self.process = None
-        self.status_pub.publish("ROTATING")
+        self._publish_status("ROTATING")
 
     def shutdown(self):
         with self.lock:
