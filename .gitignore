@@ -59,3 +59,4 @@ nohup.out
 # OS
 .DS_Store
 Thumbs.db
+/.catkin_workspace
