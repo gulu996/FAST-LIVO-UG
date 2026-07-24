@@ -1,17 +1,24 @@
 SET(PROJECT_NAME vikit_ros)
 PROJECT(${PROJECT_NAME})
 CMAKE_MINIMUM_REQUIRED (VERSION 2.8.3)
-SET(CMAKE_BUILD_TYPE Release) # Release, RelWithDebInfo
+IF(NOT CMAKE_BUILD_TYPE)
+  SET(CMAKE_BUILD_TYPE Release CACHE STRING "Release, RelWithDebInfo or Debug")
+ENDIF()
 SET(CMAKE_VERBOSE_MAKEFILE OFF)
 
-# Set build flags
-SET(CMAKE_CXX_FLAGS "-Wall -D_LINUX -D_REENTRANT -march=x86-64 -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unknown-pragmas")
-SET(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS} -O0 -g")
-IF(CMAKE_COMPILER_IS_GNUCC)
-  SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++0x")
-ELSE()
-  SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+# Use the compiler's target defaults instead of forcing an x86 ISA on Jetson.
+SET(CMAKE_CXX_STANDARD 11)
+SET(CMAKE_CXX_STANDARD_REQUIRED ON)
+SET(CMAKE_CXX_EXTENSIONS OFF)
+ADD_DEFINITIONS(-D_LINUX -D_REENTRANT)
+IF(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  ADD_COMPILE_OPTIONS(
+    -Wall
+    -Wno-unused-variable
+    -Wno-unused-but-set-variable
+    -Wno-unknown-pragmas)
 ENDIF()
+MESSAGE(STATUS "vikit_ros target architecture: ${CMAKE_SYSTEM_PROCESSOR}")
 
 # Add catkin and required ROS packages
 FIND_PACKAGE(catkin REQUIRED COMPONENTS roscpp vikit_common visualization_msgs tf cmake_modules)

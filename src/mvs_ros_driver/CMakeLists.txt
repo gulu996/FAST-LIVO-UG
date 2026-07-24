@@ -4,13 +4,20 @@ set(cv_bridge_DIR /usr/local/share/cv_bridge/cmake)
 
 add_compile_options(-std=c++14)
 
-if(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "aarch64")
-  LINK_DIRECTORIES(/opt/MVS/lib/aarch64/)
-  message(STATUS "Running on arrch64")
-elseif(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "x86_64")
-  LINK_DIRECTORIES(/opt/MVS/lib/64/)
-  message(STATUS "Running on x86_64")
+string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" MVS_TARGET_PROCESSOR)
+if(MVS_TARGET_PROCESSOR MATCHES "^(aarch64|arm64)$")
+  set(MVS_LIBRARY_DIR /opt/MVS/lib/aarch64)
+elseif(MVS_TARGET_PROCESSOR MATCHES "^(x86_64|amd64)$")
+  set(MVS_LIBRARY_DIR /opt/MVS/lib/64)
+else()
+  message(FATAL_ERROR
+    "mvs_ros_driver does not know the MVS SDK library directory for target "
+    "architecture '${CMAKE_SYSTEM_PROCESSOR}'")
 endif()
+link_directories("${MVS_LIBRARY_DIR}")
+message(STATUS
+  "mvs_ros_driver target architecture: ${CMAKE_SYSTEM_PROCESSOR}; "
+  "MVS SDK library directory: ${MVS_LIBRARY_DIR}")
 
 find_package(catkin REQUIRED COMPONENTS
   cv_bridge

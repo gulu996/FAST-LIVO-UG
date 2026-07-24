@@ -1,7 +1,9 @@
 cmake_minimum_required(VERSION 2.8.3)
 project(fast_livo)
 
-set(CMAKE_BUILD_TYPE "Release")
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Release, RelWithDebInfo or Debug")
+endif()
 message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
 
 set(CMAKE_CXX_STANDARD 17)
@@ -14,12 +16,14 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread -fexceptions")
 # Specific settings for Debug build
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0 -g")
 
-# Detect CPU architecture
-message(STATUS "Current CPU architecture: ${CMAKE_SYSTEM_PROCESSOR}")
+# Detect the target CPU architecture. CMAKE_HOST_SYSTEM_PROCESSOR must not be
+# used here because it describes the build machine during cross-compilation.
+string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" FAST_LIVO_TARGET_PROCESSOR)
+message(STATUS "Target CPU architecture: ${CMAKE_SYSTEM_PROCESSOR}")
 
 # Specific settings for Release build
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm|aarch64|ARM|AARCH64)")
-  if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
+if(FAST_LIVO_TARGET_PROCESSOR MATCHES "^(arm|aarch64|arm64)")
+  if(FAST_LIVO_TARGET_PROCESSOR MATCHES "^(aarch64|arm64)$")
     # 64-bit ARM — deterministic floating-point configuration
     set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O2 -mcpu=generic -mtune=generic -ffp-contract=off")
     message(STATUS "Using 64-bit ARM deterministic: -O2 -mcpu=generic -mtune=generic -ffp-contract=off")
@@ -29,7 +33,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm|aarch64|ARM|AARCH64)")
     message(STATUS "Using 32-bit ARM deterministic: -O2 -mcpu=generic -mtune=generic -mfpu=neon -ffp-contract=off")
   endif()
   add_definitions(-DARM_ARCH)
-else()
+elseif(FAST_LIVO_TARGET_PROCESSOR MATCHES "^(x86_64|amd64)$")
   # x86-64 (Intel/AMD) — deterministic floating-point configuration
   # -O2: disable -O3 auto-vectorization / loop peeling / unrolling
   # -march=x86-64: use baseline x86-64 ISA, no CPU-specific SIMD variants
@@ -38,6 +42,14 @@ else()
   set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O2 -march=x86-64 -mtune=generic -ffp-contract=off -frounding-math")
   message(STATUS "Using x86 deterministic: -O2 -march=x86-64 -mtune=generic -ffp-contract=off -frounding-math")
   add_definitions(-DX86_ARCH)
+else()
+  # ponytail: unknown architectures use the compiler baseline; add a dedicated
+  # branch only when an architecture-specific optimization is actually needed.
+  set(CMAKE_CXX_FLAGS_RELEASE
+      "${CMAKE_CXX_FLAGS_RELEASE} -O2 -ffp-contract=off -frounding-math")
+  message(STATUS
+    "Using architecture-neutral deterministic options for "
+    "${CMAKE_SYSTEM_PROCESSOR}")
 endif()
 
 # Define project root directory

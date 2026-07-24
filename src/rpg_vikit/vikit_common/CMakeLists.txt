@@ -1,33 +1,30 @@
 SET(PROJECT_NAME vikit_common)
 PROJECT(${PROJECT_NAME})
 CMAKE_MINIMUM_REQUIRED (VERSION 2.8.3)
-SET(CMAKE_BUILD_TYPE Release) # Release, RelWithDebInfo
+IF(NOT CMAKE_BUILD_TYPE)
+  SET(CMAKE_BUILD_TYPE Release CACHE STRING "Release, RelWithDebInfo or Debug")
+ENDIF()
 SET(CMAKE_VERBOSE_MAKEFILE OFF)
 SET(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${PROJECT_SOURCE_DIR}/CMakeModules/")
 SET(USE_ROS TRUE) # Set False if you want to build this package without Catkin
 
-# Set build flags. Set IS_ARM on odroid board as environment variable
-# -march=native → -march=x86-64 for deterministic FP across runs
-SET(CMAKE_CXX_FLAGS "-Wall -D_LINUX -D_REENTRANT -march=x86-64 -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unknown-pragmas")
-# IF(DEFINED ENV{ARM_ARCHITECTURE})
-#   SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mfpu=neon -march=armv8-a")
-# ELSE()
-#   SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mmmx -msse -msse -msse2 -msse3 -mssse3")
-# ENDIF()
-message("Current CPU archtecture: ${CMAKE_SYSTEM_PROCESSOR}")
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86)|(X86)|(amd64)|(AMD64)" )
-  SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msse2")
-else()
-  SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=armv8-a")
-endif()
-
-IF(CMAKE_COMPILER_IS_GNUCC)
-  SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++0x")
-ELSE()
-  SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+# Use the compiler's target defaults on every architecture. In particular, do not
+# inject x86 SIMD flags into native Jetson builds.
+SET(CMAKE_CXX_STANDARD 11)
+SET(CMAKE_CXX_STANDARD_REQUIRED ON)
+SET(CMAKE_CXX_EXTENSIONS OFF)
+ADD_DEFINITIONS(-D_LINUX -D_REENTRANT)
+IF(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  ADD_COMPILE_OPTIONS(
+    -Wall
+    -Wno-unused-variable
+    -Wno-unused-but-set-variable
+    -Wno-unknown-pragmas)
+  # Keep the existing deterministic floating-point policy without selecting an ISA.
+  SET(CMAKE_CXX_FLAGS_RELEASE
+      "${CMAKE_CXX_FLAGS_RELEASE} -O2 -ffp-contract=off -frounding-math")
 ENDIF()
-# Deterministic FP: -O2 (no auto-vec), -ffp-contract=off (no FMA), -frounding-math
-SET(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS} -O2 -ffp-contract=off -frounding-math")
+MESSAGE(STATUS "vikit_common target architecture: ${CMAKE_SYSTEM_PROCESSOR}")
 
 # Add plain cmake packages 
 FIND_PACKAGE(OpenCV REQUIRED)
@@ -44,7 +41,7 @@ INCLUDE_DIRECTORIES(
 
 IF(USE_ROS)
   FIND_PACKAGE(catkin REQUIRED COMPONENTS roscpp cmake_modules)
-  LIST(APPEND INCLUDE_DIRECTORIES ${catkin_INCLUDE_DIRS})
+  INCLUDE_DIRECTORIES(${catkin_INCLUDE_DIRS})
   catkin_package(
     DEPENDS Eigen OpenCV Sophus
     CATKIN_DEPENDS roscpp
