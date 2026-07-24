@@ -29,7 +29,7 @@ cd ~/catkin_ws/src/livox_ros_driver2
 
 ## 采集数据
 
-# 仅uwb
+### 仅uwb
 
 ```
 roslaunch sensor_recording_bringup record_all.launch \
@@ -49,7 +49,7 @@ roslaunch sensor_recording_bringup record_all.launch \
   record_profile:=both
 ```
 
-仅gnss
+### 仅gnss
 
 ```
 roslaunch sensor_recording_bringup record_all.launch \
