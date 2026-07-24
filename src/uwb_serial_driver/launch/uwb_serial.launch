@@ -1,0 +1,19 @@
+<launch>
+  <arg name="source" default="serial"/>
+  <arg name="port" default="/dev/uwb"/>
+  <arg name="baud" default="115200"/>
+  <arg name="replay_file" default=""/>
+  <arg name="replay_mode" default="preserve"/>
+  <arg name="replay_loop" default="false"/>
+  <arg name="config_file" default="$(find uwb_serial_driver)/config/default.yaml"/>
+  <rosparam command="load" file="$(arg config_file)" ns="uwb_serial_driver"/>
+  <node pkg="uwb_serial_driver" type="uwb_serial_node.py"
+        name="uwb_serial_driver" output="screen" required="true">
+    <param name="source" value="$(arg source)"/>
+    <param name="port" value="$(arg port)"/>
+    <param name="baud" value="$(arg baud)"/>
+    <param name="replay_file" value="$(arg replay_file)"/>
+    <param name="replay_mode" value="$(arg replay_mode)"/>
+    <param name="replay_loop" value="$(arg replay_loop)"/>
+  </node>
+</launch>

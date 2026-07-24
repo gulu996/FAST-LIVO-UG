@@ -1,0 +1,70 @@
+<launch>
+  <param name="/use_sim_time" value="false"/>
+
+  <arg name="enable_time_bridge" default="true"/>
+  <arg name="enable_livox" default="true"/>
+  <arg name="enable_camera" default="true"/>
+  <arg name="enable_gnss" default="true"/>
+  <arg name="enable_gnss_adapter" default="true"/>
+  <arg name="enable_uwb" default="true"/>
+
+  <arg name="mcu_input_mode" default="serial"/>
+  <arg name="mcu_port" default="/dev/sensor_mcu"/>
+  <arg name="mcu_baud" default="115200"/>
+  <arg name="gnss_source" default="serial"/>
+  <arg name="gnss_port" default="/dev/gnss"/>
+  <arg name="gnss_baud" default="921600"/>
+  <arg name="gnss_replay_file" default=""/>
+  <arg name="uwb_source" default="serial"/>
+  <arg name="uwb_port" default="/dev/uwb"/>
+  <arg name="uwb_baud" default="115200"/>
+  <arg name="uwb_replay_file" default=""/>
+  <arg name="record_profile" default="both"/>
+  <arg name="output_dir" default="/tmp"/>
+  <arg name="bag_prefix" default="sensors"/>
+
+  <group if="$(arg enable_time_bridge)">
+    <node pkg="sensor_time_bridge" type="sensor_time_bridge_node"
+          name="sensor_time_bridge" output="screen" required="true">
+      <param name="input_mode" value="$(arg mcu_input_mode)"/>
+      <param name="serial_port" value="$(arg mcu_port)"/>
+      <param name="serial_baud" value="$(arg mcu_baud)"/>
+    </node>
+  </group>
+
+  <group if="$(arg enable_livox)">
+    <include file="$(find livox_ros_driver2)/launch_ROS1/msg_MID360.launch">
+      <arg name="rosbag_enable" value="false"/>
+      <arg name="rviz_enable" value="false"/>
+    </include>
+  </group>
+
+  <group if="$(arg enable_camera)">
+    <node pkg="mvs_ros_driver" type="grabImgWithTrigger"
+          name="mvs_camera_trigger"
+          args="$(find mvs_ros_driver)/config/left_camera_trigger.yaml"
+          output="screen" respawn="true"/>
+  </group>
+
+  <group if="$(arg enable_gnss)">
+    <include file="$(find gnss_serial_driver)/launch/gnss_serial.launch">
+      <arg name="source" value="$(arg gnss_source)"/>
+      <arg name="port" value="$(arg gnss_port)"/>
+      <arg name="baud" value="$(arg gnss_baud)"/>
+      <arg name="replay_file" value="$(arg gnss_replay_file)"/>
+    </include>
+  </group>
+
+  <group if="$(arg enable_gnss_adapter)">
+    <include file="$(find gnss_serial_driver)/launch/gnss_adapter.launch"/>
+  </group>
+
+  <group if="$(arg enable_uwb)">
+    <include file="$(find uwb_serial_driver)/launch/uwb_serial.launch">
+      <arg name="source" value="$(arg uwb_source)"/>
+      <arg name="port" value="$(arg uwb_port)"/>
+      <arg name="baud" value="$(arg uwb_baud)"/>
+      <arg name="replay_file" value="$(arg uwb_replay_file)"/>
+    </include>
+  </group>
+</launch>

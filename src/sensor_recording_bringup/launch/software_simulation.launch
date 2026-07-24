@@ -1,0 +1,55 @@
+<launch>
+  <param name="/use_sim_time" value="false"/>
+  <arg name="start_without_gnss_s" default="3.0"/>
+  <arg name="gnss_lock_duration_s" default="5.0"/>
+  <arg name="gnss_outage_duration_s" default="3.0"/>
+  <arg name="relock_delay_s" default="1.0"/>
+  <arg name="start_recorder" default="false"/>
+  <arg name="recorder_dry_run" default="true"/>
+
+  <node pkg="sensor_time_bridge" type="sensor_time_bridge_node"
+        name="sensor_time_bridge" output="screen" required="true">
+    <param name="input_mode" value="simulation"/>
+    <param name="min_pps_pairs" value="3"/>
+    <param name="min_fit_span_s" value="2.0"/>
+    <param name="relock_confirm_count" value="3"/>
+    <param name="pps_timeout_s" value="1.5"/>
+  </node>
+  <node pkg="sensor_time_bridge" type="mcu_event_simulator"
+        name="mcu_event_simulator" output="screen" required="true">
+    <param name="local_tick_hz" value="1000000"/>
+    <param name="clock_error_ppm" value="50.0"/>
+    <param name="camera_rate_hz" value="10.0"/>
+    <param name="local_pps_rate_hz" value="1.0"/>
+    <param name="start_without_gnss_s" value="$(arg start_without_gnss_s)"/>
+    <param name="gnss_lock_duration_s" value="$(arg gnss_lock_duration_s)"/>
+    <param name="gnss_outage_duration_s" value="$(arg gnss_outage_duration_s)"/>
+    <param name="relock_delay_s" value="$(arg relock_delay_s)"/>
+  </node>
+
+  <include file="$(find gnss_serial_driver)/launch/gnss_serial.launch">
+    <arg name="source" value="file"/>
+    <arg name="replay_loop" value="true"/>
+    <arg name="replay_file"
+         value="$(find sensor_recording_bringup)/data/gnss_replay.txt"/>
+  </include>
+  <include file="$(find gnss_serial_driver)/launch/gnss_adapter.launch"/>
+  <include file="$(find uwb_serial_driver)/launch/uwb_serial.launch">
+    <arg name="source" value="file"/>
+    <arg name="replay_file"
+         value="$(find sensor_recording_bringup)/data/uwb_replay.txt"/>
+    <arg name="replay_mode" value="rebase"/>
+    <arg name="replay_loop" value="true"/>
+  </include>
+
+  <group if="$(arg start_recorder)">
+    <node pkg="sensor_recording_bringup" type="session_recorder.py"
+          name="session_recorder" output="screen">
+      <param name="dry_run" value="$(arg recorder_dry_run)"/>
+      <rosparam param="required_topics">
+        [/sensor_time/events, /gnss/raw, /uwb/raw]
+      </rosparam>
+      <param name="record_profile" value="both"/>
+    </node>
+  </group>
+</launch>

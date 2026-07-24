@@ -1,0 +1,61 @@
+# Catkin build products
+/build/
+/devel/
+/install/
+/logs/
+.catkin_tools/
+
+# Catkin generated workspace link
+/src/CMakeLists.txt
+
+# Codex and temporary backups
+/.codex_backups/
+/git_migration_backup/
+
+# Runtime data
+/bags/
+/data/
+/datasets/
+/results/
+/outputs/
+*.bag
+*.bag.active
+*.pcd
+*.ply
+
+# Logs
+*.log
+roslog/
+nohup.out
+
+# Python
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# C/C++ generated files
+*.o
+*.a
+*.so
+*.d
+
+# STM32/Keil outputs
+**/Objects/
+**/Listings/
+*.axf
+*.hex
+*.bin
+*.map
+*.uvguix.*
+*.dep
+
+# OS
+.DS_Store
+Thumbs.db

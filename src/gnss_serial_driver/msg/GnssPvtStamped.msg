@@ -1,0 +1,20 @@
+std_msgs/Header header
+uint64 session_id
+uint64 writer_epoch
+uint64 source_sequence
+gnss_comm/GnssPVTSolnMsg pvt
+uint64 utc_measurement_ns
+uint64 local_measurement_ns
+uint32 mapping_version
+uint8 time_state
+uint8 timestamp_source
+uint64 timestamp_uncertainty_ns
+bool utc_valid
+bool local_measurement_time_valid
+bool valid_for_fusion
+
+uint8 INVALID=0
+uint8 HOST_RECEIVE_LOCAL=1
+uint8 GNSS_UTC_INVERSE_MAPPED=3
+uint8 REPLAY_PRESERVED=4
+uint8 REPLAY_REBASED=5

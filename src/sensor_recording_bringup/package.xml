@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>sensor_recording_bringup</name>
+  <version>0.1.0</version>
+  <description>Sensors-only launch, readiness gate and session-aware rosbag recorder.</description>
+  <maintainer email="gulu@example.com">gulu</maintainer>
+  <license>BSD-3-Clause</license>
+  <buildtool_depend>catkin</buildtool_depend>
+  <build_depend>rospy</build_depend>
+  <build_depend>sensor_time_msgs</build_depend>
+  <build_depend>std_msgs</build_depend>
+  <exec_depend>gnss_serial_driver</exec_depend>
+  <exec_depend>livox_ros_driver2</exec_depend>
+  <exec_depend>mvs_ros_driver</exec_depend>
+  <exec_depend>rosbag</exec_depend>
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>sensor_time_bridge</exec_depend>
+  <exec_depend>sensor_time_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <test_depend>uwb_serial_driver</test_depend>
+  <exec_depend>uwb_serial_driver</exec_depend>
+  <test_depend>rostest</test_depend>
+</package>

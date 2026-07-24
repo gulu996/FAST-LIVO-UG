@@ -1,0 +1,8 @@
+uint64 host_monotonic_ns
+---
+bool success
+uint64 local_stamp_ns
+uint64 session_id
+uint64 writer_epoch
+uint64 time_uncertainty_ns
+string detail

@@ -1,0 +1,13 @@
+std_msgs/Header header
+uint64 session_id
+uint64 writer_epoch
+bool serial_open
+uint64 round_sequence
+uint64 raw_line_count
+uint64 parsed_round_count
+uint64 parse_error_count
+uint64 range_reject_count
+uint64 repeat_drop_count
+uint64 reconnect_count
+string source
+string detail

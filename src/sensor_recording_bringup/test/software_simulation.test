@@ -1,0 +1,11 @@
+<launch>
+  <include file="$(find sensor_recording_bringup)/launch/software_simulation.launch">
+    <arg name="start_without_gnss_s" value="999.0"/>
+    <arg name="start_recorder" value="true"/>
+    <arg name="recorder_dry_run" value="true"/>
+  </include>
+  <test test-name="software_simulation_no_fast"
+        pkg="sensor_recording_bringup"
+        type="software_simulation_test.py"
+        time-limit="20"/>
+</launch>

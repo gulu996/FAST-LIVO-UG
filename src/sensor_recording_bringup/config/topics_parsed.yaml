@@ -1,0 +1,11 @@
+topics:
+  - /sensor_time/mapping
+  - /sensor_time/status
+  - /gnss/pvt_local
+  - /gnss/enu_odom
+  - /gnss/status_v2
+  - /uwb/ranges
+  - /uwb/status
+  - /livox/lidar
+  - /livox/imu
+  - /left_camera/image

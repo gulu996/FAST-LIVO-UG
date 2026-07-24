@@ -1,0 +1,10 @@
+source: serial
+port: /dev/gnss
+baud: 921600
+dtr: true
+rts: false
+replay_mode: preserve
+replay_rate_hz: 10.0
+replay_has_pps_association: false
+gps_utc_leap_seconds: 18
+accepted_qualities: [4]

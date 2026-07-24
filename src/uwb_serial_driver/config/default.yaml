@@ -1,0 +1,15 @@
+source: serial
+port: /dev/uwb
+baud: 115200
+parser_mode: auto
+anchor_order: [0, 1]
+range_scale: 1.0
+range_bias_m: {}
+min_range_m: 0.05
+max_range_m: 250.0
+repeat_epsilon_m: 0.001
+repeat_max_count: 3
+repeat_max_duration_s: 2.0
+replay_mode: preserve
+replay_rate_hz: 10.0
+replay_uncertainty_ns: 1000000

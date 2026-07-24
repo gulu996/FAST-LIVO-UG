@@ -1,0 +1,23 @@
+std_msgs/Header header
+uint64 session_id
+uint64 writer_epoch
+uint32 mapping_version
+uint8 time_state
+bool serial_open
+bool utc_valid
+bool local_measurement_time_valid
+bool position_valid
+bool valid_for_fusion
+uint8 solution_quality
+uint64 source_sequence
+uint64 checksum_error_count
+uint64 parse_error_count
+uint64 reconnect_count
+string source_message
+string detail
+
+uint8 INVALID=0
+uint8 SINGLE=1
+uint8 DIFFERENTIAL=2
+uint8 RTK_FLOAT=3
+uint8 RTK_FIXED=4

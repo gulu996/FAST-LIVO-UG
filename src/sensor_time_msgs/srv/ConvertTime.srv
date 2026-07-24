@@ -1,0 +1,11 @@
+uint8 direction
+uint64 input_ns
+uint8 LOCAL_TO_UTC=1
+uint8 UTC_TO_LOCAL=2
+---
+bool success
+uint64 output_ns
+uint32 mapping_version
+uint8 time_state
+uint64 time_uncertainty_ns
+string detail

@@ -1,0 +1,7 @@
+<launch>
+  <arg name="origin_mode" default="first_valid"/>
+  <node pkg="gnss_serial_driver" type="gnss_adapter_node"
+        name="gnss_adapter" output="screen">
+    <param name="origin_mode" value="$(arg origin_mode)"/>
+  </node>
+</launch>
