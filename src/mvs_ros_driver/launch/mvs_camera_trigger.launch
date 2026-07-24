@@ -1,4 +1,6 @@
 <launch>
+  <arg name="mvs_library_dir" default="/opt/MVS/lib/aarch64"/>
+     
   <node 
     pkg="mvs_ros_driver"
     type="grabImgWithTrigger"
@@ -6,6 +8,8 @@
     args="$(find mvs_ros_driver)/config/left_camera_trigger.yaml"
     respawn="true"
     output="screen"
+    <env name="LD_LIBRARY_PATH"
+     value="$(arg mvs_library_dir):$(optenv LD_LIBRARY_PATH)"/>
   />
   
  <node 
