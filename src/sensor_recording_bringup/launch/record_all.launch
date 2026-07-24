@@ -5,21 +5,22 @@
   <arg name="enable_camera" default="true"/>
   <arg name="enable_gnss" default="true"/>
   <arg name="enable_gnss_adapter" default="true"/>
-  <arg name="enable_uwb" default="true"/>
+  <arg name="enable_uwb" default="false"/>
   <arg name="mcu_input_mode" default="serial"/>
   <arg name="mcu_port" default="/dev/sensor_mcu"/>
   <arg name="mcu_baud" default="115200"/>
   <arg name="gnss_source" default="serial"/>
-  <arg name="gnss_port" default="/dev/gnss"/>
+  <arg name="gnss_port" default="/dev/ttyUSB0"/>
   <arg name="gnss_baud" default="921600"/>
   <arg name="gnss_replay_file" default=""/>
   <arg name="uwb_source" default="serial"/>
-  <arg name="uwb_port" default="/dev/uwb"/>
+  <arg name="uwb_port" default="/dev/ttyUSB0"/>
   <arg name="uwb_baud" default="115200"/>
   <arg name="uwb_replay_file" default=""/>
   <arg name="record_profile" default="both"/>
   <arg name="output_dir" default="/tmp"/>
   <arg name="bag_prefix" default="sensors"/>
+  <arg name="sim_start_without_gnss_s" default="86400.0"/>
 
   <include file="$(find sensor_recording_bringup)/launch/sensors_only.launch">
     <arg name="enable_time_bridge" value="$(arg enable_time_bridge)"/>
@@ -29,6 +30,8 @@
     <arg name="enable_gnss_adapter" value="$(arg enable_gnss_adapter)"/>
     <arg name="enable_uwb" value="$(arg enable_uwb)"/>
     <arg name="mcu_input_mode" value="$(arg mcu_input_mode)"/>
+    <arg name="sim_start_without_gnss_s"
+         value="$(arg sim_start_without_gnss_s)"/>
     <arg name="mcu_port" value="$(arg mcu_port)"/>
     <arg name="mcu_baud" value="$(arg mcu_baud)"/>
     <arg name="gnss_source" value="$(arg gnss_source)"/>

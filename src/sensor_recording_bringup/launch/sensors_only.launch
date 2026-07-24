@@ -21,15 +21,34 @@
   <arg name="uwb_replay_file" default=""/>
   <arg name="record_profile" default="both"/>
   <arg name="output_dir" default="/tmp"/>
-  <arg name="bag_prefix" default="sensors"/>
+  <arg name="bag_prefix" default="sensors"/> 
+  <arg name="sim_start_without_gnss_s" default="86400.0"/>  
 
   <group if="$(arg enable_time_bridge)">
-    <node pkg="sensor_time_bridge" type="sensor_time_bridge_node"
-          name="sensor_time_bridge" output="screen" required="true">
+    <node pkg="sensor_time_bridge"
+          type="sensor_time_bridge_node"
+          name="sensor_time_bridge"
+          output="screen"
+          required="true">
       <param name="input_mode" value="$(arg mcu_input_mode)"/>
       <param name="serial_port" value="$(arg mcu_port)"/>
       <param name="serial_baud" value="$(arg mcu_baud)"/>
     </node>
+
+    <group if="$(eval arg('mcu_input_mode') == 'simulation')">
+      <node pkg="sensor_time_bridge"
+            type="mcu_event_simulator"
+            name="mcu_event_simulator"
+            output="screen"
+            required="true">
+        <param name="local_tick_hz" value="1000000"/>
+        <param name="clock_error_ppm" value="50.0"/>
+        <param name="camera_rate_hz" value="10.0"/>
+        <param name="local_pps_rate_hz" value="1.0"/>
+        <param name="start_without_gnss_s"
+               value="$(arg sim_start_without_gnss_s)"/>
+      </node>
+    </group>
   </group>
 
   <group if="$(arg enable_livox)">
