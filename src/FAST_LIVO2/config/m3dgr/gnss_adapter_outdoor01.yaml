@@ -1,0 +1,55 @@
+gnss_adapter:
+  enable: true
+
+  input_topic: "/ublox_driver/receiver_pvt"
+  output_odom_topic: "/gnss/enu_odom"
+  output_status_topic: "/gnss/status"
+
+  # Outdoor01的局部ENU原点
+  origin_mode: "manual"
+  origin_lla: [34.027085, 108.7619911, 393.280]
+  origin_average_count: 30
+
+  min_num_sv: 10
+  max_num_sv: 100
+
+  max_pdop: 3.0
+
+  # Outdoor01的receiver_pvt不是HH数据那种厘米级RTK精度
+  max_h_acc_m: 2.0
+  max_v_acc_m: 3.0
+  max_vel_acc_mps: 2.0
+
+  reject_nonpositive_pdop: true
+  reject_nonpositive_vel_acc: true
+
+  # 不要继续使用HH中的3 cm / 5 cm最低标准差
+  min_sigma_xy_m: 0.30
+  min_sigma_z_m: 0.50
+
+  max_sigma_xy_m: 2.0
+  max_sigma_z_m: 3.0
+  min_sigma_vel_mps: 0.10
+
+  fixed_confirm_count: 5
+  fixed_lost_count: 3
+  recovery_confirm_count: 10
+
+  max_time_gap_s: 0.5
+  require_monotonic_time: true
+
+  accept_rtk_fixed: true
+  accept_rtk_float: false
+
+  # Outdoor01开头的PVT为diff_soln=true、carr_soln=0
+  accept_differential: true
+
+  # 先不要无条件接受普通单点解
+  accept_single: false
+
+  frame_id: "map"
+  child_frame_id: "gnss_antenna"
+
+  log_interval_s: 1.0
+
+  antenna_lever_arm_body: [0.0, 0.0, 0.0]

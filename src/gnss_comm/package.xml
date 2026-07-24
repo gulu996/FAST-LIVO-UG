@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>gnss_comm</name>
+  <version>1.0.0</version>
+  <description>Compatibility-only ROS message definitions for GNSS data.</description>
+
+  <maintainer email="shaozu.cao@gmail.com">CAO Shaozu</maintainer>
+  <license>GPL-3.0-or-later</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+  <build_depend>message_generation</build_depend>
+  <build_depend>std_msgs</build_depend>
+  <exec_depend>message_runtime</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+</package>

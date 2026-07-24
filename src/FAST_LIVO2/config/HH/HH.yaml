@@ -1,0 +1,292 @@
+common:
+  img_topic: "/left_camera/image"
+  lid_topic: "/livox/lidar"
+  imu_topic: "/livox/imu"
+  img_en: 1
+  lidar_en: 1
+  ros_driver_bug_fix: false
+  sub_lidar_queue_size: 1000
+  sub_imu_queue_size: 10000
+  sub_img_queue_size: 1000
+  max_lidar_buffer_size: 1000
+  max_imu_buffer_size: 10000
+  max_img_buffer_size: 1000
+  max_prop_imu_buffer_size: 10000
+  sync_img_buffer_min_size: 5
+  sync_img_lookahead_time: 0.12
+
+deterministic_debug:
+  force_single_thread: false
+  visual_update_serial_en: false
+  lio_update_serial_en: false
+  contiguous_image_copy_en: false
+  lio_feature_sort_en: false
+  visual_observed_voxel_sort_en: false
+
+  state_snap_en: false
+  camera_point_snap_en: false
+  pixel_snap_en: false
+
+  imu_accept_out_of_order_en: true
+  imu_buffer_sort_en: true
+  prop_imu_buffer_sort_en: true
+  sync_wait_for_image_lookahead_en: true
+  pending_vio_image_en: true
+  visual_voxel_key_sort_en: true
+  image_buffer_sort_en: true
+
+extrin_calib:
+  extrinsic_T: [0.04165, 0.02326, -0.0284]
+  extrinsic_R: [1, 0, 0, 0, 1, 0, 0, 0, 1]
+  # LidarToCamera 
+  Rcl: [ -0.010986, -0.999937,  0.002338,
+        -0.007770, -0.002253, -0.999967,
+        0.999909, -0.011004, -0.007745]
+  Pcl: [ -0.061281,  0.036577, -0.038252]
+
+ 
+time_offset: 
+  imu_time_offset: 0.0
+  img_time_offset: 0.1
+  exposure_time_init: 0.0
+
+preprocess:
+  point_filter_num: 1
+  filter_size_surf: 0.1
+  lidar_type: 1 # Livox Avia LiDAR
+  scan_line: 6
+  blind: 0.8
+
+voxel_safety:
+  # Livox Avia long-range returns are valid up to this dataset-specific safety limit.
+  lidar_max_range_m: 450.0
+  
+vio:
+  max_iterations: 5 # 提高视觉EKF迭代次数，优先把可用帧跑起来
+  outlier_threshold: 1000 # 78 100 156 #100 200 500 700 infinite
+  visual_map_prune_en: false
+  visual_map_max_voxels: 1800 # 视觉体素硬上限；到上限后淘汰最早的非当前子图体素
+  visual_map_max_points_per_voxel: 10 # 每个视觉体素最多保留点数；满后用新点替换更早的点
+  visual_map_max_total_points: 20000 # 视觉点总量硬上限；满后按frame id淘汰最早的点
+  visual_map_max_add_per_frame: 300 # 控制单帧新增点数量，适合Jetson长时间运行
+  visual_map_min_shi_tomasi_score: 8.0 # 提高角点质量阈值，低质量纹理不轻易加入视觉地图
+  min_retrieve_points: 30 # 至少跟踪到足够视觉点才进入视觉EKF，坏图/低纹理帧尽量跳过
+  min_update_meas: 500 # 提高视觉残差数量门限，观测太少时只检索/建图，不更新状态
+  low_track_force_update_stride: 0 # 关闭低跟踪强制VIO，避免坏图像靠少量点硬更新
+  low_track_force_min_points: 12 # 备用参数；low_track_force_update_stride=0时不生效
+  visual_update_guard_en: true # 视觉EKF总修正门限，超过则回滚到LIO/IMU预测，防止出口过曝导致突然倒退
+  visual_update_max_trans_m: 0.12 # 收紧单帧视觉总平移修正上限，坏图导致的大跳变会回滚
+  visual_update_max_rot_deg: 2.0 # 收紧单帧视觉总旋转修正上限
+  visual_update_max_backward_m: 0.01 # 视觉更新后的最终位姿相对上一帧允许的反向步长硬上限，不限制VIO正常回拉LIO超前
+  visual_update_max_backward_ratio: 0.08 # 最终位姿反向步长不能超过当前帧预测前进距离的比例
+  visual_update_backward_abs_floor_m: 0.003 # 最终位姿反向步长动态阈值下限，避免低速时过度敏感
+  visual_update_max_lateral_m: 0.08 # 垂直于速度方向的视觉修正硬上限
+  visual_update_max_lateral_ratio: 0.35 # 横向修正不能超过当前帧预测前进距离的比例
+  visual_update_max_exposure_delta: 0.30 # 曝光估计突变较大时回滚视觉更新
+  image_quality_gate_en: true # 打开整帧质量门，过曝/过暗/低对比图像直接跳过VIO更新
+  image_quality_max_saturated_fraction: 0.10 # 全图过曝比例超过该值时跳过VIO
+  image_quality_max_tile_saturated_fraction: 0.25 # 局部区域过曝严重时跳过VIO，适合隧道出口强光
+  image_quality_max_dark_fraction: 0.95 # 灰度<=阈值的像素比例超过该值认为画面近乎全黑
+  image_quality_min_intensity_std: 10.0 # 灰度标准差低于该值认为低纹理/低对比
+  visual_patch_quality_gate_en: true # 对单个视觉patch做过曝/低纹理过滤，处理出口刚出现时面积小、全图门限尚未触发的纯白区域
+  visual_patch_max_saturated_fraction: 0.10 # patch内过曝过多时不参与跟踪/建图
+  visual_patch_min_intensity_std: 4.0 # patch灰度标准差过低时不参与跟踪/建图
+  image_quality_saturated_pixel_value: 245 # 更早识别接近过曝的像素
+  image_quality_dark_pixel_value: 8
+  image_quality_tile_rows: 6 # 更细的分块，更容易发现局部强光坏区
+  image_quality_tile_cols: 6
+  patch_size: 8
+  patch_pyrimid_level: 4
+  normal_en: true
+  raycast_en: false
+  inverse_composition_en: false
+  exposure_estimate_en: true
+  inv_expo_cov: 0.1
+
+imu:
+  imu_en: true
+  imu_int_frame: 30
+  acc_cov: 0.05
+  gyr_cov: 0.03
+  b_acc_cov: 0.0001
+  b_gyr_cov: 0.0001
+
+uwb:
+  enable: false
+  update_en: false
+
+lio:
+  max_iterations: 3
+  map_update_stride: 2 # 仅每2帧更新一次地图体素，优先实时定位（可降建图细节）
+  icp_min_iterations: 1 # ICP最小迭代次数：至少做1次
+  icp_early_stop_residual_ratio: 0.03 # 残差相对改善低于该阈值且已收敛时提前停止
+  icp_max_rot_step_deg: 1.2 # ICP单次旋转更新上限（度），抑制异常匹配导致姿态突跳
+  icp_max_trans_step_m: 0.20 # ICP单次平移更新上限（米），抑制”轨迹上天”
+  dept_err: 0.02
+  beam_err: 0.15
+  min_eigen_value: 0.005 # 0.005
+  voxel_size: 0.8
+  max_layer: 2
+  max_points_num: 50
+  layer_init_num: [5, 5, 5, 5, 5]
+
+local_map:  
+  map_sliding_en: true
+  half_map_size: 100
+  sliding_thresh: 4
+  long_term_visual_map_en: false # 关闭长期视觉地图，降低长期运行计算开销
+  long_term_visual_max_voxels: 5000 # 长期视觉地图最大体素数，超过后会逐步裁剪以限制内存
+
+adaptive_selector:
+  en: false # 离线诊断时先处理每一帧图像，避免视觉地图断点；实时跑不动时再改true
+  trans_thresh_min: 0.03
+  trans_thresh_max: 0.08
+  rot_thresh_min_deg: 0.4
+  rot_thresh_max_deg: 1.0
+  constraint_ratio_full: 0.2
+  max_skip_frames: 1
+
+runtime_guard:
+  enable: false # 运行时超时保护开关：true时自动在超预算时降级并在稳定后恢复
+  frame_time_budget_s: 0.06 # 预算每帧处理时间不超过多少ms
+
+uav:
+  imu_rate_odom: false
+  gravity_align_en: true
+
+gps:
+  # Set true only after confirming the real GNSS serial device and protocol below.
+  enable: false
+  update_en: false
+
+  source: "serial"
+  # TODO(confirm): actual GNSS serial port on the target computer.
+  serial_port: "/dev/ttyUSB0"
+  # TODO(confirm): actual baudrate. 921600 is only the current candidate.
+  baudrate: 921600
+  dtr: true
+  rts: false
+
+  parser_mode: "auto"
+  primary_position_message: "KSXT"
+  fallback_position_message: "GGA"
+  time_offset_s: 0.0
+  # TODO(confirm): actual GNSS output rate; tune match_threshold_s/stale_timeout_s after measuring it.
+  match_threshold_s: 0.10
+  stale_timeout_s: 0.50
+
+  startup_convergence_s: 30.0
+  fixed_confirm_count: 10
+  reacquire_confirm_count: 5
+
+  # TODO(confirm): quality/state values are message-specific; do not mix KSXT Float=2 with GGA/AGRICA Float=5.
+  ksxt:
+    invalid_quality_values: [0]
+    single_quality_values: [1]
+    float_quality_values: [2]
+    fixed_quality_values: [4]
+
+  gga:
+    invalid_quality_values: [0]
+    single_quality_values: [1]
+    differential_quality_values: [2]
+    fixed_quality_values: [4]
+    float_quality_values: [5]
+
+  agrica:
+    invalid_position_types: [0]
+    single_position_types: [1]
+    differential_position_types: [2]
+    fixed_position_types: [4]
+    float_position_types: [5]
+    manual_fixed_position_types: [7]
+    crc_check_en: false
+
+  fixed_only: true
+
+  origin_mode: "first_fixed"
+  origin_latitude_deg: 0.0
+  origin_longitude_deg: 0.0
+  origin_altitude_m: 0.0
+
+  # TODO(confirm): whether alt is ellipsoid height or orthometric height.
+  altitude_type: "ellipsoid"
+  geoid_separation_m: 0.0
+
+  frame_align_en: true
+  frame_align_mode: "trajectory_2d"
+  frame_align_min_samples: 20
+  frame_align_min_motion_m: 10.0
+  frame_align_max_rms_m: 0.50
+  frame_align_max_error_m: 1.50
+  frame_align_freeze_after_success: true
+
+  frame_align_yaw_deg: 0.0
+  frame_align_translation: [0.0, 0.0, 0.0]
+
+  update_xy_only: true
+  update_z: false
+  update_orientation: false
+
+  sigma_xy_fixed_m: 0.10
+  sigma_z_fixed_m: 0.30
+  position_cov_floor_m: 0.20
+
+  chi2_gate_2d: 9.21
+  max_residual_m: 3.0
+  max_update_step_m: 0.20
+
+  # TODO(confirm): GNSS antenna lever arm in FAST-LIVO body frame, meters.
+  lever_arm_body_to_gnss: [0.0, 0.0, 0.0]
+
+  pause_map_update_frames: 3
+  pause_map_update_min_correction_m: 0.05
+
+  raw_log_filename: "gnss_raw.txt"
+  parsed_log_filename: "gnss_parsed.txt"
+  update_log_filename: "gnss_updates.txt"
+  log_flush_stride: 1
+
+publish:
+  dense_map_en: true
+  pub_effect_point_en: true  # 已启用特征点可视化
+  pub_plane_en: false
+  pub_scan_num: 1
+  publish_img_stride: 1 # 图像可视化降频
+  blind_rgb_points: 0.0
+
+debug:
+  print_console_timing_en: false # 终端耗时表输出
+  print_console_timing_stride: 1
+  vio_console_timing_print_en: false
+  vio_console_timing_print_stride: 1
+
+evo:
+  seq_name: "CBD_Building_01"
+  pose_output_en: false
+
+pos_output:
+  enable_timestamp: true
+  format: "timestamp_xyz_quat"
+
+pcd_save:
+  pcd_save_en: false
+  save_log_en: true # 日志写盘
+  save_path: "/home/gulu/data"
+  global_map_pub: false   #need to set pcd_save_en true, x86上请设为false
+  colmap_output_en: false # need to set interval = -1
+  filter_size_pcd: 0.05
+  max_cache_points: 40000 # 缓存点云硬上限（RGB或强度）
+  interval: 10
+  # how many LiDAR frames saved in each pcd file;
+  # -1 : all frames will be saved in ONE pcd file, may lead to memory crash when having too much frames.
+
+udp_report:
+  en: true
+  device_id: "fast_livo2_001"
+  target_ip: "127.0.0.1"
+  target_port: 9000
+
+aruco_landmarks:
+  aruco_landmarks_en: false
+ 
