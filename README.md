@@ -1,3 +1,5 @@
+#编译仓库
+
 cd ~
 git clone https://github.com/borglab/gtsam.git
 cd gtsam
@@ -21,3 +23,37 @@ sudo ldconfig
 
 cd ~/catkin_ws/src/livox_ros_driver2
 ./build.sh -j2
+
+#采集数据
+
+仅uwb
+roslaunch sensor_recording_bringup record_all.launch \
+  enable_time_bridge:=true \
+  enable_livox:=true \
+  enable_camera:=true \
+  enable_gnss:=false \
+  enable_gnss_adapter:=false \
+  enable_uwb:=true \
+  uwb_port:=/dev/ttyUSB1 \
+  uwb_dtr:=true \
+  uwb_rts:=false \
+  mcu_input_mode:=simulation \
+  sim_start_without_gnss_s:=86400 \
+  output_dir:=/home/jetson/bags \
+  bag_prefix:=livo_camera_uwb \
+  record_profile:=both
+
+仅gnss
+roslaunch sensor_recording_bringup record_all.launch \
+  enable_time_bridge:=true \
+  enable_livox:=true \
+  enable_camera:=true \
+  enable_gnss:=true \
+  enable_gnss_adapter:=true \
+  enable_uwb:=false \
+  gnss_port:=/dev/ttyUSB0 \
+  mcu_input_mode:=simulation \
+  sim_start_without_gnss_s:=86400 \
+  output_dir:=/home/jetson/bags \
+  bag_prefix:=livo_camera_gnss \
+  record_profile:=both
