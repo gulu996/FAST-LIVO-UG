@@ -1,4 +1,4 @@
-#编译仓库
+##编译仓库
 
 cd ~
 git clone https://github.com/borglab/gtsam.git
@@ -24,9 +24,10 @@ sudo ldconfig
 cd ~/catkin_ws/src/livox_ros_driver2
 ./build.sh -j2
 
-#采集数据
+##采集数据
 
 仅uwb
+
 roslaunch sensor_recording_bringup record_all.launch \
   enable_time_bridge:=true \
   enable_livox:=true \
@@ -44,6 +45,7 @@ roslaunch sensor_recording_bringup record_all.launch \
   record_profile:=both
 
 仅gnss
+
 roslaunch sensor_recording_bringup record_all.launch \
   enable_time_bridge:=true \
   enable_livox:=true \
