@@ -28,6 +28,7 @@ cd ~/catkin_ws/src/livox_ros_driver2
 
 仅uwb
 
+'''
 roslaunch sensor_recording_bringup record_all.launch \
   enable_time_bridge:=true \
   enable_livox:=true \
@@ -43,9 +44,11 @@ roslaunch sensor_recording_bringup record_all.launch \
   output_dir:=/home/jetson/bags \
   bag_prefix:=livo_camera_uwb \
   record_profile:=both
+'''
 
 仅gnss
 
+'''
 roslaunch sensor_recording_bringup record_all.launch \
   enable_time_bridge:=true \
   enable_livox:=true \
@@ -59,3 +62,4 @@ roslaunch sensor_recording_bringup record_all.launch \
   output_dir:=/home/jetson/bags \
   bag_prefix:=livo_camera_gnss \
   record_profile:=both
+'''
