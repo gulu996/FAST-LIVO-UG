@@ -7,6 +7,10 @@
   <arg name="replay_file" default=""/>
   <arg name="replay_mode" default="preserve"/>
   <arg name="replay_loop" default="false"/>
+  <arg name="replay_rate_hz" default="10.0"/>
+  <arg name="parser_mode" default="distance_round5"/>
+  <arg name="distance_lines_per_round" default="5"/>
+  <arg name="round_timeout_s" default="2.0"/>
   <arg name="config_file" default="$(find uwb_serial_driver)/config/default.yaml"/>
   <rosparam command="load" file="$(arg config_file)" ns="uwb_serial_driver"/>
   <node pkg="uwb_serial_driver" type="uwb_serial_node.py"
@@ -19,5 +23,10 @@
     <param name="replay_file" value="$(arg replay_file)"/>
     <param name="replay_mode" value="$(arg replay_mode)"/>
     <param name="replay_loop" value="$(arg replay_loop)"/>
+    <param name="replay_rate_hz" value="$(arg replay_rate_hz)"/>
+    <param name="parser_mode" value="$(arg parser_mode)"/>
+    <param name="distance_lines_per_round"
+           value="$(arg distance_lines_per_round)"/>
+    <param name="round_timeout_s" value="$(arg round_timeout_s)"/>
   </node>
 </launch>

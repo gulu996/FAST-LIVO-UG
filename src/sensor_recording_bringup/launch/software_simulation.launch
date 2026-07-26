@@ -36,6 +36,7 @@
   <include file="$(find gnss_serial_driver)/launch/gnss_adapter.launch"/>
   <include file="$(find uwb_serial_driver)/launch/uwb_serial.launch">
     <arg name="source" value="file"/>
+    <arg name="parser_mode" value="pairs"/>
     <arg name="replay_file"
          value="$(find sensor_recording_bringup)/data/uwb_replay.txt"/>
     <arg name="replay_mode" value="rebase"/>

@@ -21,6 +21,9 @@
   <arg name="uwb_dtr" default="true"/>
   <arg name="uwb_rts" default="false"/>
   <arg name="uwb_replay_file" default=""/>
+  <arg name="uwb_parser_mode" default="distance_round5"/>
+  <arg name="uwb_distance_lines_per_round" default="5"/>
+  <arg name="uwb_round_timeout_s" default="2.0"/>
   <arg name="record_profile" default="both"/>
   <arg name="output_dir" default="/tmp"/>
   <arg name="bag_prefix" default="sensors"/> 
@@ -92,6 +95,10 @@
       <arg name="dtr" value="$(arg uwb_dtr)"/>
       <arg name="rts" value="$(arg uwb_rts)"/>
       <arg name="replay_file" value="$(arg uwb_replay_file)"/>
+      <arg name="parser_mode" value="$(arg uwb_parser_mode)"/>
+      <arg name="distance_lines_per_round"
+           value="$(arg uwb_distance_lines_per_round)"/>
+      <arg name="round_timeout_s" value="$(arg uwb_round_timeout_s)"/>
     </include>
   </group>
 </launch>

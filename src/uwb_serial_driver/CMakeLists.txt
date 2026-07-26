@@ -25,5 +25,8 @@ install(DIRECTORY launch config
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION})
 
 if(CATKIN_ENABLE_TESTING)
-  catkin_add_nosetests(test)
+  find_package(rostest REQUIRED)
+  catkin_add_nosetests(test/test_exclusive_serial.py)
+  catkin_add_nosetests(test/test_parser.py)
+  add_rostest(test/distance_round5_integration.test)
 endif()

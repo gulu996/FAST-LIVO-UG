@@ -9,7 +9,11 @@ from sensor_time_msgs.msg import RawSerialFrame
 from sensor_time_msgs.srv import HostMonotonicToLocal
 from uwb_serial_driver.exclusive_serial import DEFAULT_DTR, DEFAULT_RTS, open_locked
 from uwb_serial_driver.msg import UwbRange, UwbRangeArray, UwbStatus
-from uwb_serial_driver.parser import RangeFilter, UwbParser
+from uwb_serial_driver.parser import (
+    DistanceRoundAssembler,
+    RangeFilter,
+    UwbParser,
+)
 
 
 class UwbSerialNode:
@@ -22,6 +26,9 @@ class UwbSerialNode:
         self.replay_file = rospy.get_param("~replay_file", "")
         self.replay_mode = rospy.get_param("~replay_mode", "preserve")
         self.replay_rate_hz = float(rospy.get_param("~replay_rate_hz", 10.0))
+        self.replay_start_delay_s = max(
+            0.0, float(rospy.get_param("~replay_start_delay_s", 0.0))
+        )
         self.replay_loop = bool(rospy.get_param("~replay_loop", False))
         self.replay_session_id = int(rospy.get_param("~replay_session_id", 1))
         self.replay_uncertainty_ns = int(
@@ -30,14 +37,28 @@ class UwbSerialNode:
         self.tag_id = int(rospy.get_param("~tag_id", 0))
         bias_param = rospy.get_param("~range_bias_m", {})
         biases = {int(key): float(value) for key, value in bias_param.items()}
+        self.parser_mode = rospy.get_param(
+            "~parser_mode", "distance_round5"
+        )
         self.parser = UwbParser(
-            parser_mode=rospy.get_param("~parser_mode", "auto"),
+            parser_mode=self.parser_mode,
             anchor_order=rospy.get_param("~anchor_order", []),
             range_scale=float(rospy.get_param("~range_scale", 1.0)),
             range_bias=biases,
             min_range_m=float(rospy.get_param("~min_range_m", 0.05)),
             max_range_m=float(rospy.get_param("~max_range_m", 250.0)),
         )
+        self.round_assembler = None
+        if self.parser_mode == "distance_round5":
+            self.round_assembler = DistanceRoundAssembler(
+                self.parser,
+                lines_per_round=int(
+                    rospy.get_param("~distance_lines_per_round", 5)
+                ),
+                round_timeout_s=float(
+                    rospy.get_param("~round_timeout_s", 2.0)
+                ),
+            )
         self.filter = RangeFilter(
             epsilon_m=float(rospy.get_param("~repeat_epsilon_m", 0.001)),
             max_count=int(rospy.get_param("~repeat_max_count", 3)),
@@ -57,6 +78,7 @@ class UwbSerialNode:
         self.parse_error_count = 0
         self.range_reject_count = 0
         self.reconnect_count = 0
+        self.last_raw = None
 
         self.raw_pub = rospy.Publisher("/uwb/raw", RawSerialFrame, queue_size=100)
         self.range_pub = rospy.Publisher("/uwb/ranges", UwbRangeArray, queue_size=50)
@@ -111,6 +133,8 @@ class UwbSerialNode:
         except OSError as error:
             rospy.logerr("Cannot open UWB replay %s: %s", self.replay_file, error)
             return
+        if self.stop_event.wait(self.replay_start_delay_s):
+            return
         delay = 1.0 / max(0.1, self.replay_rate_hz)
         while not self.stop_event.is_set() and not rospy.is_shutdown():
             for record in lines:
@@ -127,6 +151,13 @@ class UwbSerialNode:
                 self._handle_line(line.strip(), True, preserved_ns)
                 self.stop_event.wait(delay)
             if not self.replay_loop:
+                if (
+                    self.round_assembler is not None
+                    and self.round_assembler.state
+                    == DistanceRoundAssembler.WAIT_DISTANCE_LINES
+                ):
+                    self.stop_event.wait(self.round_assembler.round_timeout_s)
+                    self._expire_protocol_round()
                 break
 
     def _run_serial(self):
@@ -150,6 +181,7 @@ class UwbSerialNode:
                     except BlockingIOError:
                         chunk = b""
                     if not chunk:
+                        self._expire_protocol_round()
                         self.stop_event.wait(0.005)
                         continue
                     for byte in chunk:
@@ -208,29 +240,87 @@ class UwbSerialNode:
         raw.protocol = "UWB_TEXT"
         raw.data = list(line.encode("utf-8", errors="replace"))
         self.raw_pub.publish(raw)
+        self.last_raw = raw
         if self.raw_log:
             self.raw_log.write("{} {}\n".format(host_monotonic_ns, line))
+
+        if self.round_assembler is not None:
+            self._handle_distance_round5(line, raw)
+            return
 
         parsed = self.parser.parse(line)
         if not parsed:
             self.parse_error_count += 1
             self._publish_status(raw, "no valid range record")
             return
-        # ponytail: one input line is one round; independent lines are never time-window merged.
-        filtered = self.filter.filter(parsed, local_ns / 1e9 if local_ns else time.monotonic())
+        self._publish_ranges(parsed, raw, raw)
+
+    def _handle_distance_round5(self, line, raw):
+        duplicate_before = self.round_assembler.duplicate_anchor_count
+        event = self.round_assembler.process(
+            line, context=raw, now_s=time.monotonic()
+        )
+        if event.incomplete_round:
+            rospy.logwarn_throttle(
+                5.0,
+                "[UWB_PROTO] incomplete distance round discarded; "
+                "waiting for current UWBDBG boundary",
+            )
+        if (
+            self.round_assembler.duplicate_anchor_count
+            > duplicate_before
+        ):
+            rospy.logwarn_throttle(
+                5.0,
+                "[UWB_PROTO] duplicate nonzero anchor discarded in round",
+            )
+
+        if event.parse_error:
+            self.parse_error_count += 1
+            label = (
+                "malformed distance"
+                if event.kind == DistanceRoundAssembler.MALFORMED_DISTANCE
+                else "unknown protocol"
+            )
+            rospy.logwarn_throttle(
+                5.0, "[UWB_PROTO] %s line: %.160s", label, line
+            )
+            self._publish_status(raw, label)
+        elif event.kind == DistanceRoundAssembler.EMPTY_ROUND:
+            rospy.logwarn_throttle(
+                5.0, "[UWB_PROTO] complete round contains no nonzero range"
+            )
+            self._publish_status(raw, "empty distance round")
+        elif event.kind == DistanceRoundAssembler.ROUND_COMPLETE:
+            self._publish_ranges(event.ranges, event.timestamp_context, raw)
+        elif event.incomplete_round:
+            self._publish_status(raw, "incomplete distance round discarded")
+        self._log_protocol_summary()
+
+    def _publish_ranges(self, parsed, timestamp_raw, status_raw):
+        stamp_ns = timestamp_raw.header.stamp.to_nsec()
+        filtered = self.filter.filter(
+            parsed, stamp_ns / 1e9 if stamp_ns else time.monotonic()
+        )
         if not filtered:
-            self._publish_status(raw, "round dropped by repeated-range filter")
-            return
+            self._publish_status(
+                status_raw, "round dropped by repeated-range filter"
+            )
+            return False
         self.round_sequence += 1
         array = UwbRangeArray()
-        array.header = raw.header
-        array.session_id = session_id
+        array.header = timestamp_raw.header
+        array.session_id = timestamp_raw.session_id
         array.round_sequence = self.round_sequence
         array.tag_id = self.tag_id
-        array.timestamp_source = timestamp_source
-        array.timestamp_uncertainty_ns = max(1, uncertainty)
-        array.host_receive_stamp = host_wall
-        array.host_receive_monotonic_ns = host_monotonic_ns
+        array.timestamp_source = timestamp_raw.timestamp_source
+        array.timestamp_uncertainty_ns = max(
+            1, timestamp_raw.time_uncertainty_ns
+        )
+        array.host_receive_stamp = timestamp_raw.host_receive_stamp
+        array.host_receive_monotonic_ns = (
+            timestamp_raw.host_receive_monotonic_ns
+        )
         for value in filtered:
             message = UwbRange()
             message.anchor_id = value.anchor_id
@@ -249,12 +339,67 @@ class UwbSerialNode:
         if self.parsed_log:
             self.parsed_log.write(
                 "{} round={} ranges={}\n".format(
-                    local_ns, self.round_sequence,
+                    stamp_ns, self.round_sequence,
                     ",".join("{}:{:.4f}".format(v.anchor_id, v.corrected_range_m)
                              for v in filtered)
                 )
             )
-        self._publish_status(raw, "round published")
+        self._publish_status(status_raw, "round published")
+        return True
+
+    def _expire_protocol_round(self):
+        if self.round_assembler is None:
+            return
+        if self.round_assembler.expire(time.monotonic()):
+            rospy.logwarn_throttle(
+                5.0,
+                "[UWB_PROTO] distance round timed out before all lines arrived",
+            )
+            if self.last_raw is not None:
+                self._publish_status(
+                    self.last_raw, "incomplete distance round timed out"
+                )
+            self._log_protocol_summary()
+
+    def _protocol_detail(self):
+        if self.round_assembler is None:
+            return "mode={}".format(self.parser_mode)
+        protocol = self.round_assembler
+        return (
+            "mode=distance_round5 state={} pending={} complete={} "
+            "empty={} zero={} incomplete={} malformed={} ignored_debug={} "
+            "duplicate={}"
+        ).format(
+            protocol.state,
+            protocol.pending_distance_line_count,
+            protocol.complete_round_count,
+            protocol.empty_round_count,
+            protocol.zero_slot_count,
+            protocol.incomplete_round_count,
+            protocol.malformed_distance_count,
+            protocol.ignored_debug_line_count,
+            protocol.duplicate_anchor_count,
+        )
+
+    def _log_protocol_summary(self):
+        if self.round_assembler is None:
+            return
+        protocol = self.round_assembler
+        rospy.loginfo_throttle(
+            20.0,
+            "[UWB_PROTO] raw=%d complete=%d published=%d empty=%d "
+            "zero_slots=%d incomplete=%d malformed=%d ignored_debug=%d "
+            "duplicate_anchor=%d",
+            self.raw_line_count,
+            protocol.complete_round_count,
+            self.parsed_round_count,
+            protocol.empty_round_count,
+            protocol.zero_slot_count,
+            protocol.incomplete_round_count,
+            protocol.malformed_distance_count,
+            protocol.ignored_debug_line_count,
+            protocol.duplicate_anchor_count,
+        )
 
     def _publish_status(self, raw, detail):
         status = UwbStatus()
@@ -270,7 +415,7 @@ class UwbSerialNode:
         status.repeat_drop_count = self.filter.drop_count
         status.reconnect_count = self.reconnect_count
         status.source = self.source
-        status.detail = detail
+        status.detail = "{}; {}".format(detail, self._protocol_detail())
         self.status_pub.publish(status)
 
 

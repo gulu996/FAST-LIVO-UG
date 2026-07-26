@@ -1,7 +1,9 @@
 source: serial
 port: /dev/uwb
 baud: 115200
-parser_mode: auto
+parser_mode: distance_round5
+distance_lines_per_round: 5
+round_timeout_s: 2.0
 anchor_order: [0, 1]
 range_scale: 1.0
 range_bias_m: {}

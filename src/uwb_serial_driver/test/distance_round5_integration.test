@@ -1,0 +1,27 @@
+<launch>
+  <rosparam command="load"
+            file="$(find uwb_serial_driver)/config/default.yaml"
+            ns="uwb_serial_driver"/>
+
+  <node pkg="uwb_serial_driver"
+        type="uwb_serial_node.py"
+        name="uwb_serial_driver"
+        output="screen"
+        required="true">
+    <param name="source" value="file"/>
+    <param name="replay_file"
+           value="$(find uwb_serial_driver)/test/data/distance_round5_sample.txt"/>
+    <param name="replay_mode" value="rebase"/>
+    <param name="replay_rate_hz" value="200.0"/>
+    <param name="replay_start_delay_s" value="1.0"/>
+    <param name="replay_loop" value="false"/>
+    <param name="parser_mode" value="distance_round5"/>
+    <param name="distance_lines_per_round" value="5"/>
+    <param name="round_timeout_s" value="2.0"/>
+  </node>
+
+  <test test-name="distance_round5_file_replay"
+        pkg="uwb_serial_driver"
+        type="distance_round5_integration_test.py"
+        time-limit="20"/>
+</launch>

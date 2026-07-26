@@ -1,0 +1,49 @@
+[UWBDBG] print=16 diag=8 self=1 role=1 target=1 ok=1 dist=1.405 status=INI_RESULT
+[TWR] Ra=191712001 Rb=281165994 Da=281167103 Db=191710237 num=283370160583 den=945755335
+distance[0], 0.000, [ABORT][RES] poll wait deadline
+distance[1], 1.405,
+distance[0], 0.000, [ABORT] ini: budget reached during Response wait
+distance[0], 0.000, [ABORT] ini: budget reached during Response wait
+distance[0], 0.000,
+[UWBDBG] print=17 diag=9 self=1 role=1 target=1 ok=1 dist=1.362 status=INI_RESULT
+[TWR] Ra=191712073 Rb=281166396 Da=281167543 Db=191710314 num=274679960406 den=945756326
+distance[0], 0.000, [ABORT][RES] poll wait deadline
+distance[1], 1.362,
+distance[0], 0.000, [ABORT] ini: budget reached during Response wait
+distance[0], 0.000, [ABORT] ini: budget reached during Response wait
+distance[0], 0.000,
+[UWBDBG] print=18 diag=10 self=1 role=1 target=1 ok=1 dist=1.391 status=INI_RESULT
+[TWR] Ra=191712018 Rb=281165946 Da=281167086 Db=191710243 num=280519877130 den=945755293
+distance[0], 0.000, [ABORT][RES] poll wait deadline
+distance[1], 1.391,
+distance[0], 0.000, [ABORT] ini: budget reached during Response wait
+distance[0], 0.000,
+distance[0], 0.000,
+[UWBDBG] print=19 diag=11 self=1 role=1 target=1 ok=1 dist=1.374 status=INI_RESULT
+[TWR] Ra=191711920 Rb=281166039 Da=281167184 Db=191710154 num=277031098544 den=945755297
+distance[0], 0.000, [ABORT][RES] poll wait deadline
+distance[1], 1.374,
+distance[0], 0.000, [ABORT] ini: budget reached during Response wait
+distance[0], 0.000, [ABORT] ini: budget reached during Response wait
+distance[0], 0.000,
+[UWBDBG] print=20 diag=11 self=1 role=1 target=1 ok=1 dist=1.374 status=INI_RESULT
+[TWR] Ra=191711920 Rb=281166039 Da=281167184 Db=191710154 num=277031098544 den=945755297
+distance[0], 0.000,
+distance[1], 0.000,
+distance[0], 0.000,
+distance[0], 0.000,
+distance[0], 0.000,
+[UWBDBG] print=21 diag=12 self=1 role=1 target=1 ok=1 dist=1.308 status=INI_RESULT
+[TWR] Ra=191712053 Rb=281166397 Da=281167563 Db=191710320 num=263727132881 den=945756333
+distance[0], 0.000, [ABORT][RES] poll wait deadline
+distance[1], 1.308,
+distance[0], 0.000, [ABORT] ini: budget reached during Response wait
+distance[0], 0.000, [ABORT] ini: budget reached during Response wait
+distance[0], 0.000,
+[UWBDBG] print=22 diag=13 self=1 role=1 target=1 ok=1 dist=1.342 status=INI_RESULT
+[TWR] Ra=191711960 Rb=281165989 Da=281167144 Db=191710210 num=270615188200 den=945755303
+distance[0], 0.000,
+distance[1], 1.342,
+distance[0], 0.000, [ABORT] ini: budget reached during Response wait
+distance[0], 0.000, [ABORT] ini: budget reached during Response wait
+distance[0], 0.000,
