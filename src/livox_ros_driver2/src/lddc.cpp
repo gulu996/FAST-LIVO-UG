@@ -25,10 +25,12 @@
 #include "lddc.h"
 #include "comm/ldq.h"
 #include "comm/comm.h"
+#include "livox_ros_driver2/timeshare_path.h"
 
 #include <inttypes.h>
 #include <algorithm>
 #include <errno.h>
+#include <exception>
 #include <iostream>
 #include <iomanip>
 #include <math.h>
@@ -191,9 +193,28 @@ uint64_t MakeWriterEpoch() {
     cur_node_ = node;
 #ifdef BUILDING_ROS1
     ros::NodeHandle private_node("~");
-    private_node.param<std::string>("shared_timestamp_path",
-                                    shared_timestamp_path_,
-                                    "/home/gulu/timeshare");
+    std::string configured_timeshare_path;
+    private_node.param<std::string>(
+        "timeshare_path", configured_timeshare_path, "");
+    try
+    {
+      timeshare_path_ =
+          ResolveTimesharePath(configured_timeshare_path);
+    }
+    catch (const std::exception& error)
+    {
+      DRIVER_FATAL(*cur_node_, "Cannot resolve timeshare path: %s",
+                   error.what());
+      throw;
+    }
+    DRIVER_INFO(*cur_node_, "[TIMESHARE] role=writer path=%s",
+                timeshare_path_.c_str());
+    if (timeshare_path_.compare(0, 6, "/root/") == 0)
+    {
+      DRIVER_WARN(*cur_node_,
+                  "[TIMESHARE] writer resolved under /root; "
+                  "do not run sensor nodes with sudo.");
+    }
     private_node.param("shared_timestamp_open_retry_sec",
                        shared_open_retry_sec_, 1.0);
     private_node.param("timestamp_diagnostic_period_sec",
@@ -235,8 +256,7 @@ uint64_t MakeWriterEpoch() {
     InitializeSharedTimestampState();
     DRIVER_WARN(*cur_node_,
                 "Shared timestamp interface is LIDAR_BASE_TIME_LEGACY; "
-                "it is not a camera trigger association. path=%s",
-                shared_timestamp_path_.c_str());
+                "it is not a camera trigger association.");
 #endif
   }
 
@@ -250,24 +270,24 @@ uint64_t MakeWriterEpoch() {
       return true;
     }
     last_shared_open_attempt_ns_ = MonotonicNowNs();
-    if (shared_timestamp_path_.empty())
+    if (timeshare_path_.empty())
     {
       DRIVER_ERROR(*cur_node_, "Shared timestamp path is empty.");
       return false;
     }
 
-    const int fd = open(shared_timestamp_path_.c_str(),
+    const int fd = open(timeshare_path_.c_str(),
                         O_CREAT | O_RDWR, 0666);
     if (fd < 0)
     {
       DRIVER_ERROR(*cur_node_, "Cannot open shared timestamp file %s: %s",
-                   shared_timestamp_path_.c_str(), strerror(errno));
+                   timeshare_path_.c_str(), strerror(errno));
       return false;
     }
     if (ftruncate(fd, sizeof(SharedTimestampState)) != 0)
     {
       DRIVER_ERROR(*cur_node_, "Cannot resize shared timestamp file %s: %s",
-                   shared_timestamp_path_.c_str(), strerror(errno));
+                   timeshare_path_.c_str(), strerror(errno));
       close(fd);
       return false;
     }
@@ -283,7 +303,7 @@ uint64_t MakeWriterEpoch() {
     if (mapping == MAP_FAILED)
     {
       DRIVER_ERROR(*cur_node_, "Cannot mmap shared timestamp file %s: %s",
-                   shared_timestamp_path_.c_str(), strerror(mmap_errno));
+                   timeshare_path_.c_str(), strerror(mmap_errno));
       return false;
     }
 
@@ -296,9 +316,8 @@ uint64_t MakeWriterEpoch() {
     WriteSharedTimestampState(shared_state_, writer_epoch_, 0,
                               kClockSourceUnknown, false,
                               MonotonicNowNs());
-    DRIVER_INFO(*cur_node_,
-                "Shared timestamp writer initialized: path=%s epoch=%" PRIu64,
-                shared_timestamp_path_.c_str(), writer_epoch_);
+    DRIVER_INFO(*cur_node_, "Shared timestamp writer initialized: epoch=%" PRIu64,
+                writer_epoch_);
     return true;
 #endif
   }

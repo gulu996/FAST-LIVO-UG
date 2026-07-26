@@ -177,7 +177,7 @@ class Lddc final {
 
   livox_ros::DriverNode *cur_node_;
   SharedTimestampState* shared_state_ = nullptr;
-  std::string shared_timestamp_path_ = "/home/gulu/timeshare";
+  std::string timeshare_path_;
   uint64_t writer_epoch_ = 0;
   uint64_t last_shared_open_attempt_ns_ = 0;
   uint8_t shared_lidar_index_ = 0;

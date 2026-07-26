@@ -26,6 +26,7 @@
   <arg name="bag_prefix" default="sensors"/> 
   <arg name="sim_start_without_gnss_s" default="86400.0"/>  
   <arg name="mvs_library_dir" default="/opt/MVS/lib/aarch64"/>
+  <arg name="timeshare_path" default="$(env HOME)/timeshare"/>
 
   <group if="$(arg enable_time_bridge)">
     <node pkg="sensor_time_bridge"
@@ -58,16 +59,16 @@
     <include file="$(find livox_ros_driver2)/launch_ROS1/msg_MID360.launch">
       <arg name="rosbag_enable" value="false"/>
       <arg name="rviz_enable" value="false"/>
+      <arg name="timeshare_path" value="$(arg timeshare_path)"/>
     </include>
   </group>
 
   <group if="$(arg enable_camera)">
-    <node pkg="mvs_ros_driver" type="grabImgWithTrigger"
-          name="mvs_camera_trigger"
-          args="$(find mvs_ros_driver)/config/left_camera_trigger.yaml"
-          output="screen" respawn="true"/>
-    <env name="LD_LIBRARY_PATH"
-         value="$(arg mvs_library_dir):$(optenv LD_LIBRARY_PATH)"/>
+    <include file="$(find mvs_ros_driver)/launch/mvs_camera_trigger.launch">
+      <arg name="mvs_library_dir" value="$(arg mvs_library_dir)"/>
+      <arg name="timeshare_path" value="$(arg timeshare_path)"/>
+      <arg name="rviz_enable" value="false"/>
+    </include>
   </group>
 
   <group if="$(arg enable_gnss)">

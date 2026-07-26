@@ -23,6 +23,7 @@
   <arg name="output_dir" default="/tmp"/>
   <arg name="bag_prefix" default="sensors"/>
   <arg name="sim_start_without_gnss_s" default="86400.0"/>
+  <arg name="timeshare_path" default="$(env HOME)/timeshare"/>
 
   <include file="$(find sensor_recording_bringup)/launch/sensors_only.launch">
     <arg name="enable_time_bridge" value="$(arg enable_time_bridge)"/>
@@ -46,6 +47,7 @@
     <arg name="uwb_dtr" value="$(arg uwb_dtr)"/>
     <arg name="uwb_rts" value="$(arg uwb_rts)"/>
     <arg name="uwb_replay_file" value="$(arg uwb_replay_file)"/>
+    <arg name="timeshare_path" value="$(arg timeshare_path)"/>
   </include>
 
   <node pkg="sensor_recording_bringup" type="session_recorder.py"

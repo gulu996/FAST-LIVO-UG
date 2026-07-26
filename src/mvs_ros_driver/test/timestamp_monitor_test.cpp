@@ -1,5 +1,12 @@
 #include <gtest/gtest.h>
 
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <cstdlib>
+#include <string>
+
+#include "mvs_ros_driver/shared_timestamp_reader.h"
 #include "mvs_ros_driver/timestamp_monitor.h"
 
 namespace {
@@ -56,6 +63,56 @@ TEST(TimestampMonitor, CountsFrameAndTriggerGaps) {
   EXPECT_EQ(3U, monitor.trigger_gap_count());
   monitor.ObserveCameraMetadata(14, 23, 35, 5);
   EXPECT_EQ(1U, monitor.device_time_wrap_count());
+}
+
+TEST(SharedTimestampReader, MissingFileDoesNotCrash) {
+  char path_template[] = "/tmp/mvs_timeshare_missing_XXXXXX";
+  const int temporary_fd = mkstemp(path_template);
+  ASSERT_GE(temporary_fd, 0);
+  ASSERT_EQ(0, close(temporary_fd));
+  ASSERT_EQ(0, unlink(path_template));
+
+  mvs_ros_driver::SharedTimestampReader reader(path_template, 0.1);
+  livox_ros::SharedTimestampSnapshot snapshot;
+  std::string error;
+  EXPECT_EQ(livox_ros::kSharedTimestampReadBadProtocol,
+            reader.Read(&snapshot, &error));
+  EXPECT_NE(std::string::npos, error.find("open_failed"));
+}
+
+TEST(SharedTimestampReader, RecoversAfterWriterCreatesFile) {
+  char path_template[] = "/tmp/mvs_timeshare_recovery_XXXXXX";
+  const int temporary_fd = mkstemp(path_template);
+  ASSERT_GE(temporary_fd, 0);
+  ASSERT_EQ(0, close(temporary_fd));
+  ASSERT_EQ(0, unlink(path_template));
+
+  {
+    mvs_ros_driver::SharedTimestampReader reader(path_template, 0.1);
+    livox_ros::SharedTimestampSnapshot snapshot;
+    std::string error;
+    EXPECT_EQ(livox_ros::kSharedTimestampReadBadProtocol,
+              reader.Read(&snapshot, &error));
+
+    const int writer_fd =
+        open(path_template, O_CREAT | O_TRUNC | O_WRONLY, 0600);
+    ASSERT_GE(writer_fd, 0);
+    livox_ros::SharedTimestampState state = {};
+    livox_ros::WriteSharedTimestampState(
+        &state, 91, 123456789ULL,
+        livox_ros::kLidarBaseTimeLegacyGps, true,
+        livox_ros::MonotonicNowNs());
+    ASSERT_EQ(static_cast<ssize_t>(sizeof(state)),
+              write(writer_fd, &state, sizeof(state)));
+    ASSERT_EQ(0, close(writer_fd));
+
+    usleep(120000);
+    EXPECT_EQ(livox_ros::kSharedTimestampReadOk,
+              reader.Read(&snapshot, &error));
+    EXPECT_EQ(91U, snapshot.writer_epoch);
+    EXPECT_EQ(123456789U, snapshot.stamp_ns);
+  }
+  EXPECT_EQ(0, unlink(path_template));
 }
 
 }  // namespace

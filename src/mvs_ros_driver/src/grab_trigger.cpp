@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cmath>
 #include <errno.h>
+#include <exception>
 #include <ros/ros.h>
 #include <stdio.h>
 #include <string.h>
@@ -23,6 +24,8 @@
 #include <signal.h>
 
 #include <livox_ros_driver2/shared_timestamp_state.h>
+#include <livox_ros_driver2/timeshare_path.h>
+#include <mvs_ros_driver/shared_timestamp_reader.h>
 #include <mvs_ros_driver/timestamp_monitor.h>
 
 using namespace std;
@@ -94,111 +97,8 @@ const char* GrabStrategyName(int strategy) {
   }
 }
 
-class SharedTimestampReader {
- public:
-  SharedTimestampReader(std::string path, double retry_sec)
-      : path_(std::move(path)),
-        retry_ns_(static_cast<uint64_t>(std::max(0.1, retry_sec) * 1e9)) {}
-
-  ~SharedTimestampReader() { Disconnect(); }
-
-  livox_ros::SharedTimestampReadResult Read(
-      livox_ros::SharedTimestampSnapshot* snapshot, std::string* error) {
-    const uint64_t now_ns = livox_ros::MonotonicNowNs();
-    if (state_ == nullptr && !Connect(now_ns, error)) {
-      return livox_ros::kSharedTimestampReadBadProtocol;
-    }
-    const auto result = livox_ros::ReadSharedTimestampState(state_, snapshot);
-    if (result != livox_ros::kSharedTimestampReadOk && error != nullptr) {
-      switch (result) {
-        case livox_ros::kSharedTimestampReadInconsistent:
-          *error = "shared_state_inconsistent";
-          break;
-        case livox_ros::kSharedTimestampReadBadProtocol:
-          *error = "shared_protocol_magic_or_version_invalid";
-          break;
-        case livox_ros::kSharedTimestampReadNotReady:
-          *error = "shared_writer_not_ready";
-          break;
-        case livox_ros::kSharedTimestampReadEmpty:
-          *error = "shared_stamp_zero";
-          break;
-        default:
-          *error = "shared_read_failed";
-          break;
-      }
-    }
-    return result;
-  }
-
- private:
-  bool Connect(uint64_t now_ns, std::string* error) {
-    if (last_connect_attempt_ns_ != 0 &&
-        now_ns - last_connect_attempt_ns_ < retry_ns_) {
-      if (error != nullptr) {
-        *error = "shared_writer_unavailable_retry_pending";
-      }
-      return false;
-    }
-    last_connect_attempt_ns_ = now_ns;
-
-    const int fd = open(path_.c_str(), O_RDONLY);
-    if (fd < 0) {
-      if (error != nullptr) {
-        *error = "open_failed: " + std::string(strerror(errno));
-      }
-      return false;
-    }
-    struct stat file_stat = {};
-    if (fstat(fd, &file_stat) != 0) {
-      if (error != nullptr) {
-        *error = "fstat_failed: " + std::string(strerror(errno));
-      }
-      close(fd);
-      return false;
-    }
-    if (file_stat.st_size !=
-        static_cast<off_t>(sizeof(livox_ros::SharedTimestampState))) {
-      if (error != nullptr) {
-        *error = "shared_file_size_invalid";
-      }
-      close(fd);
-      return false;
-    }
-
-    void* mapping = mmap(nullptr, sizeof(livox_ros::SharedTimestampState),
-                         PROT_READ, MAP_SHARED, fd, 0);
-    const int mmap_errno = errno;
-    close(fd);
-    if (mapping == MAP_FAILED) {
-      if (error != nullptr) {
-        *error = "mmap_failed: " + std::string(strerror(mmap_errno));
-      }
-      return false;
-    }
-    state_ =
-        static_cast<const livox_ros::SharedTimestampState*>(mapping);
-    ROS_INFO("Connected shared timestamp reader: %s", path_.c_str());
-    return true;
-  }
-
-  void Disconnect() {
-    if (state_ != nullptr) {
-      if (munmap(const_cast<livox_ros::SharedTimestampState*>(state_),
-                 sizeof(livox_ros::SharedTimestampState)) != 0) {
-        ROS_WARN("munmap shared timestamp failed: %s", strerror(errno));
-      }
-      state_ = nullptr;
-    }
-  }
-
-  std::string path_;
-  uint64_t retry_ns_;
-  uint64_t last_connect_attempt_ns_ = 0;
-  const livox_ros::SharedTimestampState* state_ = nullptr;
-};
-
-std::unique_ptr<SharedTimestampReader> shared_timestamp_reader;
+std::unique_ptr<mvs_ros_driver::SharedTimestampReader>
+    shared_timestamp_reader;
 
 struct PerformanceStats {
   uint64_t count = 0;
@@ -753,14 +653,26 @@ int main(int argc, char **argv) {
       private_node.advertise<diagnostic_msgs::DiagnosticArray>(
           "timestamp_diagnostics", 10);
 
-  std::string shared_timestamp_path = "/home/gulu/timeshare";
+  std::string configured_timeshare_path;
+  std::string timeshare_path;
   double shared_connect_retry_sec = 1.0;
   int image_node_num = 3;
   int grab_strategy = MV_GrabStrategy_LatestImagesOnly;
   int output_queue_size = 1;
-  private_node.param<std::string>("shared_timestamp_path",
-                                  shared_timestamp_path,
-                                  "/home/gulu/timeshare");
+  private_node.param<std::string>(
+      "timeshare_path", configured_timeshare_path, "");
+  try {
+    timeshare_path =
+        livox_ros::ResolveTimesharePath(configured_timeshare_path);
+  } catch (const std::exception& error) {
+    ROS_FATAL("Cannot resolve timeshare path: %s", error.what());
+    return -1;
+  }
+  ROS_INFO("[TIMESHARE] role=reader path=%s", timeshare_path.c_str());
+  if (timeshare_path.compare(0, 6, "/root/") == 0) {
+    ROS_WARN("[TIMESHARE] reader resolved under /root; "
+             "do not run sensor nodes with sudo.");
+  }
   private_node.param("shared_timestamp_connect_retry_sec",
                      shared_connect_retry_sec, 1.0);
   private_node.param("shared_timestamp_stale_timeout_sec",
@@ -787,8 +699,8 @@ int main(int argc, char **argv) {
   }
   if (trigger_enable) {
     shared_timestamp_reader.reset(
-        new SharedTimestampReader(shared_timestamp_path,
-                                  shared_connect_retry_sec));
+        new mvs_ros_driver::SharedTimestampReader(
+            timeshare_path, shared_connect_retry_sec));
   }
 
   SetupSignalHandler();
