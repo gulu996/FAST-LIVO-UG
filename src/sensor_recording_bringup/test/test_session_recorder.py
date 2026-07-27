@@ -42,7 +42,7 @@ def ready_recorder(dry_run=True):
     recorder.gate.mark_topic("/sensor_time/events")
     recorder.gate.mark_topic("/uwb/raw")
     recorder.current_session = 0
-    recorder.bag_prefix = "test"
+    recorder.bag_name = "test"
     recorder.output_dir = "/tmp"
     recorder.dry_run = dry_run
     recorder.topics = ["/sensor_time/events", "/uwb/raw"]
@@ -53,6 +53,66 @@ def ready_recorder(dry_run=True):
 
 
 class SessionRecorderTest(unittest.TestCase):
+    def test_explicit_name_is_exact_bag_path(self):
+        recorder = ready_recorder(dry_run=False)
+        recorder.bag_name = "mission_01"
+        process = mock.Mock()
+        with mock.patch.object(
+            MODULE.subprocess, "Popen", return_value=process
+        ) as popen, mock.patch.object(
+            MODULE.os.path, "exists", return_value=False
+        ), mock.patch.object(MODULE.rospy, "loginfo"):
+            recorder._maybe_start()
+        popen.assert_called_once_with(
+            [
+                "rosbag",
+                "record",
+                "--output-name",
+                "/tmp/mission_01.bag",
+                "/sensor_time/events",
+                "/uwb/raw",
+            ],
+            preexec_fn=os.setsid,
+        )
+
+    def test_empty_name_uses_timestamp_only(self):
+        recorder = ready_recorder(dry_run=False)
+        recorder.bag_name = ""
+        process = mock.Mock()
+        with mock.patch.object(
+            MODULE.time, "strftime", return_value="20260727_142530"
+        ), mock.patch.object(
+            MODULE.subprocess, "Popen", return_value=process
+        ) as popen, mock.patch.object(
+            MODULE.os.path, "exists", return_value=False
+        ), mock.patch.object(MODULE.rospy, "loginfo"):
+            recorder._maybe_start()
+        self.assertEqual(
+            "/tmp/20260727_142530.bag",
+            popen.call_args.args[0][3],
+        )
+
+    def test_existing_bag_is_not_overwritten(self):
+        recorder = ready_recorder(dry_run=False)
+        with mock.patch.object(
+            MODULE.os.path, "exists", side_effect=lambda path: path.endswith(".bag")
+        ), mock.patch.object(
+            MODULE.subprocess, "Popen"
+        ) as popen, mock.patch.object(MODULE.rospy, "logerr"):
+            recorder._maybe_start()
+        popen.assert_not_called()
+        self.assertTrue(recorder.failed)
+        self.assertEqual(
+            "ERROR output bag already exists: /tmp/test.bag",
+            recorder.status_pub.messages[-1],
+        )
+
+    def test_bag_filename_accepts_one_optional_extension(self):
+        self.assertEqual("capture.bag", MODULE.bag_filename("capture"))
+        self.assertEqual("capture.bag", MODULE.bag_filename("capture.bag"))
+        with self.assertRaises(ValueError):
+            MODULE.bag_filename("../capture")
+
     def test_ready_is_published_before_recording(self):
         recorder = ready_recorder()
         with mock.patch.object(MODULE.rospy, "loginfo"):

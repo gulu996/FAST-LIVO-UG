@@ -29,6 +29,10 @@ cd ~/catkin_ws/src/livox_ros_driver2
 
 ## 采集数据
 
+`bag_name` 为空或省略时输出 `YYYYMMDD_HHMMSS.bag`；指定
+`bag_name:=mission_01` 或 `bag_name:=mission_01.bag` 时均严格输出
+`mission_01.bag`。已有同名 bag 或 `.active` 文件时拒绝覆盖。
+
 ### 仅uwb
 
 ```
@@ -45,7 +49,7 @@ roslaunch sensor_recording_bringup record_all.launch \
   mcu_input_mode:=simulation \
   sim_start_without_gnss_s:=86400 \
   output_dir:=/home/jetson/bags \
-  bag_prefix:=livo_camera_uwb \
+  bag_name:=livo_camera_uwb \
   record_profile:=both
 ```
 
@@ -63,6 +67,6 @@ roslaunch sensor_recording_bringup record_all.launch \
   mcu_input_mode:=simulation \
   sim_start_without_gnss_s:=86400 \
   output_dir:=/home/jetson/bags \
-  bag_prefix:=livo_camera_gnss \
+  bag_name:=livo_camera_gnss \
   record_profile:=both
 ```

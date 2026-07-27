@@ -27,7 +27,6 @@
   <arg name="uwb_round_timestamp_policy" default="first_distance_line"/>
   <arg name="record_profile" default="both"/>
   <arg name="output_dir" default="/tmp"/>
-  <arg name="bag_prefix" default="sensors"/> 
   <arg name="sim_start_without_gnss_s" default="86400.0"/>  
   <arg name="mvs_library_dir" default="/opt/MVS/lib/aarch64"/>
   <arg name="timeshare_path" default="$(env HOME)/timeshare"/>

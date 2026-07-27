@@ -39,12 +39,30 @@ PARSED_TOPICS = [
 ]
 
 
+def bag_filename(bag_name, stamp=None):
+    requested = str(bag_name).strip()
+    if requested:
+        if (
+            "\x00" in requested
+            or os.path.basename(requested) != requested
+            or requested in (".", "..")
+        ):
+            raise ValueError("bag_name must be a file name, not a path")
+        stem = requested[:-4] if requested.endswith(".bag") else requested
+        if not stem:
+            raise ValueError("bag_name must not be empty")
+        return requested if requested.endswith(".bag") else requested + ".bag"
+    return "{}.bag".format(stamp or time.strftime("%Y%m%d_%H%M%S"))
+
+
 class SessionRecorder:
     def __init__(self):
         if rospy.get_param("/use_sim_time", False):
             raise RuntimeError("sensor recording requires /use_sim_time=false")
         self.output_dir = os.path.expanduser(rospy.get_param("~output_dir", "/tmp"))
-        self.bag_prefix = rospy.get_param("~bag_prefix", "sensors")
+        self.bag_name = str(rospy.get_param("~bag_name", "")).strip()
+        if self.bag_name:
+            bag_filename(self.bag_name)
         self.profile = rospy.get_param("~record_profile", "both")
         self.dry_run = bool(rospy.get_param("~dry_run", False))
         enabled_topics = rospy.get_param("~enabled_topics", [])
@@ -130,11 +148,18 @@ class SessionRecorder:
         if gate_status != "READY":
             return
         self.current_session = self.gate.session_id
-        stamp = time.strftime("%Y%m%d_%H%M%S")
-        basename = "{}_session_{:016x}_{}".format(
-            self.bag_prefix, self.current_session, stamp
+        output = os.path.join(
+            self.output_dir, bag_filename(self.bag_name)
         )
-        output = os.path.join(self.output_dir, basename)
+        if not self.dry_run and (
+            os.path.exists(output) or os.path.exists(output + ".active")
+        ):
+            self.failed = True
+            self._publish_status(
+                "ERROR output bag already exists: {}".format(output)
+            )
+            rospy.logerr("Refusing to overwrite output bag: %s", output)
+            return
         try:
             if self.dry_run:
                 self.process = "DRY_RUN"
@@ -195,6 +220,6 @@ if __name__ == "__main__":
     try:
         SessionRecorder()
         rospy.spin()
-    except (OSError, RuntimeError) as error:
+    except (OSError, RuntimeError, ValueError) as error:
         rospy.logfatal("%s", error)
         raise SystemExit(2)

@@ -817,7 +817,7 @@ uwb_replay_file:=
 
 record_profile:=raw|parsed|both
 output_dir:=...
-bag_prefix:=sensors
+bag_name:=sensors
 ```
 
 启动顺序：
@@ -1166,4 +1166,3 @@ CH4 GNSS PPS input
 - Camera trigger index 与 MCU sequence 经丢帧/积压测试仍一一对应；
 - indoor→outdoor→indoor→outdoor 全状态机测试中，所有融合 header 无 step、重复或倒序；
 - legacy `LIDAR_BASE_TIME_LEGACY` 仅保留兼容诊断，不再作为相机最终时间源。
-

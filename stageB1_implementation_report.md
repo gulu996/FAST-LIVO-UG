@@ -276,7 +276,8 @@ FAST_LIVO2/src/{gnss_manager_self_test,uwb_manager_self_test}.cpp
 - 用户启用的 required topics 已发布。
 
 它不等待 UTC mapping、GNSS UTC valid 或 RTK Fixed。MCU session 变化时先向
-当前 rosbag 进程发 SIGINT，再用包含新 session ID 的文件名启动新 bag。
+当前 rosbag 进程发 SIGINT；未指定 `bag_name` 时用新的时间文件名启动新 bag。
+指定固定 `bag_name` 时不会覆盖已经完成的同名 bag。
 退出路径有显式 `shutting_down` 门禁，避免关闭 bag 后被并发回调重新启动。
 
 硬件录制命令示例：
@@ -288,7 +289,7 @@ roslaunch sensor_recording_bringup record_all.launch \
   mcu_input_mode:=serial mcu_port:=/dev/sensor_mcu \
   gnss_source:=serial gnss_port:=/dev/gnss \
   uwb_source:=serial uwb_port:=/dev/uwb \
-  output_dir:=/data/bags bag_prefix:=stageB1 record_profile:=both
+  output_dir:=/data/bags bag_name:=stageB1 record_profile:=both
 ```
 
 纯软件、无 FAST、实际写 bag 的命令：

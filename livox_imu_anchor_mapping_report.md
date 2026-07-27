@@ -26,7 +26,7 @@ mapped_stamp_ns =
 - `mcu_input_mode=simulation` 只保留会话和录包门控职责，不再决定 anchor 模式下 UWB/GNSS 的 `header.stamp`。
 - 映射失败、锚点未就绪或锚点超过 100 ms 时不回退系统时间或 simulation LOCAL 时间。
 - ROS 消息定义及 MD5 均未改变。
-- Release 全工作空间编译通过；最终测试汇总为 149 项、0 error、0 failure、0 skipped。
+- Release 全工作空间编译通过；最终测试汇总为 153 项、0 error、0 failure、0 skipped。
 
 这是一套软件时间域统一方案，不是硬件级同步。它把主机完整数据接收时刻投影到 MID-360 时间轴，仍包含设备内部处理、网络/SDK、串口缓存和调度延迟。
 
@@ -436,7 +436,7 @@ catkin_test_results build/test_results --all
 最终结果：
 
 ```text
-Summary: 149 tests, 0 errors, 0 failures, 0 skipped
+Summary: 153 tests, 0 errors, 0 failures, 0 skipped
 ```
 
 包含：
@@ -544,7 +544,7 @@ roslaunch sensor_recording_bringup record_all.launch \
   uwb_time_offset_s:=0.0 \
   gnss_time_offset_s:=0.0 \
   output_dir:=/home/jetson/bags/imu_anchor_test \
-  bag_prefix:=livo_camera_uwb_gnss_imu_anchor \
+  bag_name:=livo_camera_uwb_gnss_imu_anchor \
   record_profile:=both
 ```
 

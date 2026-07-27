@@ -289,7 +289,7 @@ roslaunch sensor_recording_bringup record_all.launch \
   mcu_input_mode:=simulation \
   sim_start_without_gnss_s:=86400 \
   output_dir:=/home/jetson/bags/uwb_test \
-  bag_prefix:=uwb_only \
+  bag_name:=uwb_only \
   record_profile:=both
 ```
 

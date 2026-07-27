@@ -25,7 +25,7 @@
   <arg name="uwb_round_timestamp_policy" default="first_distance_line"/>
   <arg name="record_profile" default="both"/>
   <arg name="output_dir" default="/tmp"/>
-  <arg name="bag_prefix" default="sensors"/>
+  <arg name="bag_name" default=""/>
   <arg name="sim_start_without_gnss_s" default="86400.0"/>
   <arg name="timeshare_path" default="$(env HOME)/timeshare"/>
   <arg name="imu_timeshare_path" default="$(env HOME)/timeshare_imu"/>
@@ -91,7 +91,7 @@
         name="session_recorder" output="screen" required="true">
     <param name="record_profile" value="$(arg record_profile)"/>
     <param name="output_dir" value="$(arg output_dir)"/>
-    <param name="bag_prefix" value="$(arg bag_prefix)"/>
+    <param name="bag_name" value="$(arg bag_name)"/>
     <param name="enable_livox" value="$(arg enable_livox)"/>
     <param name="enable_camera" value="$(arg enable_camera)"/>
     <param name="enable_gnss" value="$(arg enable_gnss)"/>
