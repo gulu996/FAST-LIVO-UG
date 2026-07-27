@@ -26,6 +26,7 @@
 #define LIVOX_ROS_DRIVER2_LDDC_H_
 
 #include "include/livox_ros_driver2.h"
+#include "livox_ros_driver2/imu_time_anchor.h"
 #include "livox_ros_driver2/shared_timestamp_state.h"
 
 #include "driver_node.h"
@@ -138,6 +139,10 @@ class Lddc final {
   void ShutdownSharedTimestampState();
   void UpdateSharedTimestamp(uint8_t index, uint64_t stamp_ns,
                              uint8_t timestamp_type);
+  bool InitializeImuAnchorWriter();
+  void ShutdownImuAnchorWriter();
+  void UpdateImuAnchor(uint8_t index, const ImuData& imu_data);
+  void LogImuAnchorSummary(uint64_t now_ns);
   uint32_t DropStartupBacklog(LidarDataQueue* queue, uint8_t index);
   void TrackClockSource(uint8_t index, uint8_t timestamp_type, bool imu_stream);
   void PublishTimestampDiagnostic(uint8_t index, uint8_t timestamp_type,
@@ -183,6 +188,17 @@ class Lddc final {
   uint8_t shared_lidar_index_ = 0;
   double shared_open_retry_sec_ = 1.0;
   std::unique_ptr<LegacyTimestampReadyGate> shared_ready_gate_;
+  std::unique_ptr<ImuTimeAnchorWriter> imu_anchor_writer_;
+  std::string imu_timeshare_path_;
+  uint64_t imu_anchor_writer_epoch_ = 0;
+  uint64_t last_imu_anchor_open_attempt_ns_ = 0;
+  uint64_t last_imu_anchor_log_ns_ = 0;
+  uint64_t last_imu_anchor_log_accepted_ = 0;
+  uint8_t imu_anchor_lidar_index_ = 0;
+  bool imu_anchor_enable_ = true;
+  bool last_imu_anchor_ready_ = false;
+  double imu_anchor_log_period_sec_ = 20.0;
+  ImuTimeAnchorWriterConfig imu_anchor_config_;
 
   std::array<bool, kMaxSourceLidar> startup_queue_initialized_{};
   std::array<uint64_t, kMaxSourceLidar> startup_drain_count_{};

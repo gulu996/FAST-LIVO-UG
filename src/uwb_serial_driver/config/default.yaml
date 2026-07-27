@@ -15,3 +15,8 @@ repeat_max_duration_s: 2.0
 replay_mode: preserve
 replay_rate_hz: 10.0
 replay_uncertainty_ns: 1000000
+timestamp_mode: host_local
+imu_timeshare_path: ""
+imu_anchor_warn_age_s: 0.020
+imu_anchor_max_age_s: 0.100
+time_offset_s: 0.0

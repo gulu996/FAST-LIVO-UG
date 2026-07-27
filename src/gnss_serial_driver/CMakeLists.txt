@@ -10,6 +10,7 @@ find_package(catkin REQUIRED COMPONENTS
   nav_msgs
   roscpp
   rospy
+  sensor_time_bridge
   sensor_time_msgs
   std_msgs
 )
@@ -26,7 +27,8 @@ catkin_package(
   INCLUDE_DIRS include
   LIBRARIES gnss_serial_math
   CATKIN_DEPENDS
-    geometry_msgs gnss_comm message_runtime nav_msgs roscpp rospy sensor_time_msgs std_msgs
+    geometry_msgs gnss_comm message_runtime nav_msgs roscpp rospy
+    sensor_time_bridge sensor_time_msgs std_msgs
   DEPENDS EIGEN3
 )
 

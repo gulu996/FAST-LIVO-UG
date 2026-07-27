@@ -18,6 +18,8 @@
   <exec_depend>sensor_time_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <test_depend>uwb_serial_driver</test_depend>
+  <test_depend>gnss_serial_driver</test_depend>
+  <test_depend>nav_msgs</test_depend>
   <exec_depend>uwb_serial_driver</exec_depend>
   <test_depend>rostest</test_depend>
 </package>

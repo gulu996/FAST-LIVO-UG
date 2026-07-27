@@ -1,0 +1,57 @@
+<launch>
+  <rosparam command="load"
+            file="$(find uwb_serial_driver)/config/default.yaml"
+            ns="uwb_serial_driver"/>
+  <node pkg="uwb_serial_driver"
+        type="uwb_serial_node.py"
+        name="uwb_serial_driver"
+        output="screen"
+        required="true">
+    <param name="source" value="file"/>
+    <param name="replay_file"
+           value="$(find uwb_serial_driver)/test/data/distance_round5_sample.txt"/>
+    <param name="replay_mode" value="preserve"/>
+    <param name="replay_rate_hz" value="120.0"/>
+    <param name="replay_start_delay_s" value="1.0"/>
+    <param name="replay_loop" value="true"/>
+    <param name="parser_mode" value="distance_round5"/>
+    <param name="distance_lines_per_round" value="5"/>
+    <param name="round_timeout_s" value="2.0"/>
+    <param name="repeat_max_count" value="100000"/>
+    <param name="timestamp_mode" value="livox_imu_anchor"/>
+    <param name="imu_timeshare_path"
+           value="/tmp/livox_imu_anchor_mapping_integration.bin"/>
+    <param name="imu_anchor_warn_age_s" value="0.020"/>
+    <param name="imu_anchor_max_age_s" value="0.100"/>
+    <param name="time_offset_s" value="0.0"/>
+  </node>
+
+  <rosparam command="load"
+            file="$(find gnss_serial_driver)/config/default.yaml"
+            ns="gnss_serial_driver"/>
+  <node pkg="gnss_serial_driver"
+        type="gnss_serial_node.py"
+        name="gnss_serial_driver"
+        output="screen"
+        required="true">
+    <param name="source" value="file"/>
+    <param name="replay_file"
+           value="$(find sensor_recording_bringup)/data/gnss_replay.txt"/>
+    <param name="replay_mode" value="preserve"/>
+    <param name="replay_rate_hz" value="50.0"/>
+    <param name="replay_loop" value="true"/>
+    <param name="timestamp_mode" value="livox_imu_anchor"/>
+    <param name="imu_timeshare_path"
+           value="/tmp/livox_imu_anchor_mapping_integration.bin"/>
+    <param name="imu_anchor_warn_age_s" value="0.020"/>
+    <param name="imu_anchor_max_age_s" value="0.100"/>
+    <param name="time_offset_s" value="0.0"/>
+  </node>
+
+  <include file="$(find gnss_serial_driver)/launch/gnss_adapter.launch"/>
+
+  <test test-name="imu_anchor_mapping_integration"
+        pkg="sensor_recording_bringup"
+        type="imu_anchor_mapping_integration_test.py"
+        time-limit="35"/>
+</launch>

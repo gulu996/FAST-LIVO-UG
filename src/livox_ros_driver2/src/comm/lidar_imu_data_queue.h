@@ -53,6 +53,7 @@ typedef struct {
   //   uint8_t slot;
   // };
   uint64_t time_stamp;
+  uint64_t host_monotonic_ns;
   float gyro_x;        /**< Gyroscope X axis, Unit:rad/s */
   float gyro_y;        /**< Gyroscope Y axis, Unit:rad/s */
   float gyro_z;        /**< Gyroscope Z axis, Unit:rad/s */

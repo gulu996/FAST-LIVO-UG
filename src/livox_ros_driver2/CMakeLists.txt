@@ -124,6 +124,7 @@ if(ROS_EDITION STREQUAL "ROS1")
   target_sources(${PROJECT_NAME}_node
     PRIVATE
     src/driver_node.cpp
+    src/imu_time_anchor.cpp
     src/lds.cpp
     src/lds_lidar.cpp
     src/lddc.cpp
@@ -194,6 +195,16 @@ if(ROS_EDITION STREQUAL "ROS1")
         include
         ${catkin_INCLUDE_DIRS})
       target_link_libraries(shared_timestamp_state_test
+        ${catkin_LIBRARIES})
+    endif()
+    catkin_add_gtest(imu_time_anchor_test
+      test/imu_time_anchor_test.cpp
+      src/imu_time_anchor.cpp)
+    if(TARGET imu_time_anchor_test)
+      target_include_directories(imu_time_anchor_test PRIVATE
+        include
+        ${catkin_INCLUDE_DIRS})
+      target_link_libraries(imu_time_anchor_test
         ${catkin_LIBRARIES})
     endif()
   endif()

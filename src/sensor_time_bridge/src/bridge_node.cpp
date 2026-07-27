@@ -130,6 +130,8 @@ public:
     ROS_INFO("[SENSOR_TIME] input_mode=%s writer_epoch=%lu queue_capacity=%zu",
              input_mode_.c_str(), static_cast<unsigned long>(writer_epoch_),
              queue_capacity_);
+    if (input_mode_ == "simulation")
+      ROS_INFO("[SENSOR_TIME] mcu_input_mode=simulation recorder_gate_only=true");
   }
 
   ~BridgeNode()

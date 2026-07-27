@@ -12,12 +12,24 @@ from gnss_serial_driver.exclusive_serial import open_locked
 from gnss_serial_driver.msg import GnssPvtStamped, GnssStatus
 from gnss_serial_driver.parser import GnssParser
 from gnss_serial_driver.time_policy import utc_to_local, valid_for_fusion
+from sensor_time_bridge.imu_anchor import (
+    LivoxImuAnchorReader,
+    LivoxImuTimeMapper,
+)
 from sensor_time_msgs.msg import RawSerialFrame, TimeMapping, UtcObservation
 from sensor_time_msgs.srv import HostMonotonicToLocal
 
 
 GPS_EPOCH_UNIX_S = 315964800
 GPS_WEEK_S = 604800.0
+
+
+def ros_time_from_ns(stamp_ns):
+    stamp = rospy.Time()
+    if stamp_ns > 0:
+        stamp.secs = int(stamp_ns // 1_000_000_000)
+        stamp.nsecs = int(stamp_ns % 1_000_000_000)
+    return stamp
 
 
 def finite_or(value, fallback):
@@ -40,6 +52,33 @@ class GnssSerialNode:
         )
         self.gps_utc_leap_seconds = int(rospy.get_param("~gps_utc_leap_seconds", 18))
         self.accepted_qualities = set(rospy.get_param("~accepted_qualities", [4]))
+        self.timestamp_mode = rospy.get_param("~timestamp_mode", "host_local")
+        configured_imu_path = rospy.get_param("~imu_timeshare_path", "")
+        self.imu_timeshare_path = os.path.expanduser(
+            configured_imu_path
+            or os.path.join(os.path.expanduser("~"), "timeshare_imu")
+        )
+        self.time_offset_s = float(rospy.get_param("~time_offset_s", 0.0))
+        self.time_offset_ns = int(round(self.time_offset_s * 1_000_000_000))
+        self.imu_anchor_reader = None
+        self.imu_time_mapper = None
+        if self.timestamp_mode == "livox_imu_anchor":
+            self.imu_anchor_reader = LivoxImuAnchorReader(
+                self.imu_timeshare_path
+            )
+            self.imu_time_mapper = LivoxImuTimeMapper(
+                self.imu_anchor_reader,
+                warn_age_s=float(
+                    rospy.get_param("~imu_anchor_warn_age_s", 0.020)
+                ),
+                max_age_s=float(
+                    rospy.get_param("~imu_anchor_max_age_s", 0.100)
+                ),
+            )
+        elif self.timestamp_mode != "host_local":
+            raise ValueError(
+                "timestamp_mode must be host_local or livox_imu_anchor"
+            )
         self.raw_log_path = rospy.get_param("~raw_log_path", "")
         self.parsed_log_path = rospy.get_param("~parsed_log_path", "")
         self.parser = GnssParser()
@@ -50,6 +89,7 @@ class GnssSerialNode:
         self.checksum_errors = 0
         self.parse_errors = 0
         self.reconnect_count = 0
+        self.timestamp_mapping_drop_count = 0
         self.stop_event = threading.Event()
         self.raw_log = open(self.raw_log_path, "a", buffering=1) if self.raw_log_path else None
         self.parsed_log = (
@@ -76,11 +116,19 @@ class GnssSerialNode:
         self.worker = threading.Thread(target=self._run, name="gnss_source", daemon=True)
         self.worker.start()
         rospy.on_shutdown(self.shutdown)
+        rospy.loginfo(
+            "[GNSS_TIME] mode=%s path=%s offset_s=%.9f",
+            self.timestamp_mode,
+            self.imu_timeshare_path,
+            self.time_offset_s,
+        )
 
     def shutdown(self):
         self.stop_event.set()
         if self.worker.is_alive():
             self.worker.join(timeout=2.0)
+        if self.imu_anchor_reader is not None:
+            self.imu_anchor_reader.close()
         for stream in (self.raw_log, self.parsed_log):
             if stream:
                 stream.close()
@@ -110,6 +158,64 @@ class GnssSerialNode:
             self.last_local_measurement_ns = local_ns
         return local_ns, valid
 
+    def _timestamp_for_frame(self, host_monotonic_ns, replay, preserved_ns):
+        if replay and self.replay_mode == "preserve" and preserved_ns > 0:
+            return (
+                preserved_ns,
+                0,
+                0,
+                1_000_000,
+                RawSerialFrame.REPLAY_PRESERVED,
+            )
+        if self.timestamp_mode == "livox_imu_anchor":
+            result = self.imu_time_mapper.map_time(
+                host_monotonic_ns, self.time_offset_ns
+            )
+            if result.warning:
+                rospy.logwarn_throttle(
+                    5.0,
+                    "[GNSS_TIME] anchor delta %.3f ms exceeds warning age",
+                    result.anchor_delta_ns / 1e6,
+                )
+            if not result.success:
+                rospy.logwarn_throttle(
+                    5.0,
+                    "[GNSS_TIME] mapping unavailable: %s",
+                    result.failure_reason,
+                )
+                return (
+                    0,
+                    0,
+                    result.writer_epoch,
+                    0,
+                    RawSerialFrame.INVALID,
+                )
+            return (
+                result.mapped_stamp_ns,
+                0,
+                result.writer_epoch,
+                result.anchor_uncertainty_ns,
+                RawSerialFrame.DEVICE_TIME_MAPPED_LOCAL,
+            )
+
+        receive_local_ns, session_id, writer_epoch, uncertainty = (
+            self._host_local(host_monotonic_ns)
+        )
+        source = (
+            RawSerialFrame.REPLAY_REBASED
+            if replay and self.replay_mode == "rebase" and receive_local_ns
+            else RawSerialFrame.HOST_RECEIVE_LOCAL
+            if receive_local_ns
+            else RawSerialFrame.INVALID
+        )
+        return (
+            receive_local_ns,
+            session_id,
+            writer_epoch,
+            uncertainty,
+            source,
+        )
+
     def _run(self):
         if self.source == "file":
             self._run_file()
@@ -131,10 +237,21 @@ class GnssSerialNode:
             return
         delay = 1.0 / max(0.1, self.replay_rate_hz)
         while not self.stop_event.is_set() and not rospy.is_shutdown():
-            for line in lines:
+            for record in lines:
                 if self.stop_event.is_set() or rospy.is_shutdown():
                     break
-                self._handle_line(line, replay=True)
+                preserved_ns = 0
+                line = record
+                if "|" in record:
+                    prefix, candidate = record.split("|", 1)
+                    try:
+                        preserved_ns = int(prefix.strip())
+                        line = candidate
+                    except ValueError:
+                        pass
+                self._handle_line(
+                    line.strip(), replay=True, preserved_ns=preserved_ns
+                )
                 self.stop_event.wait(delay)
             if not self.replay_loop:
                 break
@@ -162,7 +279,9 @@ class GnssSerialNode:
                                 line = line_buffer.decode("ascii", errors="replace").strip()
                                 line_buffer.clear()
                                 if line:
-                                    self._handle_line(line, replay=False)
+                                    self._handle_line(
+                                        line, replay=False, preserved_ns=0
+                                    )
                         elif len(line_buffer) < 8192:
                             line_buffer.append(byte)
                         else:
@@ -182,35 +301,45 @@ class GnssSerialNode:
                     os.close(fd)
             self.stop_event.wait(1.0)
 
-    def _handle_line(self, line, replay):
-        host_monotonic_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
+    def _handle_line(self, line, replay, preserved_ns=0):
+        host_monotonic_ns = (
+            time.monotonic_ns()
+            if self.timestamp_mode == "livox_imu_anchor"
+            else time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
+        )
         host_wall = rospy.Time.now()
-        receive_local_ns, session_id, writer_epoch, receive_uncertainty = self._host_local(
-            host_monotonic_ns
+        (
+            receive_local_ns,
+            session_id,
+            writer_epoch,
+            receive_uncertainty,
+            timestamp_source,
+        ) = self._timestamp_for_frame(
+            host_monotonic_ns, replay, preserved_ns
         )
         self.sequence += 1
         raw = RawSerialFrame()
-        raw.header.stamp = rospy.Time.from_sec(receive_local_ns / 1e9) if receive_local_ns else rospy.Time()
-        raw.header.frame_id = "local_sensor_time"
+        raw.header.stamp = ros_time_from_ns(receive_local_ns)
+        raw.header.frame_id = (
+            "livox_imu_legacy_time"
+            if timestamp_source
+            == RawSerialFrame.DEVICE_TIME_MAPPED_LOCAL
+            else "local_sensor_time"
+        )
         raw.session_id = session_id
         raw.writer_epoch = writer_epoch
         raw.source_sequence = self.sequence
         raw.host_receive_stamp = host_wall
         raw.host_receive_monotonic_ns = host_monotonic_ns
         raw.time_uncertainty_ns = receive_uncertainty
-        raw.timestamp_source = (
-            RawSerialFrame.REPLAY_REBASED
-            if replay and self.replay_mode == "rebase" and receive_local_ns
-            else RawSerialFrame.HOST_RECEIVE_LOCAL
-            if receive_local_ns
-            else RawSerialFrame.INVALID
-        )
+        raw.timestamp_source = timestamp_source
         raw.device = self.replay_file if replay else self.port
         raw.protocol = "NMEA_KSXT_AGRICA_LEGACY"
         raw.data = list(line.encode("utf-8", errors="replace"))
         self.raw_pub.publish(raw)
         if self.raw_log:
             self.raw_log.write("{} {}\n".format(host_monotonic_ns, line))
+        self._log_time_summary()
 
         parsed_values = self.parser.parse(line)
         if not parsed_values:
@@ -229,11 +358,24 @@ class GnssSerialNode:
                         int(parsed.position_valid), parsed.reject_reason
                     )
                 )
-            if parsed.position_valid:
-                self._publish_pvt(parsed, raw, replay)
-            elif parsed.utc_valid:
+            status_detail = parsed.reject_reason
+            if parsed.position_valid and parsed.checksum_valid:
+                if (
+                    self.timestamp_mode == "livox_imu_anchor"
+                    and raw.header.stamp.to_nsec() == 0
+                ):
+                    self.timestamp_mapping_drop_count += 1
+                    status_detail = "timestamp mapping unavailable; PVT dropped"
+                    rospy.logwarn_throttle(
+                        5.0,
+                        "[GNSS_TIME] fusion PVT dropped: no valid IMU "
+                        "anchor mapping",
+                    )
+                else:
+                    self._publish_pvt(parsed, raw, replay)
+            elif parsed.utc_valid and parsed.checksum_valid:
                 self._publish_utc_observation(parsed, raw, replay)
-            self._publish_status(raw, parsed, parsed.reject_reason)
+            self._publish_status(raw, parsed, status_detail)
 
     def _publish_utc_observation(self, parsed, raw, replay):
         observation = UtcObservation()
@@ -278,34 +420,77 @@ class GnssSerialNode:
         pvt.vel_e = finite_or(parsed.vel_e, 0.0)
         pvt.vel_d = finite_or(parsed.vel_d, 0.0)
         pvt.vel_acc = finite_or(parsed.vel_acc, 999.0)
-        self.compat_pub.publish(pvt)
+        receive_timestamp_selected = (
+            self.timestamp_mode == "livox_imu_anchor"
+            or raw.timestamp_source == RawSerialFrame.REPLAY_PRESERVED
+        )
+        if receive_timestamp_selected:
+            local_ns = raw.header.stamp.to_nsec()
+            local_valid = local_ns > 0
+            mapping_version = 0
+            time_state = TimeMapping.LOCAL_ONLY
+            timestamp_source = (
+                GnssPvtStamped.REPLAY_PRESERVED
+                if raw.timestamp_source == RawSerialFrame.REPLAY_PRESERVED
+                else GnssPvtStamped.HOST_RECEIVE_LOCAL
+            )
+            timestamp_uncertainty_ns = (
+                max(1, raw.time_uncertainty_ns) if local_valid else 0
+            )
+        else:
+            local_ns, local_valid = (
+                self._utc_to_local(parsed.utc_ns)
+                if parsed.utc_valid
+                else (0, False)
+            )
+            mapping_version = self.mapping.mapping_version if local_valid else 0
+            time_state = (
+                self.mapping.time_state
+                if self.mapping
+                else TimeMapping.LOCAL_ONLY
+            )
+            timestamp_source = (
+                GnssPvtStamped.GNSS_UTC_INVERSE_MAPPED
+                if local_valid
+                else GnssPvtStamped.INVALID
+            )
+            timestamp_uncertainty_ns = (
+                max(1, self.mapping.time_uncertainty_ns)
+                if local_valid
+                else 0
+            )
 
-        local_ns, local_valid = self._utc_to_local(parsed.utc_ns) if parsed.utc_valid else (0, False)
+        if self.timestamp_mode != "livox_imu_anchor" or local_valid:
+            self.compat_pub.publish(pvt)
         stamped = GnssPvtStamped()
-        stamped.header.stamp = rospy.Time.from_sec(local_ns / 1e9) if local_valid else rospy.Time()
+        stamped.header = raw.header
+        stamped.header.stamp = ros_time_from_ns(local_ns)
         stamped.header.seq = raw.source_sequence
-        stamped.header.frame_id = "local_sensor_time"
+        stamped.header.frame_id = (
+            "livox_imu_legacy_time"
+            if self.timestamp_mode == "livox_imu_anchor"
+            else "local_sensor_time"
+        )
         stamped.session_id = raw.session_id
         stamped.writer_epoch = raw.writer_epoch
         stamped.source_sequence = raw.source_sequence
         stamped.pvt = pvt
         stamped.utc_measurement_ns = parsed.utc_ns
         stamped.local_measurement_ns = local_ns
-        stamped.mapping_version = self.mapping.mapping_version if local_valid else 0
-        stamped.time_state = self.mapping.time_state if self.mapping else TimeMapping.LOCAL_ONLY
-        stamped.timestamp_source = (
-            GnssPvtStamped.GNSS_UTC_INVERSE_MAPPED if local_valid else GnssPvtStamped.INVALID
-        )
-        stamped.timestamp_uncertainty_ns = (
-            max(1, self.mapping.time_uncertainty_ns) if local_valid else 0
-        )
+        stamped.mapping_version = mapping_version
+        stamped.time_state = time_state
+        stamped.timestamp_source = timestamp_source
+        stamped.timestamp_uncertainty_ns = timestamp_uncertainty_ns
         stamped.utc_valid = parsed.utc_valid
         stamped.local_measurement_time_valid = local_valid
         stamped.valid_for_fusion = valid_for_fusion(
             local_valid, parsed.position_valid, parsed.quality,
             self.accepted_qualities
         )
-        self.local_pub.publish(stamped)
+        if self.timestamp_mode != "livox_imu_anchor" or local_valid:
+            self.local_pub.publish(stamped)
+        if local_valid:
+            self.last_local_measurement_ns = local_ns
         if parsed.utc_valid:
             self._publish_utc_observation(parsed, raw, replay)
 
@@ -314,15 +499,32 @@ class GnssSerialNode:
         status.header = raw.header
         status.session_id = raw.session_id
         status.writer_epoch = raw.writer_epoch
-        status.mapping_version = self.mapping.mapping_version if self.mapping else 0
-        status.time_state = self.mapping.time_state if self.mapping else TimeMapping.LOCAL_ONLY
+        status.mapping_version = (
+            0
+            if self.timestamp_mode == "livox_imu_anchor"
+            else self.mapping.mapping_version
+            if self.mapping
+            else 0
+        )
+        status.time_state = (
+            TimeMapping.LOCAL_ONLY
+            if self.timestamp_mode == "livox_imu_anchor"
+            else self.mapping.time_state
+            if self.mapping
+            else TimeMapping.LOCAL_ONLY
+        )
         status.serial_open = self.serial_open
         status.utc_valid = bool(parsed and parsed.utc_valid)
-        status.local_measurement_time_valid = self.last_local_measurement_ns > 0
+        status.local_measurement_time_valid = (
+            raw.header.stamp.to_nsec() > 0
+            if self.timestamp_mode == "livox_imu_anchor"
+            else self.last_local_measurement_ns > 0
+        )
         status.position_valid = bool(parsed and parsed.position_valid)
         status.valid_for_fusion = (
             status.local_measurement_time_valid
             and status.position_valid
+            and parsed.checksum_valid
             and parsed.quality in self.accepted_qualities
         ) if parsed else False
         status.solution_quality = parsed.quality if parsed else 0
@@ -331,8 +533,48 @@ class GnssSerialNode:
         status.parse_error_count = self.parse_errors
         status.reconnect_count = self.reconnect_count
         status.source_message = parsed.source if parsed else ""
-        status.detail = detail
+        status.detail = "{}; {}".format(detail, self._time_detail())
         self.status_pub.publish(status)
+
+    def _time_detail(self):
+        if self.imu_time_mapper is None:
+            return "timestamp_mode={}".format(self.timestamp_mode)
+        stats = self.imu_time_mapper.stats
+        return (
+            "timestamp_mode=livox_imu_anchor mapped={} not_ready={} "
+            "stale={} invalid={} epoch_change={} nonmonotonic_drop={} "
+            "mapping_error={} pvt_time_drop={} offset_s={:.9f}"
+        ).format(
+            stats.mapped_count,
+            stats.not_ready_count,
+            stats.stale_count,
+            stats.invalid_count,
+            stats.epoch_change_count,
+            stats.nonmonotonic_drop_count,
+            stats.mapping_error_count,
+            self.timestamp_mapping_drop_count,
+            self.time_offset_s,
+        )
+
+    def _log_time_summary(self):
+        if self.imu_time_mapper is None:
+            return
+        stats = self.imu_time_mapper.stats
+        rospy.loginfo_throttle(
+            20.0,
+            "[GNSS_TIME] mode=livox_imu_anchor mapped=%d not_ready=%d "
+            "stale=%d invalid=%d epoch_change=%d nonmonotonic_drop=%d "
+            "mapping_error=%d pvt_time_drop=%d offset_s=%.9f",
+            stats.mapped_count,
+            stats.not_ready_count,
+            stats.stale_count,
+            stats.invalid_count,
+            stats.epoch_change_count,
+            stats.nonmonotonic_drop_count,
+            stats.mapping_error_count,
+            self.timestamp_mapping_drop_count,
+            self.time_offset_s,
+        )
 
 
 if __name__ == "__main__":

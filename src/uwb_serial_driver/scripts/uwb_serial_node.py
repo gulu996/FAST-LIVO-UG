@@ -5,6 +5,10 @@ import threading
 import time
 
 import rospy
+from sensor_time_bridge.imu_anchor import (
+    LivoxImuAnchorReader,
+    LivoxImuTimeMapper,
+)
 from sensor_time_msgs.msg import RawSerialFrame
 from sensor_time_msgs.srv import HostMonotonicToLocal
 from uwb_serial_driver.exclusive_serial import DEFAULT_DTR, DEFAULT_RTS, open_locked
@@ -14,6 +18,14 @@ from uwb_serial_driver.parser import (
     RangeFilter,
     UwbParser,
 )
+
+
+def ros_time_from_ns(stamp_ns):
+    stamp = rospy.Time()
+    if stamp_ns > 0:
+        stamp.secs = int(stamp_ns // 1_000_000_000)
+        stamp.nsecs = int(stamp_ns % 1_000_000_000)
+    return stamp
 
 
 class UwbSerialNode:
@@ -34,6 +46,33 @@ class UwbSerialNode:
         self.replay_uncertainty_ns = int(
             rospy.get_param("~replay_uncertainty_ns", 1_000_000)
         )
+        self.timestamp_mode = rospy.get_param("~timestamp_mode", "host_local")
+        configured_imu_path = rospy.get_param("~imu_timeshare_path", "")
+        self.imu_timeshare_path = os.path.expanduser(
+            configured_imu_path
+            or os.path.join(os.path.expanduser("~"), "timeshare_imu")
+        )
+        self.time_offset_s = float(rospy.get_param("~time_offset_s", 0.0))
+        self.time_offset_ns = int(round(self.time_offset_s * 1_000_000_000))
+        self.imu_anchor_reader = None
+        self.imu_time_mapper = None
+        if self.timestamp_mode == "livox_imu_anchor":
+            self.imu_anchor_reader = LivoxImuAnchorReader(
+                self.imu_timeshare_path
+            )
+            self.imu_time_mapper = LivoxImuTimeMapper(
+                self.imu_anchor_reader,
+                warn_age_s=float(
+                    rospy.get_param("~imu_anchor_warn_age_s", 0.020)
+                ),
+                max_age_s=float(
+                    rospy.get_param("~imu_anchor_max_age_s", 0.100)
+                ),
+            )
+        elif self.timestamp_mode != "host_local":
+            raise ValueError(
+                "timestamp_mode must be host_local or livox_imu_anchor"
+            )
         self.tag_id = int(rospy.get_param("~tag_id", 0))
         bias_param = rospy.get_param("~range_bias_m", {})
         biases = {int(key): float(value) for key, value in bias_param.items()}
@@ -78,6 +117,7 @@ class UwbSerialNode:
         self.parse_error_count = 0
         self.range_reject_count = 0
         self.reconnect_count = 0
+        self.timestamp_mapping_drop_count = 0
         self.last_raw = None
 
         self.raw_pub = rospy.Publisher("/uwb/raw", RawSerialFrame, queue_size=100)
@@ -91,11 +131,19 @@ class UwbSerialNode:
         self.worker = threading.Thread(target=self._run, name="uwb_source", daemon=True)
         self.worker.start()
         rospy.on_shutdown(self.shutdown)
+        rospy.loginfo(
+            "[UWB_TIME] mode=%s path=%s offset_s=%.9f",
+            self.timestamp_mode,
+            self.imu_timeshare_path,
+            self.time_offset_s,
+        )
 
     def shutdown(self):
         self.stop_event.set()
         if self.worker.is_alive():
             self.worker.join(timeout=2.0)
+        if self.imu_anchor_reader is not None:
+            self.imu_anchor_reader.close()
         for stream in (self.raw_log, self.parsed_log):
             if stream:
                 stream.close()
@@ -113,6 +161,69 @@ class UwbSerialNode:
         except rospy.ServiceException:
             pass
         return 0, 0, 0, 0
+
+    def _timestamp_for_line(self, host_monotonic_ns, replay, preserved_ns):
+        if replay and self.replay_mode == "preserve" and preserved_ns > 0:
+            return (
+                preserved_ns,
+                self.replay_session_id,
+                0,
+                max(1, self.replay_uncertainty_ns),
+                RawSerialFrame.REPLAY_PRESERVED,
+                "replay_preserved",
+            )
+
+        if self.timestamp_mode == "livox_imu_anchor":
+            result = self.imu_time_mapper.map_time(
+                host_monotonic_ns, self.time_offset_ns
+            )
+            if result.warning:
+                rospy.logwarn_throttle(
+                    5.0,
+                    "[UWB_TIME] anchor delta %.3f ms exceeds warning age",
+                    result.anchor_delta_ns / 1e6,
+                )
+            if not result.success:
+                rospy.logwarn_throttle(
+                    5.0,
+                    "[UWB_TIME] mapping unavailable: %s",
+                    result.failure_reason,
+                )
+                return (
+                    0,
+                    0,
+                    result.writer_epoch,
+                    0,
+                    RawSerialFrame.INVALID,
+                    result.failure_reason,
+                )
+            return (
+                result.mapped_stamp_ns,
+                0,
+                result.writer_epoch,
+                result.anchor_uncertainty_ns,
+                RawSerialFrame.DEVICE_TIME_MAPPED_LOCAL,
+                "livox_imu_anchor",
+            )
+
+        local_ns, session_id, writer_epoch, uncertainty = self._host_local(
+            host_monotonic_ns
+        )
+        timestamp_source = (
+            RawSerialFrame.REPLAY_REBASED
+            if replay and self.replay_mode == "rebase" and local_ns
+            else RawSerialFrame.HOST_RECEIVE_LOCAL
+            if local_ns
+            else RawSerialFrame.INVALID
+        )
+        return (
+            local_ns,
+            session_id,
+            writer_epoch,
+            uncertainty,
+            timestamp_source,
+            "host_local" if local_ns else "host_local_unavailable",
+        )
 
     def _run(self):
         if self.source == "file":
@@ -211,24 +322,33 @@ class UwbSerialNode:
             self.stop_event.wait(1.0)
 
     def _handle_line(self, line, replay, preserved_ns):
-        host_monotonic_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
+        host_monotonic_ns = (
+            time.monotonic_ns()
+            if self.timestamp_mode == "livox_imu_anchor"
+            else time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
+        )
         host_wall = rospy.Time.now()
-        local_ns, session_id, writer_epoch, uncertainty = self._host_local(host_monotonic_ns)
-        timestamp_source = UwbRangeArray.HOST_RECEIVE_LOCAL
-        if replay and self.replay_mode == "preserve" and preserved_ns > 0:
-            local_ns = preserved_ns
-            session_id = self.replay_session_id
-            uncertainty = max(1, self.replay_uncertainty_ns)
-            timestamp_source = UwbRangeArray.REPLAY_PRESERVED
-        elif replay and self.replay_mode == "rebase" and local_ns > 0:
-            timestamp_source = UwbRangeArray.REPLAY_REBASED
-        elif local_ns == 0:
-            timestamp_source = UwbRangeArray.INVALID
+        (
+            local_ns,
+            session_id,
+            writer_epoch,
+            uncertainty,
+            timestamp_source,
+            _,
+        ) = self._timestamp_for_line(
+            host_monotonic_ns, replay, preserved_ns
+        )
 
         self.raw_line_count += 1
         raw = RawSerialFrame()
-        raw.header.stamp = rospy.Time.from_sec(local_ns / 1e9) if local_ns else rospy.Time()
-        raw.header.frame_id = "local_sensor_time"
+        raw.header.stamp = ros_time_from_ns(local_ns)
+        raw.header.frame_id = (
+            "livox_imu_legacy_time"
+            if self.timestamp_mode == "livox_imu_anchor"
+            and timestamp_source
+            == RawSerialFrame.DEVICE_TIME_MAPPED_LOCAL
+            else "local_sensor_time"
+        )
         raw.session_id = session_id
         raw.writer_epoch = writer_epoch
         raw.source_sequence = self.raw_line_count
@@ -243,6 +363,7 @@ class UwbSerialNode:
         self.last_raw = raw
         if self.raw_log:
             self.raw_log.write("{} {}\n".format(host_monotonic_ns, line))
+        self._log_time_summary()
 
         if self.round_assembler is not None:
             self._handle_distance_round5(line, raw)
@@ -299,6 +420,24 @@ class UwbSerialNode:
 
     def _publish_ranges(self, parsed, timestamp_raw, status_raw):
         stamp_ns = timestamp_raw.header.stamp.to_nsec()
+        if (
+            self.timestamp_mode == "livox_imu_anchor"
+            and (
+                stamp_ns == 0
+                or timestamp_raw.timestamp_source
+                != RawSerialFrame.DEVICE_TIME_MAPPED_LOCAL
+            )
+        ):
+            self.timestamp_mapping_drop_count += 1
+            rospy.logwarn_throttle(
+                5.0,
+                "[UWB_TIME] complete range round dropped: first nonzero "
+                "distance has no valid IMU anchor mapping",
+            )
+            self._publish_status(
+                status_raw, "timestamp mapping unavailable; round dropped"
+            )
+            return False
         filtered = self.filter.filter(
             parsed, stamp_ns / 1e9 if stamp_ns else time.monotonic()
         )
@@ -381,6 +520,46 @@ class UwbSerialNode:
             protocol.duplicate_anchor_count,
         )
 
+    def _time_detail(self):
+        if self.imu_time_mapper is None:
+            return "timestamp_mode={}".format(self.timestamp_mode)
+        stats = self.imu_time_mapper.stats
+        return (
+            "timestamp_mode=livox_imu_anchor mapped={} not_ready={} "
+            "stale={} invalid={} epoch_change={} nonmonotonic_drop={} "
+            "mapping_error={} range_time_drop={} offset_s={:.9f}"
+        ).format(
+            stats.mapped_count,
+            stats.not_ready_count,
+            stats.stale_count,
+            stats.invalid_count,
+            stats.epoch_change_count,
+            stats.nonmonotonic_drop_count,
+            stats.mapping_error_count,
+            self.timestamp_mapping_drop_count,
+            self.time_offset_s,
+        )
+
+    def _log_time_summary(self):
+        if self.imu_time_mapper is None:
+            return
+        stats = self.imu_time_mapper.stats
+        rospy.loginfo_throttle(
+            20.0,
+            "[UWB_TIME] mode=livox_imu_anchor mapped=%d not_ready=%d "
+            "stale=%d invalid=%d epoch_change=%d nonmonotonic_drop=%d "
+            "mapping_error=%d range_time_drop=%d offset_s=%.9f",
+            stats.mapped_count,
+            stats.not_ready_count,
+            stats.stale_count,
+            stats.invalid_count,
+            stats.epoch_change_count,
+            stats.nonmonotonic_drop_count,
+            stats.mapping_error_count,
+            self.timestamp_mapping_drop_count,
+            self.time_offset_s,
+        )
+
     def _log_protocol_summary(self):
         if self.round_assembler is None:
             return
@@ -415,7 +594,9 @@ class UwbSerialNode:
         status.repeat_drop_count = self.filter.drop_count
         status.reconnect_count = self.reconnect_count
         status.source = self.source
-        status.detail = "{}; {}".format(detail, self._protocol_detail())
+        status.detail = "{}; {}; {}".format(
+            detail, self._protocol_detail(), self._time_detail()
+        )
         self.status_pub.publish(status)
 
 

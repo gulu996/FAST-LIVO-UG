@@ -27,6 +27,17 @@
   <arg name="bag_prefix" default="sensors"/>
   <arg name="sim_start_without_gnss_s" default="86400.0"/>
   <arg name="timeshare_path" default="$(env HOME)/timeshare"/>
+  <arg name="imu_timeshare_path" default="$(env HOME)/timeshare_imu"/>
+  <arg name="imu_anchor_enable" default="true"/>
+  <arg name="imu_anchor_min_ready_samples" default="3"/>
+  <arg name="imu_anchor_uncertainty_ns" default="10000000"/>
+  <arg name="imu_anchor_max_stamp_step_s" default="0.1"/>
+  <arg name="imu_anchor_warn_age_s" default="0.020"/>
+  <arg name="imu_anchor_max_age_s" default="0.100"/>
+  <arg name="uwb_timestamp_mode" default="livox_imu_anchor"/>
+  <arg name="gnss_timestamp_mode" default="livox_imu_anchor"/>
+  <arg name="uwb_time_offset_s" default="0.0"/>
+  <arg name="gnss_time_offset_s" default="0.0"/>
 
   <include file="$(find sensor_recording_bringup)/launch/sensors_only.launch">
     <arg name="enable_time_bridge" value="$(arg enable_time_bridge)"/>
@@ -55,6 +66,22 @@
          value="$(arg uwb_distance_lines_per_round)"/>
     <arg name="uwb_round_timeout_s" value="$(arg uwb_round_timeout_s)"/>
     <arg name="timeshare_path" value="$(arg timeshare_path)"/>
+    <arg name="imu_timeshare_path" value="$(arg imu_timeshare_path)"/>
+    <arg name="imu_anchor_enable" value="$(arg imu_anchor_enable)"/>
+    <arg name="imu_anchor_min_ready_samples"
+         value="$(arg imu_anchor_min_ready_samples)"/>
+    <arg name="imu_anchor_uncertainty_ns"
+         value="$(arg imu_anchor_uncertainty_ns)"/>
+    <arg name="imu_anchor_max_stamp_step_s"
+         value="$(arg imu_anchor_max_stamp_step_s)"/>
+    <arg name="imu_anchor_warn_age_s"
+         value="$(arg imu_anchor_warn_age_s)"/>
+    <arg name="imu_anchor_max_age_s"
+         value="$(arg imu_anchor_max_age_s)"/>
+    <arg name="uwb_timestamp_mode" value="$(arg uwb_timestamp_mode)"/>
+    <arg name="gnss_timestamp_mode" value="$(arg gnss_timestamp_mode)"/>
+    <arg name="uwb_time_offset_s" value="$(arg uwb_time_offset_s)"/>
+    <arg name="gnss_time_offset_s" value="$(arg gnss_time_offset_s)"/>
   </include>
 
   <node pkg="sensor_recording_bringup" type="session_recorder.py"

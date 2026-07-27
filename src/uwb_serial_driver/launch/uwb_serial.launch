@@ -11,6 +11,11 @@
   <arg name="parser_mode" default="distance_round5"/>
   <arg name="distance_lines_per_round" default="5"/>
   <arg name="round_timeout_s" default="2.0"/>
+  <arg name="timestamp_mode" default="host_local"/>
+  <arg name="imu_timeshare_path" default="$(env HOME)/timeshare_imu"/>
+  <arg name="imu_anchor_warn_age_s" default="0.020"/>
+  <arg name="imu_anchor_max_age_s" default="0.100"/>
+  <arg name="time_offset_s" default="0.0"/>
   <arg name="config_file" default="$(find uwb_serial_driver)/config/default.yaml"/>
   <rosparam command="load" file="$(arg config_file)" ns="uwb_serial_driver"/>
   <node pkg="uwb_serial_driver" type="uwb_serial_node.py"
@@ -28,5 +33,12 @@
     <param name="distance_lines_per_round"
            value="$(arg distance_lines_per_round)"/>
     <param name="round_timeout_s" value="$(arg round_timeout_s)"/>
+    <param name="timestamp_mode" value="$(arg timestamp_mode)"/>
+    <param name="imu_timeshare_path" value="$(arg imu_timeshare_path)"/>
+    <param name="imu_anchor_warn_age_s"
+           value="$(arg imu_anchor_warn_age_s)"/>
+    <param name="imu_anchor_max_age_s"
+           value="$(arg imu_anchor_max_age_s)"/>
+    <param name="time_offset_s" value="$(arg time_offset_s)"/>
   </node>
 </launch>

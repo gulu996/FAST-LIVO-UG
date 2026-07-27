@@ -29,6 +29,7 @@
 
 #include <inttypes.h>
 #include <algorithm>
+#include <atomic>
 #include <errno.h>
 #include <exception>
 #include <iostream>
@@ -84,6 +85,17 @@ uint32_t SharedClockSourceFromTimestampType(uint8_t timestamp_type) {
   }
 }
 
+uint32_t ImuAnchorClockSourceFromTimestampType(uint8_t timestamp_type) {
+  switch (timestamp_type) {
+    case kTimestampTypeGptpOrPtp:
+      return kImuAnchorDevicePtp;
+    case kTimestampTypeGps:
+      return kImuAnchorDeviceGps;
+    default:
+      return kImuAnchorClockUnknown;
+  }
+}
+
 const char* TimestampTypeName(uint8_t timestamp_type) {
   switch (timestamp_type) {
     case kTimestampTypeGptpOrPtp:
@@ -105,6 +117,14 @@ uint64_t MakeWriterEpoch() {
       static_cast<uint64_t>(realtime.tv_nsec);
   return realtime_ns ^ MonotonicNowNs() ^
          (static_cast<uint64_t>(getpid()) << 32U);
+}
+
+uint64_t MakeImuAnchorWriterEpoch() {
+  static std::atomic<uint64_t> instance_counter{1};
+  uint64_t epoch =
+      MonotonicNowNs() ^ (static_cast<uint64_t>(getpid()) << 32U) ^
+      instance_counter.fetch_add(1, std::memory_order_relaxed);
+  return epoch == 0 ? 1 : epoch;
 }
 
 }  // namespace
@@ -184,6 +204,7 @@ uint64_t MakeWriterEpoch() {
       }
     }
 #endif
+    ShutdownImuAnchorWriter();
     ShutdownSharedTimestampState();
     std::cout << "lddc destory!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" << std::endl;
   }
@@ -257,6 +278,213 @@ uint64_t MakeWriterEpoch() {
     DRIVER_WARN(*cur_node_,
                 "Shared timestamp interface is LIDAR_BASE_TIME_LEGACY; "
                 "it is not a camera trigger association.");
+
+    private_node.param("imu_anchor_enable", imu_anchor_enable_, true);
+    std::string configured_imu_timeshare_path;
+    private_node.param<std::string>(
+        "imu_timeshare_path", configured_imu_timeshare_path, "");
+    int imu_anchor_min_ready_samples = 3;
+    int imu_anchor_uncertainty_ns = 10000000;
+    double imu_anchor_max_stamp_step_s = 0.1;
+    int imu_anchor_lidar_index = 0;
+    private_node.param("imu_anchor_min_ready_samples",
+                       imu_anchor_min_ready_samples, 3);
+    private_node.param("imu_anchor_uncertainty_ns",
+                       imu_anchor_uncertainty_ns, 10000000);
+    private_node.param("imu_anchor_max_stamp_step_s",
+                       imu_anchor_max_stamp_step_s, 0.1);
+    private_node.param("imu_anchor_lidar_index",
+                       imu_anchor_lidar_index, 0);
+    private_node.param("imu_anchor_log_period_s",
+                       imu_anchor_log_period_sec_, 20.0);
+
+    imu_anchor_config_.min_ready_samples =
+        static_cast<uint32_t>(std::max(2, imu_anchor_min_ready_samples));
+    imu_anchor_config_.uncertainty_ns =
+        static_cast<uint64_t>(std::max(1, imu_anchor_uncertainty_ns));
+    imu_anchor_config_.max_stamp_step_ns = static_cast<uint64_t>(
+        std::max(0.001, imu_anchor_max_stamp_step_s) * kNsPerSecond);
+    imu_anchor_lidar_index_ = static_cast<uint8_t>(
+        std::max(0, std::min(imu_anchor_lidar_index,
+                             static_cast<int>(kMaxSourceLidar - 1))));
+    imu_anchor_log_period_sec_ =
+        std::max(1.0, imu_anchor_log_period_sec_);
+
+    try
+    {
+      imu_timeshare_path_ = configured_imu_timeshare_path.empty()
+          ? ResolveTimesharePath("") + "_imu"
+          : ResolveTimesharePath(configured_imu_timeshare_path);
+    }
+    catch (const std::exception& error)
+    {
+      DRIVER_FATAL(*cur_node_, "Cannot resolve imu_timeshare_path: %s",
+                   error.what());
+      throw;
+    }
+    if (imu_timeshare_path_ == timeshare_path_)
+    {
+      DRIVER_FATAL(*cur_node_,
+                   "imu_timeshare_path must not reuse camera timeshare: %s",
+                   imu_timeshare_path_.c_str());
+      throw std::invalid_argument(
+          "imu_timeshare_path must differ from timeshare_path");
+    }
+    DRIVER_INFO(*cur_node_, "[IMU_ANCHOR] role=writer path=%s",
+                imu_timeshare_path_.c_str());
+    if (imu_anchor_enable_)
+    {
+      imu_anchor_writer_.reset(
+          new ImuTimeAnchorWriter(imu_anchor_config_));
+      InitializeImuAnchorWriter();
+    }
+#endif
+  }
+
+  bool Lddc::InitializeImuAnchorWriter()
+  {
+#ifndef BUILDING_ROS1
+    return false;
+#else
+    if (!imu_anchor_enable_ || !imu_anchor_writer_)
+    {
+      return false;
+    }
+    if (imu_anchor_writer_->is_open())
+    {
+      return true;
+    }
+    last_imu_anchor_open_attempt_ns_ = MonotonicNowNs();
+    imu_anchor_writer_epoch_ = MakeImuAnchorWriterEpoch();
+    std::string error;
+    if (!imu_anchor_writer_->Open(
+            imu_timeshare_path_, imu_anchor_writer_epoch_, &error))
+    {
+      DRIVER_ERROR(*cur_node_,
+                   "[IMU_ANCHOR] cannot initialize %s: %s",
+                   imu_timeshare_path_.c_str(), error.c_str());
+      return false;
+    }
+    last_imu_anchor_ready_ = false;
+    ImuTimeAnchorSnapshot snapshot;
+    imu_anchor_writer_->ReadSnapshot(&snapshot);
+    DRIVER_INFO(*cur_node_,
+                "[IMU_ANCHOR] ready=false epoch=%" PRIu64
+                " sequence=%" PRIu64,
+                imu_anchor_writer_epoch_, snapshot.write_sequence);
+    return true;
+#endif
+  }
+
+  void Lddc::ShutdownImuAnchorWriter()
+  {
+    if (!imu_anchor_writer_)
+    {
+      return;
+    }
+    if (imu_anchor_writer_->is_open())
+    {
+#ifdef BUILDING_ROS1
+      DRIVER_INFO(*cur_node_,
+                  "[IMU_ANCHOR] ready=false epoch=%" PRIu64 " shutdown=true",
+                  imu_anchor_writer_->writer_epoch());
+#endif
+      imu_anchor_writer_->Close();
+    }
+    imu_anchor_writer_.reset();
+    last_imu_anchor_ready_ = false;
+  }
+
+  void Lddc::UpdateImuAnchor(uint8_t index, const ImuData& imu_data)
+  {
+#ifdef BUILDING_ROS1
+    if (!imu_anchor_enable_ || index != imu_anchor_lidar_index_)
+    {
+      return;
+    }
+    const uint64_t update_ns = MonotonicNowNs();
+    if (!imu_anchor_writer_ || !imu_anchor_writer_->is_open())
+    {
+      const uint64_t retry_ns = static_cast<uint64_t>(
+          shared_open_retry_sec_ * kNsPerSecond);
+      if (last_imu_anchor_open_attempt_ns_ != 0 &&
+          update_ns - last_imu_anchor_open_attempt_ns_ < retry_ns)
+      {
+        return;
+      }
+      if (!InitializeImuAnchorWriter())
+      {
+        return;
+      }
+    }
+
+    const bool was_ready = imu_anchor_writer_->ready();
+    imu_anchor_writer_->Observe(
+        imu_data.time_stamp, imu_data.host_monotonic_ns,
+        ImuAnchorClockSourceFromTimestampType(imu_data.timestamp_type),
+        update_ns);
+    const bool is_ready = imu_anchor_writer_->ready();
+    if (was_ready != is_ready || last_imu_anchor_ready_ != is_ready)
+    {
+      ImuTimeAnchorSnapshot snapshot;
+      imu_anchor_writer_->ReadSnapshot(&snapshot);
+      DRIVER_INFO(*cur_node_,
+                  "[IMU_ANCHOR] ready=%s epoch=%" PRIu64
+                  " sequence=%" PRIu64 " samples=%u",
+                  is_ready ? "true" : "false",
+                  imu_anchor_writer_->writer_epoch(),
+                  snapshot.write_sequence,
+                  imu_anchor_writer_->consecutive_samples());
+      last_imu_anchor_ready_ = is_ready;
+    }
+    LogImuAnchorSummary(update_ns);
+#else
+    (void)index;
+    (void)imu_data;
+#endif
+  }
+
+  void Lddc::LogImuAnchorSummary(uint64_t now_ns)
+  {
+#ifdef BUILDING_ROS1
+    if (!imu_anchor_writer_ || !imu_anchor_writer_->is_open())
+    {
+      return;
+    }
+    const uint64_t period_ns = static_cast<uint64_t>(
+        imu_anchor_log_period_sec_ * kNsPerSecond);
+    if (last_imu_anchor_log_ns_ != 0 &&
+        now_ns - last_imu_anchor_log_ns_ < period_ns)
+    {
+      return;
+    }
+    const ImuTimeAnchorWriterStats& stats = imu_anchor_writer_->stats();
+    ImuTimeAnchorSnapshot snapshot;
+    imu_anchor_writer_->ReadSnapshot(&snapshot);
+    double rate_hz = 0.0;
+    if (last_imu_anchor_log_ns_ != 0 && now_ns > last_imu_anchor_log_ns_)
+    {
+      rate_hz = static_cast<double>(
+          stats.accepted - last_imu_anchor_log_accepted_) *
+          static_cast<double>(kNsPerSecond) /
+          static_cast<double>(now_ns - last_imu_anchor_log_ns_);
+    }
+    last_imu_anchor_log_ns_ = now_ns;
+    last_imu_anchor_log_accepted_ = stats.accepted;
+    DRIVER_INFO(*cur_node_,
+                "[IMU_ANCHOR] ready=%s epoch=%" PRIu64
+                " sequence=%" PRIu64 " imu_stamp_ns=%" PRIu64
+                " anchor_rate_hz=%.2f accepted=%" PRIu64
+                " invalid_stamp=%" PRIu64 " backward=%" PRIu64
+                " duplicate=%" PRIu64 " jump=%" PRIu64
+                " clock_change=%" PRIu64,
+                imu_anchor_writer_->ready() ? "true" : "false",
+                imu_anchor_writer_->writer_epoch(),
+                snapshot.write_sequence, snapshot.imu_stamp_ns, rate_hz,
+                stats.accepted, stats.invalid_stamp, stats.backward,
+                stats.duplicate, stats.jump, stats.clock_source_change);
+#else
+    (void)now_ns;
 #endif
   }
 
@@ -1024,6 +1252,7 @@ uint64_t MakeWriterEpoch() {
     uint64_t timestamp;
     InitImuMsg(imu_data, imu_msg, timestamp);
     TrackClockSource(index, imu_data.timestamp_type, true);
+    UpdateImuAnchor(index, imu_data);
 
 #ifdef BUILDING_ROS1
     PublisherPtr publisher_ptr = GetCurrentImuPublisher(index);

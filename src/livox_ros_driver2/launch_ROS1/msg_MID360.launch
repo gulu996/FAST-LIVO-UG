@@ -15,6 +15,11 @@
 	<arg name="lidar_bag" default="true"/>
 	<arg name="imu_bag" default="true"/>
 	<arg name="timeshare_path" default="$(env HOME)/timeshare"/>
+	<arg name="imu_anchor_enable" default="true"/>
+	<arg name="imu_timeshare_path" default="$(env HOME)/timeshare_imu"/>
+	<arg name="imu_anchor_min_ready_samples" default="3"/>
+	<arg name="imu_anchor_uncertainty_ns" default="10000000"/>
+	<arg name="imu_anchor_max_stamp_step_s" default="0.1"/>
 	<!--user configure parameters for ros end--> 
 
 	<param name="xfer_format" value="$(arg xfer_format)"/>
@@ -33,6 +38,16 @@
 	      type="livox_ros_driver2_node" required="true"
 	      output="screen" args="$(arg cmdline_arg)">
 		<param name="timeshare_path" value="$(arg timeshare_path)"/>
+		<param name="imu_anchor_enable" value="$(arg imu_anchor_enable)"
+		       type="bool"/>
+		<param name="imu_timeshare_path"
+		       value="$(arg imu_timeshare_path)"/>
+		<param name="imu_anchor_min_ready_samples"
+		       value="$(arg imu_anchor_min_ready_samples)"/>
+		<param name="imu_anchor_uncertainty_ns"
+		       value="$(arg imu_anchor_uncertainty_ns)"/>
+		<param name="imu_anchor_max_stamp_step_s"
+		       value="$(arg imu_anchor_max_stamp_step_s)"/>
 	</node>
 
 	<group if="$(arg rosbag_enable)">

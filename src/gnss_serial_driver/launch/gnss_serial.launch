@@ -5,6 +5,12 @@
   <arg name="replay_file" default=""/>
   <arg name="replay_mode" default="preserve"/>
   <arg name="replay_loop" default="false"/>
+  <arg name="replay_rate_hz" default="10.0"/>
+  <arg name="timestamp_mode" default="host_local"/>
+  <arg name="imu_timeshare_path" default="$(env HOME)/timeshare_imu"/>
+  <arg name="imu_anchor_warn_age_s" default="0.020"/>
+  <arg name="imu_anchor_max_age_s" default="0.100"/>
+  <arg name="time_offset_s" default="0.0"/>
   <arg name="config_file" default="$(find gnss_serial_driver)/config/default.yaml"/>
   <rosparam command="load" file="$(arg config_file)" ns="gnss_serial_driver"/>
   <node pkg="gnss_serial_driver" type="gnss_serial_node.py"
@@ -15,5 +21,13 @@
     <param name="replay_file" value="$(arg replay_file)"/>
     <param name="replay_mode" value="$(arg replay_mode)"/>
     <param name="replay_loop" value="$(arg replay_loop)"/>
+    <param name="replay_rate_hz" value="$(arg replay_rate_hz)"/>
+    <param name="timestamp_mode" value="$(arg timestamp_mode)"/>
+    <param name="imu_timeshare_path" value="$(arg imu_timeshare_path)"/>
+    <param name="imu_anchor_warn_age_s"
+           value="$(arg imu_anchor_warn_age_s)"/>
+    <param name="imu_anchor_max_age_s"
+           value="$(arg imu_anchor_max_age_s)"/>
+    <param name="time_offset_s" value="$(arg time_offset_s)"/>
   </node>
 </launch>

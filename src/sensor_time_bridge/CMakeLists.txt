@@ -9,6 +9,8 @@ find_package(catkin REQUIRED COMPONENTS
   std_msgs
 )
 
+catkin_python_setup()
+
 catkin_package(
   INCLUDE_DIRS include
   LIBRARIES sensor_time_core
@@ -34,6 +36,7 @@ add_dependencies(mcu_event_simulator ${catkin_EXPORTED_TARGETS})
 target_link_libraries(mcu_event_simulator sensor_time_core ${catkin_LIBRARIES})
 
 if(CATKIN_ENABLE_TESTING)
+  catkin_add_nosetests(test/test_livox_imu_anchor.py)
   catkin_add_gtest(sensor_time_core_test test/sensor_time_core_test.cpp)
   if(TARGET sensor_time_core_test)
     target_link_libraries(sensor_time_core_test sensor_time_core ${catkin_LIBRARIES})

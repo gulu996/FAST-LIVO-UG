@@ -23,6 +23,7 @@
 //
 
 #include "pub_handler.h"
+#include "livox_ros_driver2/shared_timestamp_state.h"
 
 #include <cstdlib>
 #include <chrono>
@@ -109,6 +110,9 @@ void PubHandler::OnLivoxLidarPointCloudCallback(uint32_t handle, const uint8_t d
       imu_data.timestamp_type = data->time_type;
       imu_data.time_stamp = GetEthPacketTimestamp(data->time_type,
                                                   data->timestamp, sizeof(data->timestamp));
+      // Captured at the SDK callback boundary and carried with this exact IMU
+      // packet; later queueing and ROS publication do not change the anchor.
+      imu_data.host_monotonic_ns = MonotonicNowNs();
       imu_data.gyro_x = imu->gyro_x;
       imu_data.gyro_y = imu->gyro_y;
       imu_data.gyro_z = imu->gyro_z;
