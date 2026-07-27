@@ -1,0 +1,33 @@
+<launch>
+  <!-- 当前雷达帧轻量预览，不运行定位、建图或点云累计。 -->
+  <arg name="input_topic" default="/livox/lidar"/>
+  <arg name="output_topic" default="/mapping/globalMap"/>
+  <arg name="frame_id" default="camera_init"/>
+
+  <!-- 手机端固定预览参数 -->
+  <arg name="publish_rate" default="5.0"/>
+  <arg name="point_stride" default="2"/>
+  <arg name="voxel_size" default="0.15"/>
+  <arg name="min_range" default="0.8"/>
+  <arg name="max_range" default="40.0"/>
+  <arg name="max_points" default="3000"/>
+  <arg name="use_reflectivity_color" default="true"/>
+
+  <node pkg="sensor_recording_bringup"
+        type="raw_cloud_preview.py"
+        name="raw_cloud_preview"
+        output="screen"
+        respawn="true"
+        respawn_delay="2.0">
+    <param name="input_topic" value="$(arg input_topic)"/>
+    <param name="output_topic" value="$(arg output_topic)"/>
+    <param name="frame_id" value="$(arg frame_id)"/>
+    <param name="publish_rate" value="$(arg publish_rate)"/>
+    <param name="point_stride" value="$(arg point_stride)"/>
+    <param name="voxel_size" value="$(arg voxel_size)"/>
+    <param name="min_range" value="$(arg min_range)"/>
+    <param name="max_range" value="$(arg max_range)"/>
+    <param name="max_points" value="$(arg max_points)"/>
+    <param name="use_reflectivity_color" value="$(arg use_reflectivity_color)"/>
+  </node>
+</launch>
