@@ -79,6 +79,9 @@ class UwbSerialNode:
         self.parser_mode = rospy.get_param(
             "~parser_mode", "distance_round5"
         )
+        self.round_timestamp_policy = rospy.get_param(
+            "~round_timestamp_policy", "first_distance_line"
+        )
         self.parser = UwbParser(
             parser_mode=self.parser_mode,
             anchor_order=rospy.get_param("~anchor_order", []),
@@ -97,6 +100,7 @@ class UwbSerialNode:
                 round_timeout_s=float(
                     rospy.get_param("~round_timeout_s", 2.0)
                 ),
+                round_timestamp_policy=self.round_timestamp_policy,
             )
         self.filter = RangeFilter(
             epsilon_m=float(rospy.get_param("~repeat_epsilon_m", 0.001)),
@@ -137,6 +141,12 @@ class UwbSerialNode:
             self.imu_timeshare_path,
             self.time_offset_s,
         )
+        if self.round_assembler is not None:
+            rospy.loginfo(
+                "[UWB_PROTO] mode=distance_round5 "
+                "round_timestamp_policy=%s",
+                self.round_timestamp_policy,
+            )
 
     def shutdown(self):
         self.stop_event.set()
@@ -191,7 +201,7 @@ class UwbSerialNode:
                 )
                 return (
                     0,
-                    0,
+                    result.mapping_session_id,
                     result.writer_epoch,
                     0,
                     RawSerialFrame.INVALID,
@@ -199,7 +209,9 @@ class UwbSerialNode:
                 )
             return (
                 result.mapped_stamp_ns,
-                0,
+                # In anchor mode session_id names the Livox IMU mapping
+                # session, not the sensor_time_bridge MCU/LOCAL session.
+                result.mapping_session_id,
                 result.writer_epoch,
                 result.anchor_uncertainty_ns,
                 RawSerialFrame.DEVICE_TIME_MAPPED_LOCAL,
@@ -431,8 +443,8 @@ class UwbSerialNode:
             self.timestamp_mapping_drop_count += 1
             rospy.logwarn_throttle(
                 5.0,
-                "[UWB_TIME] complete range round dropped: first nonzero "
-                "distance has no valid IMU anchor mapping",
+                "[UWB_TIME] complete range round dropped: selected round "
+                "timestamp context has no valid IMU anchor mapping",
             )
             self._publish_status(
                 status_raw, "timestamp mapping unavailable; round dropped"
@@ -505,10 +517,12 @@ class UwbSerialNode:
             return "mode={}".format(self.parser_mode)
         protocol = self.round_assembler
         return (
-            "mode=distance_round5 state={} pending={} complete={} "
+            "mode=distance_round5 round_timestamp_policy={} "
+            "state={} pending={} complete={} "
             "empty={} zero={} incomplete={} malformed={} ignored_debug={} "
             "duplicate={}"
         ).format(
+            protocol.round_timestamp_policy,
             protocol.state,
             protocol.pending_distance_line_count,
             protocol.complete_round_count,

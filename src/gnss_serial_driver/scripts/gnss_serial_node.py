@@ -185,14 +185,16 @@ class GnssSerialNode:
                 )
                 return (
                     0,
-                    0,
+                    result.mapping_session_id,
                     result.writer_epoch,
                     0,
                     RawSerialFrame.INVALID,
                 )
             return (
                 result.mapped_stamp_ns,
-                0,
+                # In anchor mode session_id names the Livox IMU mapping
+                # session, not the sensor_time_bridge MCU/LOCAL session.
+                result.mapping_session_id,
                 result.writer_epoch,
                 result.anchor_uncertainty_ns,
                 RawSerialFrame.DEVICE_TIME_MAPPED_LOCAL,

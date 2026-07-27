@@ -21,12 +21,12 @@ mapped_stamp_ns =
 - Livox 驱动在 MID-360 SDK IMU 回调入口为同一 IMU 包记录 `CLOCK_MONOTONIC`，经现有 IMU 队列携带到发布线程后写入 64 字节共享协议。
 - `/livox/imu` 和 `/livox/lidar` 原有时间戳没有改变。
 - Camera 继续使用原 `$HOME/timeshare`；协议、驱动和时间戳行为没有改变。
-- UWB `distance_round5` 协议没有改变；`/uwb/ranges` 继续采用第一条非零 `distance` 行的上下文。
+- UWB `distance_round5` 的 ID、五槽和零值语义没有改变；`/uwb/ranges` 默认采用第一条语法有效的正式 `distance` 行上下文，旧 `first_nonzero` 行为可显式配置。
 - GNSS 在完整行形成时记录接收时刻，仅让校验通过且位置有效的 PVT 进入映射后的融合链路。
 - `mcu_input_mode=simulation` 只保留会话和录包门控职责，不再决定 anchor 模式下 UWB/GNSS 的 `header.stamp`。
 - 映射失败、锚点未就绪或锚点超过 100 ms 时不回退系统时间或 simulation LOCAL 时间。
 - ROS 消息定义及 MD5 均未改变。
-- Release 全工作空间编译通过；最终测试汇总为 143 项、0 error、0 failure、0 skipped。
+- Release 全工作空间编译通过；最终测试汇总为 149 项、0 error、0 failure、0 skipped。
 
 这是一套软件时间域统一方案，不是硬件级同步。它把主机完整数据接收时刻投影到 MID-360 时间轴，仍包含设备内部处理、网络/SDK、串口缓存和调度延迟。
 
@@ -58,7 +58,7 @@ sensor_time_bridge simulation LOCAL
 - GNSS 校验：`src/gnss_serial_driver/src/gnss_serial_driver/parser.py:89`
 - GNSS ENU 适配器复制输入 Header：`src/gnss_serial_driver/src/gnss_adapter_node.cpp:83`
 - FAST 外部 GNSS 已拒绝 `header.stamp==0`：`src/FAST_LIVO2/src/gnss_manager.cpp:1517`
-- UWB 第一条非零距离上下文：`src/uwb_serial_driver/src/uwb_serial_driver/parser.py:244-245`，完成轮次在第 262 行取出。
+- UWB 轮次时间策略：`src/uwb_serial_driver/src/uwb_serial_driver/parser.py` 的 `DistanceRoundAssembler`；默认 `first_distance_line`，兼容策略为 `first_nonzero`。
 
 ## 3. 修改后的实际数据链
 
@@ -97,7 +97,7 @@ Livox SDK IMU Ethernet packet
         │     └─> /uwb/raw.header.stamp
         └─> DistanceRoundAssembler
               ├─> UWBDBG/TWR 仅作为协议边界或诊断
-              ├─> 保留第一条非零 distance 的 RawSerialFrame 上下文
+              ├─> 默认保留第一条正式 distance 的 RawSerialFrame 上下文
               └─> 完整 5 行且该上下文映射有效
                     └─> /uwb/ranges
 ```
@@ -221,10 +221,14 @@ mapper 规则：
 - `abs(delta)>20 ms`：仍映射，但增加 warning 计数并限频报警；
 - `abs(delta)>100 ms`：`stale_anchor`，不生成有效 stamp；
 - 结果必须处于 ROS1 uint32 秒可表示范围且大于零；
-- 每个 driver 的输出映射严格递增，否则丢弃；
+- 每个 writer epoch 内的输出映射严格递增，否则丢弃；
 - 不回退到 `now()`、simulation LOCAL 或 bag receive time。
 
-如果 MID-360 设备 epoch 本身在重启后倒退，严格单调门控会继续拒绝该流；这比静默发布倒序时间安全。恢复这种设备级 epoch 重置需要重新启动消费节点/新建记录会话，或未来定义显式的跨 epoch 会话协议。
+reader 第一次发现新 writer epoch 时仍返回一次 `epoch_changed`。下一次读取稳定新 epoch 后，mapper 清空上一 epoch 的单调状态，因此允许新时间轴从较小值重新开始；同一 epoch 内的重复或倒退仍拒绝。不会在新旧 epoch 之间伪造 1 ns 连续性。
+
+在 `livox_imu_anchor` 模式下，现有消息的 `session_id` 表示 Livox IMU anchor mapping session，并与 `writer_epoch` 取相同值；它不是 `sensor_time_bridge` 的 MCU/simulation LOCAL session。这样 UWB 与 GNSS 在读取同一 `timeshare_imu` writer 时具有相同会话标识，Livox writer 进程重启后两个字段同步变化。`header.frame_id=livox_imu_legacy_time` 用于标识时间域。
+
+不能复制 `/sensor_time/status.session_id`：该字段属于 MCU/simulation LOCAL 时间会话，而 anchor 模式的 Header 属于 MID-360 legacy IMU 时间域；混用会把两个无映射关系的会话错误描述为同一时间域。
 
 ## 8. UWB 时间戳选择规则
 
@@ -242,8 +246,10 @@ mapper 规则：
 - `replay_mode=preserve` 且记录携带原时间戳时，原时间戳优先，不重新映射；
 - anchor 模式中所有原始非空行继续发布；
 - UWBDBG/TWR 不成为测距时间；
-- 第一条非零 distance 行的映射结果随上下文保存；
-- 第 5 条行、零值行或真正 publish 时刻不会覆盖它；
+- 默认 `round_timestamp_policy=first_distance_line`，无论第一个槽位距离是否为零都保存其上下文；
+- 可显式选择 `round_timestamp_policy=first_nonzero` 兼容旧行为；
+- UWBDBG/TWR、后续非零行、第 5 条行或真正 publish 时刻都不会覆盖已选择上下文；
+- 所有可发布的 RangeArray 时间元数据都复制自同一选择上下文；
 - 时间映射失败只增加 `timestamp_mapping_drop_count`，不增加 `parse_error_count`；
 - `UwbStatus.detail` 和 `[UWB_TIME]` 周期日志包含全部 anchor 计数。
 
@@ -310,6 +316,7 @@ UWB/GNSS reader：
 
 ```text
 timestamp_mode=livox_imu_anchor        # bringup 默认
+round_timestamp_policy=first_distance_line
 imu_anchor_warn_age_s=0.020
 imu_anchor_max_age_s=0.100
 time_offset_s=0.0
@@ -429,7 +436,7 @@ catkin_test_results build/test_results --all
 最终结果：
 
 ```text
-Summary: 143 tests, 0 errors, 0 failures, 0 skipped
+Summary: 149 tests, 0 errors, 0 failures, 0 skipped
 ```
 
 包含：
@@ -443,22 +450,24 @@ Summary: 143 tests, 0 errors, 0 failures, 0 skipped
 - epoch change；
 - 正/负 delta、20 ms warning、100 ms rejection；
 - offset、ROS 时间范围和严格单调；
-- UWB 第一条非零上下文；
+- UWB 默认首条正式 `distance` 行上下文及显式 `first_nonzero` 兼容策略；
+- 单基站 1 号、单基站切换双基站、全零轮、不完整轮和上下文清理；
 - GNSS 校验和设备 UTC 保留；
 - Stage A/B1 原测试；
 - software simulation；
 - UWB distance_round5 原集成测试；
 - 新的 UWB/GNSS 共享 2020 epoch、暂停 stale、writer epoch 重启自动恢复 ROS 集成测试。
 
-### 额外 Python 测试
+### 相关 Python 测试
 
-按三个实际测试目录分别执行 `unittest discover`。结果：
+按四个直接相关测试文件执行。结果：
 
 ```text
-sensor_time_bridge: 15 passed
-uwb_serial_driver:   2 passed
-gnss_serial_driver:  3 passed
-total:              20 passed
+test_parser.py:             22 passed
+test_uwb_imu_anchor.py:      3 passed
+test_livox_imu_anchor.py:   17 passed
+test_gnss_imu_anchor.py:     3 passed
+total:                      45 passed
 ```
 
 ### Launch 和静态检查
@@ -643,9 +652,8 @@ rostopic echo -n 3 /gnss/enu_odom/header
 - ROS 消息 MD5：已验证未变化。
 - Camera `$HOME/timeshare`：未修改。
 - LiDAR/IMU 原 Header：未修改。
-- UWB distance_round5：未修改。
+- UWB distance_round5：仅修改轮次时间戳上下文策略和相关元数据/测试；ID、五槽、零值、重复基站及滤波语义未修改。
 - FAST 状态估计、融合因子和权重：未修改。
 - STM32：未修改。
 - bag：未修改。
 - Git commit/push：未执行。
-

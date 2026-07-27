@@ -38,7 +38,7 @@ class UwbImuAnchorContextTest(unittest.TestCase):
     def tearDown(self):
         self.tempdir.cleanup()
 
-    def test_first_nonzero_distance_context_is_the_mapping_input(self):
+    def test_first_distance_context_is_the_default_mapping_input(self):
         assembler = DistanceRoundAssembler(
             UwbParser(parser_mode="distance_round5"),
             lines_per_round=5,
@@ -71,13 +71,47 @@ class UwbImuAnchorContextTest(unittest.TestCase):
         self.assertEqual(
             DistanceRoundAssembler.ROUND_COMPLETE, event.kind
         )
-        self.assertEqual(contexts[1], event.timestamp_context)
+        self.assertEqual(contexts[0], event.timestamp_context)
         mapper = LivoxImuTimeMapper(LivoxImuAnchorReader(self.path))
         mapped = mapper.map_time(event.timestamp_context)
         self.assertTrue(mapped.success)
         self.assertEqual(
-            1_577_836_800_003_200_000, mapped.mapped_stamp_ns
+            1_577_836_800_001_000_000, mapped.mapped_stamp_ns
         )
+        self.assertEqual(99, mapped.mapping_session_id)
+        self.assertEqual(99, mapped.writer_epoch)
+
+    def test_failed_selected_context_does_not_fall_forward(self):
+        assembler = DistanceRoundAssembler(
+            UwbParser(parser_mode="distance_round5")
+        )
+        assembler.process("[UWBDBG] diag=1", now_s=0.0)
+        contexts = [
+            self.anchor_host_ns + 100_000_001,
+            self.anchor_host_ns + 3_000_000,
+            self.anchor_host_ns + 4_000_000,
+            self.anchor_host_ns + 5_000_000,
+            self.anchor_host_ns + 6_000_000,
+        ]
+        event = None
+        for index, line in enumerate(
+            (
+                "distance[0],0",
+                "distance[1],1.405",
+                "distance[0],0",
+                "distance[0],0",
+                "distance[0],0",
+            )
+        ):
+            event = assembler.process(
+                line, context=contexts[index], now_s=0.1 + index * 0.01
+            )
+        self.assertEqual(contexts[0], event.timestamp_context)
+        result = LivoxImuTimeMapper(
+            LivoxImuAnchorReader(self.path)
+        ).map_time(event.timestamp_context)
+        self.assertFalse(result.success)
+        self.assertEqual("stale_anchor", result.failure_reason)
 
     def test_mapping_failure_keeps_protocol_round_but_has_no_fusion_time(self):
         missing = os.path.join(self.tempdir.name, "missing")

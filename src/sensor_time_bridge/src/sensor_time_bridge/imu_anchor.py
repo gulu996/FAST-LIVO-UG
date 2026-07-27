@@ -50,6 +50,11 @@ class TimeMappingResult:
     warning: bool = False
     failure_reason: str = ""
 
+    @property
+    def mapping_session_id(self) -> int:
+        """Livox anchor mapping session; never an MCU/LOCAL session."""
+        return self.writer_epoch
+
 
 @dataclass
 class ImuAnchorMapperStats:
@@ -241,6 +246,7 @@ class LivoxImuTimeMapper:
         self.warn_delta_ns = int(round(warn_age_s * 1_000_000_000))
         self.max_delta_ns = int(round(max_age_s * 1_000_000_000))
         self.stats = ImuAnchorMapperStats()
+        self.last_writer_epoch = None
         self.last_mapped_stamp_ns = 0
 
     def map_time(
@@ -264,9 +270,21 @@ class LivoxImuTimeMapper:
                 self.stats.not_ready_count += 1
             else:
                 self.stats.invalid_count += 1
-            return TimeMappingResult(False, failure_reason=reason)
+            anchor = read_result.snapshot
+            return TimeMappingResult(
+                False,
+                writer_epoch=anchor.writer_epoch if anchor else 0,
+                write_sequence=anchor.write_sequence if anchor else 0,
+                anchor_uncertainty_ns=(
+                    anchor.uncertainty_ns if anchor else 0
+                ),
+                failure_reason=reason,
+            )
 
         anchor = read_result.snapshot
+        if anchor.writer_epoch != self.last_writer_epoch:
+            self.last_writer_epoch = anchor.writer_epoch
+            self.last_mapped_stamp_ns = 0
         delta_ns = receive_ns - int(anchor.host_monotonic_ns)
         absolute_delta = abs(delta_ns)
         if absolute_delta > self.max_delta_ns:

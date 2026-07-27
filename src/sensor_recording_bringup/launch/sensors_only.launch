@@ -24,6 +24,7 @@
   <arg name="uwb_parser_mode" default="distance_round5"/>
   <arg name="uwb_distance_lines_per_round" default="5"/>
   <arg name="uwb_round_timeout_s" default="2.0"/>
+  <arg name="uwb_round_timestamp_policy" default="first_distance_line"/>
   <arg name="record_profile" default="both"/>
   <arg name="output_dir" default="/tmp"/>
   <arg name="bag_prefix" default="sensors"/> 
@@ -125,6 +126,8 @@
       <arg name="distance_lines_per_round"
            value="$(arg uwb_distance_lines_per_round)"/>
       <arg name="round_timeout_s" value="$(arg uwb_round_timeout_s)"/>
+      <arg name="round_timestamp_policy"
+           value="$(arg uwb_round_timestamp_policy)"/>
       <arg name="timestamp_mode" value="$(arg uwb_timestamp_mode)"/>
       <arg name="imu_timeshare_path" value="$(arg imu_timeshare_path)"/>
       <arg name="imu_anchor_warn_age_s"

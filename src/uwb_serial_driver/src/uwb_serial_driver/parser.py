@@ -147,14 +147,24 @@ class DistanceRoundAssembler:
     distance_prefix_pattern = re.compile(r"^\s*distance\b", re.I)
 
     def __init__(self, parser: UwbParser, lines_per_round=5,
-                 round_timeout_s=2.0):
+                 round_timeout_s=2.0,
+                 round_timestamp_policy="first_distance_line"):
         if int(lines_per_round) <= 0:
             raise ValueError("distance_lines_per_round must be positive")
         if float(round_timeout_s) <= 0.0:
             raise ValueError("round_timeout_s must be positive")
+        if round_timestamp_policy not in (
+            "first_distance_line",
+            "first_nonzero",
+        ):
+            raise ValueError(
+                "round_timestamp_policy must be first_distance_line "
+                "or first_nonzero"
+            )
         self.parser = parser
         self.lines_per_round = int(lines_per_round)
         self.round_timeout_s = float(round_timeout_s)
+        self.round_timestamp_policy = round_timestamp_policy
 
         self.complete_round_count = 0
         self.empty_round_count = 0
@@ -169,7 +179,8 @@ class DistanceRoundAssembler:
         self._distance_line_count = 0
         self._ranges: List[ParsedRange] = []
         self._seen_nonzero_anchors = set()
-        self._first_nonzero_context = None
+        self._round_timestamp_context = None
+        self._round_timestamp_selected = False
 
     @property
     def pending_distance_line_count(self) -> int:
@@ -181,7 +192,8 @@ class DistanceRoundAssembler:
         self._distance_line_count = 0
         self._ranges = []
         self._seen_nonzero_anchors = set()
-        self._first_nonzero_context = None
+        self._round_timestamp_context = None
+        self._round_timestamp_selected = False
 
     def _start_round(self, now_s: float) -> bool:
         dropped = self.state == self.WAIT_DISTANCE_LINES
@@ -192,7 +204,8 @@ class DistanceRoundAssembler:
         self._distance_line_count = 0
         self._ranges = []
         self._seen_nonzero_anchors = set()
-        self._first_nonzero_context = None
+        self._round_timestamp_context = None
+        self._round_timestamp_selected = False
         return dropped
 
     def expire(self, now_s: Optional[float] = None) -> bool:
@@ -237,12 +250,23 @@ class DistanceRoundAssembler:
             )
 
         anchor_id, raw_range = fields
+        if (
+            self.round_timestamp_policy == "first_distance_line"
+            and self._distance_line_count == 0
+        ):
+            self._round_timestamp_context = context
+            self._round_timestamp_selected = True
+        elif (
+            self.round_timestamp_policy == "first_nonzero"
+            and raw_range != 0.0
+            and not self._round_timestamp_selected
+        ):
+            self._round_timestamp_context = context
+            self._round_timestamp_selected = True
         self._distance_line_count += 1
         if raw_range == 0.0:
             self.zero_slot_count += 1
         else:
-            if self._first_nonzero_context is None:
-                self._first_nonzero_context = context
             if anchor_id in self._seen_nonzero_anchors:
                 self.duplicate_anchor_count += 1
             else:
@@ -259,7 +283,7 @@ class DistanceRoundAssembler:
             )
 
         ranges = self._ranges
-        timestamp_context = self._first_nonzero_context
+        timestamp_context = self._round_timestamp_context
         self.complete_round_count += 1
         self._reset()
         if not ranges:

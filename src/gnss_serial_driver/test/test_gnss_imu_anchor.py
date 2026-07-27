@@ -63,6 +63,8 @@ class GnssImuAnchorTimeTest(unittest.TestCase):
         self.assertEqual(
             1_577_836_800_007_000_000, mapped.mapped_stamp_ns
         )
+        self.assertEqual(123, mapped.mapping_session_id)
+        self.assertEqual(123, mapped.writer_epoch)
         self.assertEqual(original_utc_ns, parsed.utc_ns)
         self.assertTrue(
             valid_for_fusion(

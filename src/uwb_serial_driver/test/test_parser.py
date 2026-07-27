@@ -14,10 +14,15 @@ SAMPLE_PATH = os.path.join(
 )
 
 
-def new_assembler(**parser_kwargs):
+def new_assembler(
+    round_timestamp_policy="first_distance_line", **parser_kwargs
+):
     parser = UwbParser(parser_mode="distance_round5", **parser_kwargs)
     return DistanceRoundAssembler(
-        parser, lines_per_round=5, round_timeout_s=2.0
+        parser,
+        lines_per_round=5,
+        round_timeout_s=2.0,
+        round_timestamp_policy=round_timestamp_policy,
     )
 
 
@@ -56,8 +61,9 @@ class DistanceRoundAssemblerTest(unittest.TestCase):
         self.assertFalse(event.parse_error)
         self.assertEqual(1, assembler.ignored_debug_line_count)
 
-    def test_five_distance_lines_are_one_round_without_zero_anchor(self):
+    def test_single_anchor_keeps_wire_id_and_uses_first_distance_context(self):
         assembler = new_assembler()
+        contexts = ["slot-0", "slot-1", "slot-2", "slot-3", "slot-4"]
         event = feed_round(
             assembler,
             [
@@ -67,10 +73,12 @@ class DistanceRoundAssemblerTest(unittest.TestCase):
                 "distance[0], 0.000,",
                 "distance[0], 0.000,",
             ],
+            contexts=contexts,
         )
         self.assertEqual(DistanceRoundAssembler.ROUND_COMPLETE, event.kind)
         self.assertEqual([1], [value.anchor_id for value in event.ranges])
         self.assertAlmostEqual(1.405, event.ranges[0].raw_range_m)
+        self.assertEqual("slot-0", event.timestamp_context)
         self.assertEqual("distance_round5", event.ranges[0].source_format)
         self.assertEqual(4, assembler.zero_slot_count)
         self.assertEqual(1, assembler.complete_round_count)
@@ -98,11 +106,25 @@ class DistanceRoundAssemblerTest(unittest.TestCase):
                 "distance[0],0.000",
                 "distance[0],0.000",
             ],
+            contexts=["empty-first", "e1", "e2", "e3", "e4"],
         )
         self.assertEqual(DistanceRoundAssembler.EMPTY_ROUND, event.kind)
         self.assertEqual([], event.ranges)
         self.assertEqual(1, assembler.empty_round_count)
         self.assertEqual(5, assembler.zero_slot_count)
+        next_round = feed_round(
+            assembler,
+            [
+                "distance[0],1.0",
+                "distance[1],0",
+                "distance[0],0",
+                "distance[0],0",
+                "distance[0],0",
+            ],
+            contexts=["next-first", "n1", "n2", "n3", "n4"],
+            start_s=1.0,
+        )
+        self.assertEqual("next-first", next_round.timestamp_context)
 
     def test_real_sample_has_seven_rounds_six_published_and_one_empty(self):
         assembler = new_assembler()
@@ -138,15 +160,34 @@ class DistanceRoundAssemblerTest(unittest.TestCase):
     def test_new_debug_discards_incomplete_round(self):
         assembler = new_assembler()
         assembler.process("[UWBDBG] diag=1", now_s=0.0)
-        for index in range(3):
+        for index, context in enumerate(("old-first", "old-2", "old-3")):
             assembler.process(
-                "distance[0],0.000", now_s=0.1 + index * 0.1
+                "distance[0],0.000",
+                context=context,
+                now_s=0.1 + index * 0.1,
             )
         event = assembler.process("[UWBDBG] diag=2", now_s=0.5)
         self.assertTrue(event.incomplete_round)
         self.assertEqual(1, assembler.incomplete_round_count)
         self.assertEqual(0, assembler.complete_round_count)
         self.assertEqual(0, assembler.pending_distance_line_count)
+        assembler.process("[TWR] diag=2", now_s=0.51)
+        for index, line in enumerate(
+            (
+                "distance[0],0",
+                "distance[1],1.2",
+                "distance[0],0",
+                "distance[0],0",
+                "distance[0],0",
+            )
+        ):
+            event = assembler.process(
+                line,
+                context="new-{}".format(index),
+                now_s=0.6 + index * 0.1,
+            )
+        self.assertEqual(DistanceRoundAssembler.ROUND_COMPLETE, event.kind)
+        self.assertEqual("new-0", event.timestamp_context)
 
     def test_starting_mid_stream_waits_for_debug_boundary(self):
         assembler = new_assembler()
@@ -189,6 +230,36 @@ class DistanceRoundAssemblerTest(unittest.TestCase):
         )
         self.assertEqual(1, assembler.complete_round_count)
 
+    def test_enabling_second_anchor_does_not_change_timestamp_selection(self):
+        assembler = new_assembler()
+        first = feed_round(
+            assembler,
+            [
+                "distance[0],1.700",
+                "distance[1],0",
+                "distance[0],0",
+                "distance[0],0",
+                "distance[0],0",
+            ],
+            contexts=["round-1-slot-0", "r1-1", "r1-2", "r1-3", "r1-4"],
+        )
+        second = feed_round(
+            assembler,
+            [
+                "distance[0],1.710",
+                "distance[1],0.680",
+                "distance[0],0",
+                "distance[0],0",
+                "distance[0],0",
+            ],
+            contexts=["round-2-slot-0", "r2-1", "r2-2", "r2-3", "r2-4"],
+            start_s=1.0,
+        )
+        self.assertEqual([0], [value.anchor_id for value in first.ranges])
+        self.assertEqual([0, 1], [value.anchor_id for value in second.ranges])
+        self.assertEqual("round-1-slot-0", first.timestamp_context)
+        self.assertEqual("round-2-slot-0", second.timestamp_context)
+
     def test_duplicate_nonzero_anchor_keeps_first(self):
         assembler = new_assembler()
         event = feed_round(
@@ -213,7 +284,7 @@ class DistanceRoundAssemblerTest(unittest.TestCase):
         self.assertEqual(DistanceRoundAssembler.EMPTY_ROUND, event.kind)
         self.assertEqual(0, assembler.duplicate_anchor_count)
 
-    def test_timestamp_context_is_first_nonzero_distance(self):
+    def test_default_timestamp_context_is_first_distance_even_when_zero(self):
         assembler = new_assembler()
         contexts = ["zero-1", "first-nonzero", "second-nonzero", "zero-2", "zero-3"]
         event = feed_round(
@@ -227,7 +298,27 @@ class DistanceRoundAssemblerTest(unittest.TestCase):
             ],
             contexts=contexts,
         )
+        self.assertEqual("zero-1", event.timestamp_context)
+
+    def test_first_nonzero_timestamp_policy_remains_available(self):
+        assembler = new_assembler(round_timestamp_policy="first_nonzero")
+        contexts = ["zero-1", "first-nonzero", "second-nonzero", "zero-2", "zero-3"]
+        event = feed_round(
+            assembler,
+            [
+                "distance[0],0",
+                "distance[1],1.2",
+                "distance[2],2.3",
+                "distance[0],0",
+                "distance[0],0",
+            ],
+            contexts=contexts,
+        )
         self.assertEqual("first-nonzero", event.timestamp_context)
+
+    def test_invalid_timestamp_policy_is_rejected(self):
+        with self.assertRaises(ValueError):
+            new_assembler(round_timestamp_policy="publish_time")
 
     def test_timeout_discards_pending_round(self):
         assembler = new_assembler()

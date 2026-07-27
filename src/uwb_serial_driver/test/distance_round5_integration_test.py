@@ -129,13 +129,20 @@ class DistanceRound5IntegrationTest(unittest.TestCase):
             self.assertEqual(777, message.session_id)
             self.assertEqual(1234, message.timestamp_uncertainty_ns)
 
-        positive_contexts = []
+        published_round_contexts = []
+        distance_round = []
         for line, message in zip(raw_text, raw_messages):
             match = DISTANCE_PATTERN.match(line)
-            if match and float(match.group(2)) > 0.0:
-                positive_contexts.append(message)
-        self.assertEqual(6, len(positive_contexts))
-        for array, raw in zip(ranges, positive_contexts):
+            if not match:
+                continue
+            distance_round.append((float(match.group(2)), message))
+            if len(distance_round) == 5:
+                if any(value > 0.0 for value, _ in distance_round):
+                    published_round_contexts.append(distance_round[0][1])
+                distance_round = []
+        self.assertEqual([], distance_round)
+        self.assertEqual(6, len(published_round_contexts))
+        for array, raw in zip(ranges, published_round_contexts):
             self.assertEqual(raw.header.stamp, array.header.stamp)
             self.assertEqual(raw.host_receive_stamp, array.host_receive_stamp)
             self.assertEqual(
@@ -150,6 +157,9 @@ class DistanceRound5IntegrationTest(unittest.TestCase):
         self.assertIn("complete=7", status.detail)
         self.assertIn("empty=1", status.detail)
         self.assertIn("zero=29", status.detail)
+        self.assertIn(
+            "round_timestamp_policy=first_distance_line", status.detail
+        )
 
 
 if __name__ == "__main__":

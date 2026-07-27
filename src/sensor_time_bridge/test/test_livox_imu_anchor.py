@@ -247,6 +247,8 @@ class MappingFormulaTest(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(1_000_003_200_000, result.mapped_stamp_ns)
         self.assertEqual(3_200_000, result.anchor_delta_ns)
+        self.assertEqual(7, result.mapping_session_id)
+        self.assertEqual(result.writer_epoch, result.mapping_session_id)
 
     def test_small_negative_delta_is_allowed(self):
         mapper = self.mapper()
@@ -284,6 +286,51 @@ class MappingFormulaTest(unittest.TestCase):
         self.assertEqual(
             "nonmonotonic_mapped_time",
             monotonic.map_time(500_000_500_000).failure_reason,
+        )
+
+    def test_writer_epoch_change_allows_lower_new_epoch_time(self):
+        mapper = self.mapper(
+            snapshot(epoch=99, imu_ns=2_000_000_000_000)
+        )
+        old = mapper.map_time(500_003_000_000)
+        self.assertTrue(old.success)
+        write_file(
+            self.path,
+            snapshot(
+                epoch=100,
+                sequence=4,
+                imu_ns=1_000_000_000_000,
+            ),
+        )
+        changed = mapper.map_time(500_004_000_000)
+        self.assertFalse(changed.success)
+        self.assertEqual("epoch_changed", changed.failure_reason)
+        self.assertEqual(100, changed.mapping_session_id)
+
+        recovered = mapper.map_time(500_005_000_000)
+        self.assertTrue(recovered.success)
+        self.assertLess(recovered.mapped_stamp_ns, old.mapped_stamp_ns)
+        self.assertEqual(100, recovered.writer_epoch)
+        self.assertEqual(100, recovered.mapping_session_id)
+        self.assertEqual(100, mapper.last_writer_epoch)
+
+    def test_same_writer_epoch_still_rejects_backward_time(self):
+        mapper = self.mapper(
+            snapshot(epoch=99, imu_ns=2_000_000_000_000)
+        )
+        self.assertTrue(mapper.map_time(500_003_000_000).success)
+        write_file(
+            self.path,
+            snapshot(
+                epoch=99,
+                sequence=4,
+                imu_ns=1_000_000_000_000,
+            ),
+        )
+        backward = mapper.map_time(500_004_000_000)
+        self.assertFalse(backward.success)
+        self.assertEqual(
+            "nonmonotonic_mapped_time", backward.failure_reason
         )
 
     def test_two_sensor_mappers_share_the_same_2020_epoch(self):

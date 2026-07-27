@@ -109,6 +109,7 @@ class ImuAnchorMappingIntegrationTest(unittest.TestCase):
         self.lock = threading.Lock()
         self.uwb_raw = []
         self.uwb_ranges = []
+        self.gnss_raw = []
         self.gnss_pvt = []
         self.gnss_enu = []
         self.uwb_status = None
@@ -123,6 +124,12 @@ class ImuAnchorMappingIntegrationTest(unittest.TestCase):
                 UwbRangeArray,
                 self._append_uwb_range,
                 queue_size=100,
+            ),
+            rospy.Subscriber(
+                "/gnss/raw",
+                RawSerialFrame,
+                self._append_gnss_raw,
+                queue_size=500,
             ),
             rospy.Subscriber(
                 "/gnss/pvt_local",
@@ -157,6 +164,10 @@ class ImuAnchorMappingIntegrationTest(unittest.TestCase):
     def _append_uwb_range(self, message):
         with self.lock:
             self.uwb_ranges.append(message)
+
+    def _append_gnss_raw(self, message):
+        with self.lock:
+            self.gnss_raw.append(message)
 
     def _append_gnss_pvt(self, message):
         with self.lock:
@@ -195,19 +206,62 @@ class ImuAnchorMappingIntegrationTest(unittest.TestCase):
         stamps = [message.header.stamp.to_nsec() for message in messages]
         return all(current > previous for previous, current in zip(stamps, stamps[1:]))
 
+    @staticmethod
+    def _has_matching_raw(message, raw_messages):
+        return any(
+            raw.header.stamp == message.header.stamp
+            and raw.header.frame_id == message.header.frame_id
+            and raw.session_id == message.session_id
+            and raw.timestamp_source == message.timestamp_source
+            and raw.time_uncertainty_ns == message.timestamp_uncertainty_ns
+            and raw.host_receive_stamp == message.host_receive_stamp
+            and raw.host_receive_monotonic_ns
+            == message.host_receive_monotonic_ns
+            for raw in raw_messages
+        )
+
     def test_shared_anchor_stale_and_epoch_recovery(self):
         self._wait(
             lambda: (
-                len(self.uwb_ranges) >= 4
+                sum(
+                    self._has_matching_raw(message, self.uwb_raw)
+                    for message in self.uwb_ranges
+                )
+                >= 4
                 and len(self.gnss_pvt) >= 4
                 and len(self.gnss_enu) >= 4
                 and self.uwb_status is not None
                 and self.gnss_status is not None
+                and self.uwb_status.session_id == 1001
+                and self.uwb_status.writer_epoch == 1001
+                and self.gnss_status.session_id == 1001
+                and self.gnss_status.writer_epoch == 1001
+                and any(
+                    message.timestamp_source
+                    == RawSerialFrame.DEVICE_TIME_MAPPED_LOCAL
+                    for message in self.gnss_raw
+                )
             ),
             "initial mapped output not ready",
         )
         with self.lock:
-            initial_uwb = list(self.uwb_ranges)
+            initial_uwb_raw = [
+                message
+                for message in self.uwb_raw
+                if message.timestamp_source
+                == RawSerialFrame.DEVICE_TIME_MAPPED_LOCAL
+            ]
+            initial_uwb = [
+                message
+                for message in self.uwb_ranges
+                if self._has_matching_raw(message, initial_uwb_raw)
+            ]
+            initial_gnss_raw = [
+                message
+                for message in self.gnss_raw
+                if message.timestamp_source
+                == RawSerialFrame.DEVICE_TIME_MAPPED_LOCAL
+            ]
             initial_pvt = list(self.gnss_pvt)
             initial_enu = list(self.gnss_enu)
             uwb_status = self.uwb_status
@@ -225,9 +279,24 @@ class ImuAnchorMappingIntegrationTest(unittest.TestCase):
                 abs(message.header.stamp.to_nsec() - DEVICE_EPOCH_NS),
                 10_000_000_000,
             )
+            self.assertEqual(1001, message.session_id)
+            self.assertEqual("livox_imu_legacy_time", message.header.frame_id)
+            self.assertTrue(
+                self._has_matching_raw(message, initial_uwb_raw)
+            )
+        for message in initial_uwb_raw:
+            self.assertEqual(1001, message.session_id)
+            self.assertEqual(1001, message.writer_epoch)
+        for message in initial_gnss_raw:
+            self.assertEqual(1001, message.session_id)
+            self.assertEqual(1001, message.writer_epoch)
+            self.assertEqual("livox_imu_legacy_time", message.header.frame_id)
         for message in initial_pvt:
             self.assertTrue(message.local_measurement_time_valid)
             self.assertTrue(message.valid_for_fusion)
+            self.assertEqual(1001, message.session_id)
+            self.assertEqual(1001, message.writer_epoch)
+            self.assertEqual("livox_imu_legacy_time", message.header.frame_id)
             self.assertLess(
                 abs(message.header.stamp.to_nsec() - DEVICE_EPOCH_NS),
                 10_000_000_000,
@@ -241,6 +310,10 @@ class ImuAnchorMappingIntegrationTest(unittest.TestCase):
         ))
         self.assertIn(
             "timestamp_mode=livox_imu_anchor", uwb_status.detail
+        )
+        self.assertIn(
+            "round_timestamp_policy=first_distance_line",
+            uwb_status.detail,
         )
         self.assertIn(
             "timestamp_mode=livox_imu_anchor", gnss_status.detail
@@ -269,8 +342,12 @@ class ImuAnchorMappingIntegrationTest(unittest.TestCase):
                 and len(self.gnss_pvt) > stale_pvt_count
                 and self.uwb_status is not None
                 and "epoch_change=1" in self.uwb_status.detail
+                and self.uwb_status.session_id == 1002
+                and self.uwb_status.writer_epoch == 1002
                 and self.gnss_status is not None
                 and "epoch_change=1" in self.gnss_status.detail
+                and self.gnss_status.session_id == 1002
+                and self.gnss_status.writer_epoch == 1002
             ),
             "new writer epoch did not recover",
         )
@@ -278,6 +355,9 @@ class ImuAnchorMappingIntegrationTest(unittest.TestCase):
             self.assertTrue(self._strictly_increasing(self.uwb_ranges))
             self.assertTrue(self._strictly_increasing(self.gnss_pvt))
             self.assertTrue(self._strictly_increasing(self.gnss_enu))
+            self.assertEqual(1002, self.uwb_ranges[-1].session_id)
+            self.assertEqual(1002, self.gnss_pvt[-1].session_id)
+            self.assertEqual(1002, self.gnss_pvt[-1].writer_epoch)
 
 
 if __name__ == "__main__":
