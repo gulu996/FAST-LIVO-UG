@@ -12,6 +12,7 @@ which is included as part of this source code package.
 
 #include "voxel_map.h"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <limits>
 #include <unordered_set>
@@ -58,8 +59,135 @@ void loadVoxelConfig(ros::NodeHandle &nh, VoxelMapConfig &voxel_config)
   nh.param<bool>("local_map/long_term_visual_map_en", voxel_config.long_term_visual_map_en, true);
   nh.param<int>("local_map/long_term_visual_max_voxels", voxel_config.long_term_visual_max_voxels, 5000);
 
-  voxel_config.degeneracy_ratio_thresh = 0.10;
-  voxel_config.degeneracy_min_effective_features = 50;
+  nh.param<bool>("lio_degeneracy/enable_observability_diagnostics",
+                 voxel_config.observability_diagnostics_enable, true);
+  nh.param<bool>("lio_degeneracy/enable_state_intervention",
+                 voxel_config.state_intervention_enable, false);
+  nh.param<bool>("lio_degeneracy/use_conditional_translation_information",
+                 voxel_config.use_conditional_translation_information, true);
+  nh.param<double>("lio_degeneracy/rotation_regularization",
+                   voxel_config.degeneracy_rotation_regularization, 1e-6);
+  nh.param<int>("lio_degeneracy/min_effective_features",
+                voxel_config.degeneracy_min_effective_features, 50);
+  nh.param<double>("lio_degeneracy/min_translation_eigenvalue",
+                   voxel_config.degeneracy_min_translation_eigenvalue, 0.0);
+  nh.param<double>("lio_degeneracy/max_translation_condition_number",
+                   voxel_config.degeneracy_max_translation_condition_number, 1000.0);
+  nh.param<double>("lio_degeneracy/min_translation_eigenvalue_ratio",
+                   voxel_config.degeneracy_ratio_thresh, 0.02);
+  nh.param<int>("lio_degeneracy/enter_consecutive_frames",
+                voxel_config.degeneracy_enter_consecutive_frames, 3);
+  nh.param<int>("lio_degeneracy/exit_consecutive_frames",
+                voxel_config.degeneracy_exit_consecutive_frames, 8);
+
+  nh.param<std::string>("lio_direction_guard/mode",
+                        voxel_config.direction_guard_mode, "diagnostic");
+  nh.param<double>("lio_direction_guard/min_predicted_speed_mps",
+                   voxel_config.direction_guard_min_predicted_speed_mps, 0.30);
+  nh.param<double>("lio_direction_guard/min_velocity_weak_direction_cos",
+                   voxel_config.direction_guard_min_velocity_weak_direction_cos, 0.70);
+  nh.param<double>("lio_direction_guard/max_opposite_correction_m",
+                   voxel_config.direction_guard_max_opposite_correction_m, 0.03);
+  nh.param<double>("lio_direction_guard/max_opposite_velocity_correction_mps",
+                   voxel_config.direction_guard_max_opposite_velocity_correction_mps, 0.03);
+  nh.param<int>("lio_direction_guard/enter_consecutive_frames",
+                voxel_config.direction_guard_enter_consecutive_frames, 2);
+  nh.param<int>("lio_direction_guard/exit_consecutive_frames",
+                voxel_config.direction_guard_exit_consecutive_frames, 5);
+
+  nh.param<std::string>("lio_map_guard/mode", voxel_config.map_guard_mode, "off");
+  nh.param<bool>("lio_map_guard/freeze_on_degeneracy",
+                 voxel_config.map_guard_freeze_on_degeneracy, true);
+  nh.param<bool>("lio_map_guard/freeze_on_direction_reject",
+                 voxel_config.map_guard_freeze_on_direction_reject, true);
+  nh.param<double>("lio_map_guard/severe_translation_eigenvalue_ratio",
+                   voxel_config.map_guard_severe_translation_eigenvalue_ratio, 0.005);
+  nh.param<int>("lio_map_guard/recovery_consecutive_frames",
+                voxel_config.map_guard_recovery_consecutive_frames, 8);
+  nh.param<int>("lio_map_guard/maximum_freeze_frames",
+                voxel_config.map_guard_maximum_freeze_frames, 300);
+  voxel_config.degeneracy_rotation_regularization =
+      std::max(1e-12, voxel_config.degeneracy_rotation_regularization);
+  voxel_config.degeneracy_min_effective_features =
+      std::max(1, voxel_config.degeneracy_min_effective_features);
+  voxel_config.degeneracy_min_translation_eigenvalue =
+      std::max(0.0, voxel_config.degeneracy_min_translation_eigenvalue);
+  voxel_config.degeneracy_max_translation_condition_number =
+      std::max(1.0, voxel_config.degeneracy_max_translation_condition_number);
+  voxel_config.degeneracy_ratio_thresh =
+      std::max(0.0, std::min(1.0, voxel_config.degeneracy_ratio_thresh));
+  voxel_config.degeneracy_enter_consecutive_frames =
+      std::max(1, voxel_config.degeneracy_enter_consecutive_frames);
+  voxel_config.degeneracy_exit_consecutive_frames =
+      std::max(1, voxel_config.degeneracy_exit_consecutive_frames);
+  voxel_config.direction_guard_min_predicted_speed_mps =
+      std::max(0.0, voxel_config.direction_guard_min_predicted_speed_mps);
+  voxel_config.direction_guard_min_velocity_weak_direction_cos =
+      std::max(0.0, std::min(1.0, voxel_config.direction_guard_min_velocity_weak_direction_cos));
+  voxel_config.direction_guard_max_opposite_correction_m =
+      std::max(0.0, voxel_config.direction_guard_max_opposite_correction_m);
+  voxel_config.direction_guard_max_opposite_velocity_correction_mps =
+      std::max(0.0, voxel_config.direction_guard_max_opposite_velocity_correction_mps);
+  voxel_config.direction_guard_enter_consecutive_frames =
+      std::max(1, voxel_config.direction_guard_enter_consecutive_frames);
+  voxel_config.direction_guard_exit_consecutive_frames =
+      std::max(1, voxel_config.direction_guard_exit_consecutive_frames);
+  voxel_config.map_guard_recovery_consecutive_frames =
+      std::max(1, voxel_config.map_guard_recovery_consecutive_frames);
+  voxel_config.map_guard_severe_translation_eigenvalue_ratio =
+      std::max(0.0, std::min(1.0, voxel_config.map_guard_severe_translation_eigenvalue_ratio));
+  voxel_config.map_guard_maximum_freeze_frames =
+      std::max(0, voxel_config.map_guard_maximum_freeze_frames);
+
+  auto sanitize_mode = [](std::string &mode, const char *parameter, const char *fallback) {
+    std::transform(mode.begin(), mode.end(), mode.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (mode != "off" && mode != "diagnostic" && mode != "enforce")
+    {
+      ROS_WARN("Invalid %s='%s'; using '%s'.", parameter, mode.c_str(), fallback);
+      mode = fallback;
+    }
+  };
+  sanitize_mode(voxel_config.direction_guard_mode, "lio_direction_guard/mode", "diagnostic");
+  sanitize_mode(voxel_config.map_guard_mode, "lio_map_guard/mode", "off");
+
+  if (voxel_config.state_intervention_enable)
+  {
+    ROS_WARN("LIO degeneracy state intervention is experimental and unavailable in the stable baseline; using diagnostic-only ESIKF updates.");
+    voxel_config.state_intervention_enable = false;
+  }
+  if (voxel_config.direction_guard_mode == "enforce")
+  {
+    ROS_WARN("LIO direction guard enforce mode has not passed real stop, turn-around, or return validation; falling back to diagnostic mode.");
+    voxel_config.direction_guard_mode = "diagnostic";
+  }
+
+  ROS_INFO("LIO degeneracy observability: %s",
+           voxel_config.observability_diagnostics_enable ? "enabled" : "disabled");
+  ROS_INFO("LIO degeneracy state intervention: disabled");
+  ROS_INFO("[LIO_DEGEN_CONFIG] diagnostics=%d intervention=%d conditional=%d rot_reg=%.3e min_features=%d min_eigen=%.6g max_condition=%.3f min_ratio=%.6g enter=%d exit=%d",
+           static_cast<int>(voxel_config.observability_diagnostics_enable),
+           static_cast<int>(voxel_config.state_intervention_enable),
+           static_cast<int>(voxel_config.use_conditional_translation_information),
+           voxel_config.degeneracy_rotation_regularization,
+           voxel_config.degeneracy_min_effective_features,
+           voxel_config.degeneracy_min_translation_eigenvalue,
+           voxel_config.degeneracy_max_translation_condition_number,
+           voxel_config.degeneracy_ratio_thresh,
+           voxel_config.degeneracy_enter_consecutive_frames,
+           voxel_config.degeneracy_exit_consecutive_frames);
+  ROS_INFO("[LIO_GUARD_CONFIG] direction_mode=%s speed=%.3f weak_cos=%.3f opposite_position=%.3f opposite_velocity=%.3f enter=%d exit=%d map_mode=%s severe_ratio=%.6g recovery=%d max_freeze=%d",
+           voxel_config.direction_guard_mode.c_str(),
+           voxel_config.direction_guard_min_predicted_speed_mps,
+           voxel_config.direction_guard_min_velocity_weak_direction_cos,
+           voxel_config.direction_guard_max_opposite_correction_m,
+           voxel_config.direction_guard_max_opposite_velocity_correction_mps,
+           voxel_config.direction_guard_enter_consecutive_frames,
+           voxel_config.direction_guard_exit_consecutive_frames,
+           voxel_config.map_guard_mode.c_str(),
+           voxel_config.map_guard_severe_translation_eigenvalue_ratio,
+           voxel_config.map_guard_recovery_consecutive_frames,
+           voxel_config.map_guard_maximum_freeze_frames);
 
   nh.param<int>("lio/icp_min_iterations", voxel_config.icp_min_iterations, 2);
   nh.param<double>("lio/icp_early_stop_residual_ratio", voxel_config.icp_early_stop_residual_ratio, 0.03);
@@ -358,6 +486,10 @@ VoxelOctoTree *VoxelOctoTree::Insert(const pointWithVar &pv)
 
 void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 {
+  ++current_frame_id_;
+  last_lio_diagnostics_ = LioUpdateDiagnostics();
+  last_lio_diagnostics_.predicted_state = state_propagat;
+
   cross_mat_list_.clear();
   cross_mat_list_.reserve(feats_down_size_);
   body_cov_list_.clear();
@@ -395,6 +527,8 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
   const double max_rot_step_deg = std::max(0.1, config_setting_.icp_max_rot_step_deg);
   const double max_trans_step_m = std::max(0.01, config_setting_.icp_max_trans_step_m);
   double last_avg_residual = std::numeric_limits<double>::infinity();
+  bool frame_observability_initialized = false;
+  fast_livo::LioObservabilityMetrics frame_observability;
 
   for (int iterCount = 0; iterCount < config_setting_.max_iterations_; iterCount++)
   {
@@ -432,10 +566,20 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     if (effct_feat_num_ == 0)
     {
       std::cout << "[ LIO ] No effective point-to-plane constraints, skip ICP update in this scan." << std::endl;
+      if (config_setting_.observability_diagnostics_enable && !frame_observability_initialized)
+      {
+        updateLidarDegeneracyHysteresis(true);
+        updateDirectionGuardHysteresis(false);
+        last_lio_diagnostics_.raw_is_degenerate = true;
+        last_lio_diagnostics_.is_degenerate = lidar_degenerated_;
+        last_lio_diagnostics_.is_severely_degenerate = lidar_degenerated_;
+      }
       break;
     }
 
     const double avg_residual = total_residual / static_cast<double>(effct_feat_num_);
+    last_lio_diagnostics_.effective_feature_count = effct_feat_num_;
+    last_lio_diagnostics_.average_point_plane_residual = avg_residual;
     cout << "[ LIO ] Raw feature num: " << feats_undistort_->size() << ", downsampled feature num:" << feats_down_size_ 
          << " effective feature num: " << effct_feat_num_ << " average residual: " << avg_residual << endl;
 
@@ -494,17 +638,97 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     EKF_stop_flg = false;
     flg_EKF_converged = false;
     /*** Iterative Kalman Filter Update ***/
-    MatrixXd K(DIM_STATE, effct_feat_num_);
-    // auto &&Hsub_T = Hsub.transpose();
-    auto &&HTz = Hsub_T_R_inv * meas_vec;
-    // fout_dbg<<"HTz: "<<HTz<<endl;
-    H_T_H.block<6, 6>(0, 0) = Hsub_T_R_inv * Hsub;
-    // EigenSolver<Matrix<double, 6, 6>> es(H_T_H.block<6,6>(0,0));
-    MD(DIM_STATE, DIM_STATE) &&K_1 = (H_T_H.block<DIM_STATE, DIM_STATE>(0, 0) + state_.cov.block<DIM_STATE, DIM_STATE>(0, 0).inverse()).inverse();
-    G.block<DIM_STATE, 6>(0, 0) = K_1.block<DIM_STATE, 6>(0, 0) * H_T_H.block<6, 6>(0, 0);
-    auto vec = state_propagat - state_;
-    VD(DIM_STATE)
-    solution = K_1.block<DIM_STATE, 6>(0, 0) * HTz + vec.block<DIM_STATE, 1>(0, 0) - G.block<DIM_STATE, 6>(0, 0) * vec.block<6, 1>(0, 0);
+    const Eigen::Matrix<double, 6, 1> raw_pose_rhs = Hsub_T_R_inv * meas_vec;
+    const fast_livo::Matrix6d raw_pose_information = Hsub_T_R_inv * Hsub;
+    if (!raw_pose_information.allFinite() || !raw_pose_rhs.allFinite() || !state_.cov.allFinite())
+    {
+      ROS_ERROR_THROTTLE(1.0, "[LIO_NUMERIC] Non-finite normal equation or covariance; skipping this scan update.");
+      break;
+    }
+
+    // Stable baseline: this is the original FAST-LIVO2 ESIKF normal-equation
+    // path. Observability diagnostics below only inspect its const inputs.
+    H_T_H.block<6, 6>(0, 0) = raw_pose_information;
+    MD(DIM_STATE, DIM_STATE) K_1 =
+        (H_T_H.block<DIM_STATE, DIM_STATE>(0, 0) +
+         state_.cov.block<DIM_STATE, DIM_STATE>(0, 0).inverse()).inverse();
+    if (!K_1.allFinite())
+    {
+      ROS_ERROR_THROTTLE(1.0, "[LIO_NUMERIC] Non-finite original ESIKF solve; skipping this scan update.");
+      break;
+    }
+    G.block<DIM_STATE, 6>(0, 0) =
+        K_1.block<DIM_STATE, 6>(0, 0) * H_T_H.block<6, 6>(0, 0);
+    const auto vec = state_propagat - state_;
+    VD(DIM_STATE) solution =
+        K_1.block<DIM_STATE, 6>(0, 0) * raw_pose_rhs + vec.block<DIM_STATE, 1>(0, 0) -
+        G.block<DIM_STATE, 6>(0, 0) * vec.block<6, 1>(0, 0);
+    if (!solution.allFinite())
+    {
+      ROS_ERROR_THROTTLE(1.0, "[LIO_NUMERIC] Non-finite original ESIKF increment; skipping this scan update.");
+      break;
+    }
+
+    if (config_setting_.observability_diagnostics_enable && !frame_observability_initialized)
+    {
+      frame_observability = fast_livo::analyzeLioPoseInformation(
+          raw_pose_information,
+          config_setting_.degeneracy_rotation_regularization,
+          config_setting_.use_conditional_translation_information);
+      frame_observability_initialized = true;
+      last_lio_diagnostics_.observability = frame_observability;
+      if (!frame_observability.valid)
+        ROS_WARN_THROTTLE(1.0, "[LIO_DEGEN] Observability decomposition invalid; diagnostics marked invalid and original ESIKF update retained.");
+      lidar_constraint_ratio_ = frame_observability.valid ?
+          frame_observability.translation_eigenvalue_ratio : 0.0;
+
+      const bool raw_degenerate = classifyLidarDegeneracy(frame_observability, effct_feat_num_);
+      updateLidarDegeneracyHysteresis(raw_degenerate);
+
+      last_lio_diagnostics_.raw_is_degenerate = raw_degenerate;
+      last_lio_diagnostics_.is_degenerate = lidar_degenerated_;
+      last_lio_diagnostics_.is_severely_degenerate =
+          last_lio_diagnostics_.is_degenerate &&
+          (!frame_observability.valid ||
+           effct_feat_num_ < config_setting_.degeneracy_min_effective_features ||
+           frame_observability.translation_eigenvalue_ratio <
+               config_setting_.map_guard_severe_translation_eigenvalue_ratio);
+
+      bool direction_conflict = false;
+      if (config_setting_.direction_guard_mode != "off" && frame_observability.valid)
+      {
+        const double predicted_speed = state_propagat.vel_end.norm();
+        last_lio_diagnostics_.predicted_speed_mps = predicted_speed;
+        if (predicted_speed >= config_setting_.direction_guard_min_predicted_speed_mps)
+        {
+          const V3D velocity_direction = state_propagat.vel_end / predicted_speed;
+          const double velocity_weak_cos =
+              std::fabs(velocity_direction.dot(frame_observability.weak_translation_direction_world));
+          const V3D raw_candidate_position = state_.pos_end + solution.block<3, 1>(3, 0);
+          const V3D raw_position_correction = raw_candidate_position - state_propagat.pos_end;
+          const V3D raw_candidate_velocity = state_.vel_end + solution.block<3, 1>(7, 0);
+          const V3D raw_velocity_correction = raw_candidate_velocity - state_propagat.vel_end;
+          last_lio_diagnostics_.velocity_weak_direction_cos = velocity_weak_cos;
+          last_lio_diagnostics_.raw_position_correction = raw_position_correction;
+          last_lio_diagnostics_.raw_velocity_correction = raw_velocity_correction;
+          const double correction_along_velocity = raw_position_correction.dot(velocity_direction);
+          const double velocity_correction_along_velocity =
+              raw_velocity_correction.dot(velocity_direction);
+          direction_conflict = lidar_degenerated_ &&
+              velocity_weak_cos >= config_setting_.direction_guard_min_velocity_weak_direction_cos &&
+              (correction_along_velocity < -config_setting_.direction_guard_max_opposite_correction_m ||
+               velocity_correction_along_velocity <
+                   -config_setting_.direction_guard_max_opposite_velocity_correction_mps);
+        }
+      }
+      updateDirectionGuardHysteresis(direction_conflict);
+      last_lio_diagnostics_.direction_conflict = direction_conflict;
+      last_lio_diagnostics_.direction_conflict_consecutive_frames =
+          direction_conflict_frame_count_;
+      // Enforce mode intentionally falls back to diagnostic in loadVoxelConfig().
+      last_lio_diagnostics_.direction_guard_triggered = false;
+      last_lio_diagnostics_.state_intervention_applied = false;
+    }
     int minRow, minCol;
 
     auto rot_add = solution.block<3, 1>(0, 0);
@@ -554,6 +778,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       // _state.cov = (I_STATE - G) * _state.cov;
       state_.cov.block<DIM_STATE, DIM_STATE>(0, 0) =
           (I_STATE.block<DIM_STATE, DIM_STATE>(0, 0) - G.block<DIM_STATE, DIM_STATE>(0, 0)) * state_.cov.block<DIM_STATE, DIM_STATE>(0, 0);
+      last_lio_diagnostics_.valid_update = true;
       // total_distance += (_state.pos_end - position_last).norm();
       position_last_ = state_.pos_end;
       geoQuat_ = tf::createQuaternionMsgFromRollPitchYaw(euler_cur(0), euler_cur(1), euler_cur(2));
@@ -574,7 +799,16 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 
   // cout << "[ Mapping ] ekf_time: " << ekf_time << "s, build_residual_time: " << build_residual_time << "s" << endl;
   // cout << "[ Mapping ] ave_ekf_time: " << ave_ekf_time << "s, ave_build_residual_time: " << ave_build_residual_time << "s" << endl;
-  updateLidarDegeneracyStatus();
+  if (!config_setting_.observability_diagnostics_enable) updateLidarDegeneracyStatus();
+  last_lio_diagnostics_.is_degenerate = lidar_degenerated_;
+  last_lio_diagnostics_.updated_state = state_;
+  if (last_lio_diagnostics_.observability.valid)
+  {
+    const V3D weak = last_lio_diagnostics_.observability.weak_translation_direction_world;
+    last_lio_diagnostics_.velocity_projection_on_weak_direction = state_propagat.vel_end.dot(weak);
+    last_lio_diagnostics_.position_correction_on_weak_direction =
+        (state_.pos_end - state_propagat.pos_end).dot(weak);
+  }
 }
 
 void VoxelMapManager::TransformLidar(const Eigen::Matrix3d rot, const Eigen::Vector3d t, const PointCloudXYZI::Ptr &input_cloud,
@@ -730,6 +964,12 @@ void VoxelMapManager::clearLocalMap()
   ptpl_list_.clear();
   lidar_degenerated_ = false;
   lidar_constraint_ratio_ = 0.0;
+  last_lio_diagnostics_ = LioUpdateDiagnostics();
+  degeneracy_bad_frame_count_ = 0;
+  degeneracy_good_frame_count_ = 0;
+  direction_conflict_frame_count_ = 0;
+  direction_clear_frame_count_ = 0;
+  direction_guard_active_ = false;
   current_frame_id_ = 0;
   scan_count = 0;
   last_slide_position = V3D::Zero();
@@ -1172,7 +1412,83 @@ void VoxelMapManager::updateLidarDegeneracyStatus()
   const double lambda_max = std::max(1e-6, evals[2]);
   const double lambda_min = std::max(0.0, evals[0]);
   lidar_constraint_ratio_ = lambda_min / lambda_max;
-  lidar_degenerated_ = lidar_constraint_ratio_ < config_setting_.degeneracy_ratio_thresh;
+  // Legacy detector is retained only when observability diagnostics are disabled.
+  lidar_degenerated_ = lidar_constraint_ratio_ < 0.10;
+}
+
+bool VoxelMapManager::classifyLidarDegeneracy(
+    const fast_livo::LioObservabilityMetrics &metrics,
+    int effective_features) const
+{
+  if (effective_features < config_setting_.degeneracy_min_effective_features || !metrics.valid)
+    return true;
+  if (config_setting_.degeneracy_min_translation_eigenvalue > 0.0 &&
+      metrics.translation_eigenvalues[0] < config_setting_.degeneracy_min_translation_eigenvalue)
+    return true;
+  if (metrics.translation_eigenvalue_ratio < config_setting_.degeneracy_ratio_thresh)
+    return true;
+  return !std::isfinite(metrics.translation_condition_number) ||
+         metrics.translation_condition_number >
+             config_setting_.degeneracy_max_translation_condition_number;
+}
+
+void VoxelMapManager::updateLidarDegeneracyHysteresis(bool raw_degenerate)
+{
+  const bool was_degenerated = lidar_degenerated_;
+  if (raw_degenerate)
+  {
+    ++degeneracy_bad_frame_count_;
+    degeneracy_good_frame_count_ = 0;
+    if (!lidar_degenerated_ &&
+        degeneracy_bad_frame_count_ >= config_setting_.degeneracy_enter_consecutive_frames)
+      lidar_degenerated_ = true;
+  }
+  else
+  {
+    ++degeneracy_good_frame_count_;
+    degeneracy_bad_frame_count_ = 0;
+    if (lidar_degenerated_ &&
+        degeneracy_good_frame_count_ >= config_setting_.degeneracy_exit_consecutive_frames)
+      lidar_degenerated_ = false;
+  }
+  if (!was_degenerated && lidar_degenerated_)
+    ROS_WARN("[LIO_DEGEN] state NORMAL -> DEGRADED");
+  else if (was_degenerated && !lidar_degenerated_)
+    ROS_INFO("[LIO_DEGEN] state DEGRADED -> NORMAL");
+}
+
+void VoxelMapManager::updateDirectionGuardHysteresis(bool conflict)
+{
+  if (!config_setting_.observability_diagnostics_enable ||
+      config_setting_.direction_guard_mode == "off")
+  {
+    direction_conflict_frame_count_ = 0;
+    direction_clear_frame_count_ = 0;
+    direction_guard_active_ = false;
+    return;
+  }
+
+  const bool was_active = direction_guard_active_;
+  if (conflict)
+  {
+    ++direction_conflict_frame_count_;
+    direction_clear_frame_count_ = 0;
+    if (!direction_guard_active_ &&
+        direction_conflict_frame_count_ >= config_setting_.direction_guard_enter_consecutive_frames)
+      direction_guard_active_ = true;
+  }
+  else
+  {
+    ++direction_clear_frame_count_;
+    direction_conflict_frame_count_ = 0;
+    if (direction_guard_active_ &&
+        direction_clear_frame_count_ >= config_setting_.direction_guard_exit_consecutive_frames)
+      direction_guard_active_ = false;
+  }
+  if (!was_active && direction_guard_active_)
+    ROS_WARN("[LIO_DIRECTION] conflict started (diagnostic only; state unchanged)");
+  else if (was_active && !direction_guard_active_)
+    ROS_INFO("[LIO_DIRECTION] conflict cleared (diagnostic only; state unchanged)");
 }
 
 bool VoxelMapManager::isLidarDegenerated() const
@@ -1183,4 +1499,9 @@ bool VoxelMapManager::isLidarDegenerated() const
 double VoxelMapManager::getLidarConstraintRatio() const
 {
   return lidar_constraint_ratio_;
+}
+
+const LioUpdateDiagnostics &VoxelMapManager::getLastLioDiagnostics() const
+{
+  return last_lio_diagnostics_;
 }

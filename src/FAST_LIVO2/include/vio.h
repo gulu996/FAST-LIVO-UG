@@ -20,6 +20,7 @@ which is included as part of this source code package.
 #include <opencv2/aruco/dictionary.hpp>
 #include <opencv2/core/eigen.hpp>
 #include <pcl/filters/voxel_grid.h>
+#include <limits>
 #include <set>
 #include <unordered_set>
 #include <vikit/math_utils.h>
@@ -189,6 +190,14 @@ public:
   double visual_update_max_lateral_m = 0.08;
   double visual_update_max_lateral_ratio = 0.35;
   double visual_update_max_exposure_delta = 0.30;
+  double visual_update_max_velocity_increment_mps = 0.15;
+  double visual_update_max_acc_bias_increment_mps2 = 0.03;
+  double visual_update_max_gyro_bias_increment_rps = 0.005;
+  double visual_update_normalized_nis_max = 0.0;
+  int last_visual_measurement_dof = 0; // one scalar photometric residual per measurement
+  double last_visual_total_nis = std::numeric_limits<double>::quiet_NaN();
+  double last_visual_normalized_nis = std::numeric_limits<double>::quiet_NaN();
+  int diagnostics_console_interval_frames = 20;
 
   double img_point_cov, outlier_threshold, ncc_thre;
   bool image_quality_gate_en = false;
@@ -330,6 +339,12 @@ public:
   Eigen::Matrix3d skewSymmetric(const Eigen::Vector3d& v);
   void initializeTimingLogFileIfNeeded();
   void appendTimingLogLines(const vector<string> &lines);
+  void logVisualDelta(double timestamp, int tracked_point_count,
+                      double image_saturated_fraction,
+                      double image_tile_saturated_fraction,
+                      double image_contrast, const std::string &skip_reason,
+                      const StatesGroup &before, const StatesGroup &attempted,
+                      double visual_total_nis, bool accepted);
   
   // void resetRvizDisplay();
   // deque<VisualPoint *> map_cur_frame;

@@ -53,6 +53,8 @@ public:
   bool shouldSelectVisualFrame();
   void updateVisualObservationHints();
   void updateRuntimeGuard(double frame_time_s);
+  void logLioDegeneracy(bool map_insert_skipped, const std::string &map_insert_skip_reason,
+                        bool map_guard_requested, bool map_guard_enforced);
   
   bool sync_packages(LidarMeasureGroup &meas);
   void prop_imu_once(StatesGroup &imu_prop_state, const double dt, V3D acc_avr, V3D angvel_avr);
@@ -199,6 +201,10 @@ public:
   double vio_visual_update_max_lateral_m_ = 0.08;
   double vio_visual_update_max_lateral_ratio_ = 0.35;
   double vio_visual_update_max_exposure_delta_ = 0.30;
+  double vio_visual_update_max_velocity_increment_mps_ = 0.15;
+  double vio_visual_update_max_acc_bias_increment_mps2_ = 0.03;
+  double vio_visual_update_max_gyro_bias_increment_rps_ = 0.005;
+  double vio_visual_update_normalized_nis_max_ = 0.0;
   bool vio_image_quality_gate_en_ = false;
   double vio_image_quality_max_saturated_fraction_ = 0.20;
   double vio_image_quality_max_tile_saturated_fraction_ = 0.35;
@@ -241,7 +247,7 @@ public:
   PointCloudXYZRGB::Ptr pcl_wait_save;
   PointCloudXYZI::Ptr pcl_wait_save_intensity;
 
-  ofstream fout_pre, fout_out, fout_pcd_pos, fout_points;
+  ofstream fout_pre, fout_out, fout_pcd_pos, fout_points, fout_lio_degeneracy;
 
   V3D euler_cur;
 
@@ -295,6 +301,13 @@ public:
   double aver_time_map_inre = 0;
   bool colmap_output_en = false;
   bool global_map_pub = false;  
+  int diagnostics_console_interval_frames_ = 20;
+  int diagnostics_csv_flush_interval_rows_ = 100;
+  int lio_diagnostics_pending_rows_ = 0;
+  bool lio_map_guard_active_ = false;
+  bool lio_map_guard_hard_limit_latched_ = false;
+  int lio_map_guard_recovery_frames_ = 0;
+  int lio_map_guard_freeze_frames_ = 0;
   int udp_socket_fd_ = -1;
   struct sockaddr_in udp_target_addr_ {};
   bool udp_socket_ready_ = false;

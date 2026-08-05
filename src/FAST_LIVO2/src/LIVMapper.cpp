@@ -18,6 +18,7 @@ which is included as part of this source code package.
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <netinet/in.h>
 #include <sstream>
 #include <sys/socket.h>
@@ -106,6 +107,7 @@ LIVMapper::LIVMapper(ros::NodeHandle &nh)
 
 LIVMapper::~LIVMapper()
 {
+  if (fout_lio_degeneracy.is_open()) fout_lio_degeneracy.flush();
   if (gnss_manager) gnss_manager->shutdown();
   if (uwb_manager) uwb_manager->shutdown();
   if (udp_socket_fd_ >= 0)
@@ -190,6 +192,18 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<double>("vio/visual_update_max_lateral_m", vio_visual_update_max_lateral_m_, 0.08);
   nh.param<double>("vio/visual_update_max_lateral_ratio", vio_visual_update_max_lateral_ratio_, 0.35);
   nh.param<double>("vio/visual_update_max_exposure_delta", vio_visual_update_max_exposure_delta_, 0.30);
+  nh.param<double>("vio/visual_update_max_velocity_increment_mps",
+                   vio_visual_update_max_velocity_increment_mps_, 0.15);
+  nh.param<double>("vio/visual_update_max_acc_bias_increment_mps2",
+                   vio_visual_update_max_acc_bias_increment_mps2_, 0.03);
+  nh.param<double>("vio/visual_update_max_gyro_bias_increment_rps",
+                   vio_visual_update_max_gyro_bias_increment_rps_, 0.005);
+  nh.param<double>("vio/visual_update_normalized_nis_max",
+                   vio_visual_update_normalized_nis_max_, 0.0);
+  nh.param<int>("diagnostics/console_interval_frames", diagnostics_console_interval_frames_, 20);
+  nh.param<int>("diagnostics/csv_flush_interval_rows", diagnostics_csv_flush_interval_rows_, 100);
+  diagnostics_console_interval_frames_ = std::max(1, diagnostics_console_interval_frames_);
+  diagnostics_csv_flush_interval_rows_ = std::max(1, diagnostics_csv_flush_interval_rows_);
   nh.param<bool>("vio/image_quality_gate_en", vio_image_quality_gate_en_, false);
   nh.param<double>("vio/image_quality_max_saturated_fraction", vio_image_quality_max_saturated_fraction_, 0.20);
   nh.param<double>("vio/image_quality_max_tile_saturated_fraction", vio_image_quality_max_tile_saturated_fraction_, 0.35);
@@ -526,6 +540,11 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
   vio_manager->visual_update_max_lateral_m = vio_visual_update_max_lateral_m_;
   vio_manager->visual_update_max_lateral_ratio = vio_visual_update_max_lateral_ratio_;
   vio_manager->visual_update_max_exposure_delta = vio_visual_update_max_exposure_delta_;
+  vio_manager->visual_update_max_velocity_increment_mps = vio_visual_update_max_velocity_increment_mps_;
+  vio_manager->visual_update_max_acc_bias_increment_mps2 = vio_visual_update_max_acc_bias_increment_mps2_;
+  vio_manager->visual_update_max_gyro_bias_increment_rps = vio_visual_update_max_gyro_bias_increment_rps_;
+  vio_manager->visual_update_normalized_nis_max = vio_visual_update_normalized_nis_max_;
+  vio_manager->diagnostics_console_interval_frames = diagnostics_console_interval_frames_;
   vio_manager->image_quality_gate_en = vio_image_quality_gate_en_;
   vio_manager->image_quality_max_saturated_fraction = vio_image_quality_max_saturated_fraction_;
   vio_manager->image_quality_max_tile_saturated_fraction = vio_image_quality_max_tile_saturated_fraction_;
@@ -552,6 +571,13 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
   vio_manager->timing_log_dir = save_path;
   vio_manager->timing_log_enable = save_log_en;
   vio_manager->initializeVIO(nh);
+  ROS_INFO("[VIO_GUARD_CONFIG] enable=%d pos=%.3f rot=%.3f vel=%.3f ba=%.3f bg=%.6f normalized_nis=%.3f",
+           static_cast<int>(vio_visual_update_guard_en_),
+           vio_visual_update_max_trans_m_, vio_visual_update_max_rot_deg_,
+           vio_visual_update_max_velocity_increment_mps_,
+           vio_visual_update_max_acc_bias_increment_mps2_,
+           vio_visual_update_max_gyro_bias_increment_rps_,
+           vio_visual_update_normalized_nis_max_);
   initializeUdpReporter();
 
   p_imu->set_extrinsic(extT, extR);
@@ -593,6 +619,136 @@ void LIVMapper::initializeFiles()
   }
   if(colmap_output_en) fout_points.open(save_path + "points3D.txt", std::ios::out);
   if(save_log_en) fout_pcd_pos.open(save_path + "scans_pos.json", std::ios::out);
+  if (save_log_en)
+  {
+    fout_lio_degeneracy.open(save_path + "lio_degeneracy.csv", std::ios::out);
+    if (fout_lio_degeneracy.is_open())
+    {
+      fout_lio_degeneracy
+          << "timestamp,frame_id,effective_feature_count,average_point_plane_residual,"
+          << "predicted_px,predicted_py,predicted_pz,predicted_vx,predicted_vy,predicted_vz,"
+          << "updated_px,updated_py,updated_pz,updated_vx,updated_vy,updated_vz,"
+          << "delta_px,delta_py,delta_pz,delta_vx,delta_vy,delta_vz,"
+          << "rotation_eigenvalue_0,rotation_eigenvalue_1,rotation_eigenvalue_2,"
+          << "translation_eigenvalue_0,translation_eigenvalue_1,translation_eigenvalue_2,"
+          << "translation_eigenvalue_ratio,translation_condition_number,"
+          << "weak_translation_direction_world_x,weak_translation_direction_world_y,weak_translation_direction_world_z,"
+          << "predicted_speed_mps,velocity_weak_direction_cos,"
+          << "raw_position_correction_x,raw_position_correction_y,raw_position_correction_z,"
+          << "raw_velocity_correction_x,raw_velocity_correction_y,raw_velocity_correction_z,"
+          << "velocity_projection_on_weak_direction,position_correction_on_weak_direction,"
+          << "translation_weight_0,translation_weight_1,translation_weight_2,"
+          << "raw_is_degenerate,is_degenerate,is_severely_degenerate,direction_conflict,direction_conflict_consecutive_frames,"
+          << "direction_guard_triggered,state_intervention_applied,"
+          << "update_was_suppressed,update_was_significantly_suppressed,"
+          << "map_guard_requested,map_guard_enforced,map_insert_skipped,map_insert_skip_reason\n";
+    }
+    else
+    {
+      ROS_WARN("[LIO_DEGEN] Failed to open %slio_degeneracy.csv", save_path.c_str());
+    }
+  }
+}
+
+void LIVMapper::logLioDegeneracy(bool map_insert_skipped,
+                                 const std::string &map_insert_skip_reason,
+                                 bool map_guard_requested,
+                                 bool map_guard_enforced)
+{
+  if (!voxelmap_manager) return;
+  const LioUpdateDiagnostics &diagnostics = voxelmap_manager->getLastLioDiagnostics();
+  const StatesGroup &predicted = diagnostics.predicted_state;
+  const StatesGroup &updated = diagnostics.updated_state;
+  const V3D delta_position = updated.pos_end - predicted.pos_end;
+  const V3D delta_velocity = updated.vel_end - predicted.vel_end;
+  const auto &metrics = diagnostics.observability;
+  const double timestamp = LidarMeasures.last_lio_update_time;
+  const int lio_frame_id = voxelmap_manager->current_frame_id_;
+
+  std::ostringstream line;
+  line << std::setprecision(9)
+       << "[LIO_DEGEN] timestamp=" << timestamp
+       << " frame_id=" << lio_frame_id
+       << " effective_feature_count=" << diagnostics.effective_feature_count
+       << " average_point_plane_residual=" << diagnostics.average_point_plane_residual
+       << " predicted_position=(" << predicted.pos_end.transpose() << ")"
+       << " predicted_velocity=(" << predicted.vel_end.transpose() << ")"
+       << " updated_position=(" << updated.pos_end.transpose() << ")"
+       << " updated_velocity=(" << updated.vel_end.transpose() << ")"
+       << " delta_position=(" << delta_position.transpose() << ")"
+       << " delta_velocity=(" << delta_velocity.transpose() << ")"
+       << " rotation_eigenvalues=(" << metrics.rotation_eigenvalues.transpose() << ")"
+       << " translation_eigenvalues=(" << metrics.translation_eigenvalues.transpose() << ")"
+       << " translation_eigenvalue_ratio=" << metrics.translation_eigenvalue_ratio
+       << " translation_condition_number=" << metrics.translation_condition_number
+       << " weak_translation_direction_world=(" << metrics.weak_translation_direction_world.transpose() << ")"
+       << " predicted_speed_mps=" << diagnostics.predicted_speed_mps
+       << " velocity_weak_direction_cos=" << diagnostics.velocity_weak_direction_cos
+       << " raw_position_correction=(" << diagnostics.raw_position_correction.transpose() << ")"
+       << " raw_velocity_correction=(" << diagnostics.raw_velocity_correction.transpose() << ")"
+       << " velocity_projection_on_weak_direction=" << diagnostics.velocity_projection_on_weak_direction
+       << " position_correction_on_weak_direction=" << diagnostics.position_correction_on_weak_direction
+       << " is_degenerate=" << static_cast<int>(diagnostics.is_degenerate)
+       << " is_severely_degenerate=" << static_cast<int>(diagnostics.is_severely_degenerate)
+       << " direction_conflict=" << static_cast<int>(diagnostics.direction_conflict)
+       << " direction_conflict_consecutive_frames=" << diagnostics.direction_conflict_consecutive_frames
+       << " state_intervention_applied=" << static_cast<int>(diagnostics.state_intervention_applied)
+       << " map_guard_requested=" << static_cast<int>(map_guard_requested)
+       << " map_guard_enforced=" << static_cast<int>(map_guard_enforced)
+       << " map_insert_skipped=" << static_cast<int>(map_insert_skipped)
+       << " map_insert_skip_reason=" << map_insert_skip_reason;
+  if (lio_frame_id % diagnostics_console_interval_frames_ == 0)
+    std::cout << line.str() << std::endl;
+
+  if (!fout_lio_degeneracy.is_open()) return;
+  fout_lio_degeneracy << std::setprecision(12)
+      << timestamp << ',' << lio_frame_id << ','
+      << diagnostics.effective_feature_count << ',' << diagnostics.average_point_plane_residual << ','
+      << predicted.pos_end.x() << ',' << predicted.pos_end.y() << ',' << predicted.pos_end.z() << ','
+      << predicted.vel_end.x() << ',' << predicted.vel_end.y() << ',' << predicted.vel_end.z() << ','
+      << updated.pos_end.x() << ',' << updated.pos_end.y() << ',' << updated.pos_end.z() << ','
+      << updated.vel_end.x() << ',' << updated.vel_end.y() << ',' << updated.vel_end.z() << ','
+      << delta_position.x() << ',' << delta_position.y() << ',' << delta_position.z() << ','
+      << delta_velocity.x() << ',' << delta_velocity.y() << ',' << delta_velocity.z() << ','
+      << metrics.rotation_eigenvalues[0] << ',' << metrics.rotation_eigenvalues[1] << ','
+      << metrics.rotation_eigenvalues[2] << ','
+      << metrics.translation_eigenvalues[0] << ',' << metrics.translation_eigenvalues[1] << ','
+      << metrics.translation_eigenvalues[2] << ',' << metrics.translation_eigenvalue_ratio << ','
+      << metrics.translation_condition_number << ','
+      << metrics.weak_translation_direction_world.x() << ','
+      << metrics.weak_translation_direction_world.y() << ','
+      << metrics.weak_translation_direction_world.z() << ','
+      << diagnostics.predicted_speed_mps << ','
+      << diagnostics.velocity_weak_direction_cos << ','
+      << diagnostics.raw_position_correction.x() << ','
+      << diagnostics.raw_position_correction.y() << ','
+      << diagnostics.raw_position_correction.z() << ','
+      << diagnostics.raw_velocity_correction.x() << ','
+      << diagnostics.raw_velocity_correction.y() << ','
+      << diagnostics.raw_velocity_correction.z() << ','
+      << diagnostics.velocity_projection_on_weak_direction << ','
+      << diagnostics.position_correction_on_weak_direction << ','
+      << diagnostics.translation_information_weights[0] << ','
+      << diagnostics.translation_information_weights[1] << ','
+      << diagnostics.translation_information_weights[2] << ','
+      << static_cast<int>(diagnostics.raw_is_degenerate) << ','
+      << static_cast<int>(diagnostics.is_degenerate) << ','
+      << static_cast<int>(diagnostics.is_severely_degenerate) << ','
+      << static_cast<int>(diagnostics.direction_conflict) << ','
+      << diagnostics.direction_conflict_consecutive_frames << ','
+      << static_cast<int>(diagnostics.direction_guard_triggered) << ','
+      << static_cast<int>(diagnostics.state_intervention_applied) << ','
+      << static_cast<int>(diagnostics.update_was_suppressed) << ','
+      << static_cast<int>(diagnostics.update_was_significantly_suppressed) << ','
+      << static_cast<int>(map_guard_requested) << ','
+      << static_cast<int>(map_guard_enforced) << ','
+      << static_cast<int>(map_insert_skipped) << ',' << map_insert_skip_reason << '\n';
+  ++lio_diagnostics_pending_rows_;
+  if (lio_diagnostics_pending_rows_ >= diagnostics_csv_flush_interval_rows_)
+  {
+    fout_lio_degeneracy.flush();
+    lio_diagnostics_pending_rows_ = 0;
+  }
 }
 
 void LIVMapper::initializeUdpReporter()
@@ -1119,6 +1275,16 @@ void LIVMapper::handleVIO()
       vio_manager->last_visual_guard_time = LidarMeasures.last_lio_update_time - _first_lidar_time;
       vio_manager->last_visual_guard_pos = _state.pos_end;
       vio_manager->has_last_visual_guard_pos = true;
+      vio_manager->last_visual_measurement_dof = 0;
+      vio_manager->last_visual_total_nis = std::numeric_limits<double>::quiet_NaN();
+      vio_manager->last_visual_normalized_nis = std::numeric_limits<double>::quiet_NaN();
+      vio_manager->logVisualDelta(
+          LidarMeasures.last_lio_update_time - _first_lidar_time, 0,
+          std::numeric_limits<double>::quiet_NaN(),
+          std::numeric_limits<double>::quiet_NaN(),
+          std::numeric_limits<double>::quiet_NaN(),
+          "selector_" + last_selector_reason_, _state, _state,
+          std::numeric_limits<double>::quiet_NaN(), false);
     }
 
     publishRawBackendOdometry();
@@ -1423,16 +1589,104 @@ void LIVMapper::handleLIO()
   const int map_update_stride = std::max(1, lio_map_update_stride_);
   lio_map_update_counter_++;
   const bool do_map_update = (map_update_stride <= 1) || ((lio_map_update_counter_ % map_update_stride) == 0);
-  const bool skip_map_insert = do_map_update && external_update_pause_map_frames_ > 0;
+  const LioUpdateDiagnostics &lio_diagnostics = voxelmap_manager->getLastLioDiagnostics();
+  const VoxelMapConfig &lio_config = voxelmap_manager->config_setting_;
+  const bool map_guard_enabled = lio_config.map_guard_mode != "off";
+  const bool map_guard_enforce = lio_config.map_guard_mode == "enforce";
+  const bool direction_map_guard_request = map_guard_enabled &&
+      lio_config.map_guard_freeze_on_direction_reject &&
+      lio_diagnostics.direction_conflict;
+  const bool degeneracy_map_guard_request = map_guard_enabled &&
+      lio_config.map_guard_freeze_on_degeneracy &&
+      lio_diagnostics.is_severely_degenerate;
+  const bool map_guard_request = direction_map_guard_request || degeneracy_map_guard_request;
+  std::string map_guard_reason = "none";
+
+  if (!map_guard_enforce)
+  {
+    lio_map_guard_active_ = false;
+    lio_map_guard_hard_limit_latched_ = false;
+    lio_map_guard_recovery_frames_ = 0;
+    lio_map_guard_freeze_frames_ = 0;
+    if (lio_config.map_guard_mode == "diagnostic" && map_guard_request)
+      ROS_INFO_THROTTLE(1.0, "[LIO_MAP_GUARD] diagnostic freeze request observed; insertion unchanged");
+  }
+  else if (lio_map_guard_hard_limit_latched_)
+  {
+    if (!map_guard_request)
+    {
+      lio_map_guard_hard_limit_latched_ = false;
+      ROS_INFO("[LIO_MAP_GUARD] hard-limit latch cleared after guard request ended");
+    }
+    map_guard_reason = "hard_limit_degraded_mapping";
+  }
+  else if (map_guard_request)
+  {
+    lio_map_guard_recovery_frames_ = 0;
+    if (!lio_map_guard_active_)
+    {
+      lio_map_guard_freeze_frames_ = 0;
+      lio_map_guard_active_ = true;
+      ROS_WARN("[LIO_MAP_GUARD] map insertion freeze started");
+    }
+    map_guard_reason = direction_map_guard_request ? "direction_guard" : "lidar_degenerate";
+  }
+  else if (lio_map_guard_active_)
+  {
+    ++lio_map_guard_recovery_frames_;
+    map_guard_reason = "recovery_hysteresis";
+    if (lio_map_guard_recovery_frames_ >= lio_config.map_guard_recovery_consecutive_frames)
+    {
+      lio_map_guard_active_ = false;
+      lio_map_guard_recovery_frames_ = 0;
+      lio_map_guard_freeze_frames_ = 0;
+      map_guard_reason = "recovered";
+      ROS_INFO("[LIO_MAP_GUARD] map insertion freeze cleared after %d stable frames",
+               lio_config.map_guard_recovery_consecutive_frames);
+    }
+  }
+
+  const bool external_map_guard = external_update_pause_map_frames_ > 0;
+  bool lio_map_guard_enforced = false;
+  if (do_map_update && map_guard_enforce && lio_map_guard_active_)
+  {
+    if (lio_map_guard_freeze_frames_ >= lio_config.map_guard_maximum_freeze_frames)
+    {
+      lio_map_guard_active_ = false;
+      lio_map_guard_hard_limit_latched_ = true;
+      lio_map_guard_recovery_frames_ = 0;
+      map_guard_reason = "hard_limit_degraded_mapping";
+      ROS_WARN("[LIO_MAP_GUARD] hard maximum_freeze_frames=%d reached; insertion resumed and re-freeze latched until the request clears",
+               lio_config.map_guard_maximum_freeze_frames);
+    }
+    else
+    {
+      lio_map_guard_enforced = true;
+      ++lio_map_guard_freeze_frames_;
+    }
+  }
+  const bool skip_map_insert = do_map_update && (external_map_guard || lio_map_guard_enforced);
+  std::string map_insert_skip_reason = "none";
+  if (!do_map_update)
+    map_insert_skip_reason = "map_update_stride";
+  else if (external_map_guard && lio_map_guard_enforced)
+    map_insert_skip_reason = "external_update+" + map_guard_reason;
+  else if (external_map_guard)
+    map_insert_skip_reason = "external_update";
+  else if (lio_map_guard_enforced)
+    map_insert_skip_reason = map_guard_reason;
   const int pause_map_update_frames_before = external_update_pause_map_frames_;
   double t4 = t3;
 
   if (skip_map_insert)
   {
-    external_update_pause_map_frames_ = std::max(0, external_update_pause_map_frames_ - 1);
+    if (external_map_guard)
+      external_update_pause_map_frames_ = std::max(0, external_update_pause_map_frames_ - 1);
     ROS_INFO_THROTTLE(1.0,
-                      "[ExternalUpdate] skip_map_insert=1 pause_map_update_frames=%d->%d",
-                      pause_map_update_frames_before, external_update_pause_map_frames_);
+                      "[LIO_MAP_GUARD] skip_map_insert=1 reason=%s external_pause=%d->%d freeze_frames=%d recovery_frames=%d",
+                      map_insert_skip_reason.c_str(), pause_map_update_frames_before,
+                      external_update_pause_map_frames_, lio_map_guard_freeze_frames_,
+                      lio_map_guard_recovery_frames_);
   }
   else if (do_map_update)
   {
@@ -1456,11 +1710,17 @@ void LIVMapper::handleLIO()
 
     t4 = omp_get_wtime();
 
-    if (voxelmap_manager->config_setting_.map_sliding_en)
-    {
-      voxelmap_manager->mapSliding();
-    }
   }
+
+  // Sliding/cropping is memory management, not map insertion. It must continue
+  // even while an external or experimental guard pauses new point insertion.
+  if (do_map_update && voxelmap_manager->config_setting_.map_sliding_en)
+  {
+    voxelmap_manager->mapSliding();
+  }
+
+  logLioDegeneracy(skip_map_insert, map_insert_skip_reason,
+                   map_guard_request, lio_map_guard_enforced);
   
   PointCloudXYZI::Ptr laserCloudFullRes(dense_map_en ? feats_undistort : feats_down_body);
   int size = laserCloudFullRes->points.size();

@@ -14,6 +14,7 @@ which is included as part of this source code package.
 #define VOXEL_MAP_H_
 
 #include "common_lib.h"
+#include "lio_degeneracy.h"
 #include <Eigen/Dense>
 #include <fstream>
 #include <math.h>
@@ -55,9 +56,33 @@ typedef struct VoxelMapConfig
   bool long_term_visual_map_en;
   int long_term_visual_max_voxels;
 
-  // config of lidar degeneracy detection
-  double degeneracy_ratio_thresh;
+  // Whole-frame LiDAR pose observability; unrelated to lio/min_eigen_value,
+  // which only decides whether one voxel represents a plane.
+  bool observability_diagnostics_enable;
+  bool state_intervention_enable;
+  bool use_conditional_translation_information;
+  double degeneracy_rotation_regularization;
   int degeneracy_min_effective_features;
+  double degeneracy_min_translation_eigenvalue;
+  double degeneracy_max_translation_condition_number;
+  double degeneracy_ratio_thresh;
+  int degeneracy_enter_consecutive_frames;
+  int degeneracy_exit_consecutive_frames;
+
+  std::string direction_guard_mode;
+  double direction_guard_min_predicted_speed_mps;
+  double direction_guard_min_velocity_weak_direction_cos;
+  double direction_guard_max_opposite_correction_m;
+  double direction_guard_max_opposite_velocity_correction_mps;
+  int direction_guard_enter_consecutive_frames;
+  int direction_guard_exit_consecutive_frames;
+
+  std::string map_guard_mode;
+  bool map_guard_freeze_on_degeneracy;
+  bool map_guard_freeze_on_direction_reject;
+  double map_guard_severe_translation_eigenvalue_ratio;
+  int map_guard_recovery_consecutive_frames;
+  int map_guard_maximum_freeze_frames;
 
   // config of adaptive ICP early-stop
   int icp_min_iterations;
@@ -84,6 +109,32 @@ typedef struct PointToPlane
   bool is_valid_;
   float dis_to_plane_;
 } PointToPlane;
+
+struct LioUpdateDiagnostics
+{
+  bool valid_update = false;
+  int effective_feature_count = 0;
+  double average_point_plane_residual = 0.0;
+  StatesGroup predicted_state;
+  StatesGroup updated_state;
+  fast_livo::LioObservabilityMetrics observability;
+  Eigen::Vector3d translation_information_weights = Eigen::Vector3d::Ones();
+  Eigen::Vector3d raw_position_correction = Eigen::Vector3d::Zero();
+  Eigen::Vector3d raw_velocity_correction = Eigen::Vector3d::Zero();
+  double predicted_speed_mps = 0.0;
+  double velocity_weak_direction_cos = 0.0;
+  double velocity_projection_on_weak_direction = 0.0;
+  double position_correction_on_weak_direction = 0.0;
+  bool raw_is_degenerate = false;
+  bool is_degenerate = false;
+  bool direction_conflict = false;
+  int direction_conflict_consecutive_frames = 0;
+  bool direction_guard_triggered = false;
+  bool state_intervention_applied = false;
+  bool update_was_suppressed = false;
+  bool update_was_significantly_suppressed = false;
+  bool is_severely_degenerate = false;
+};
 
 typedef struct VoxelPlane
 {
@@ -239,6 +290,7 @@ public:
   std::vector<PointToPlane> ptpl_list_;
   bool lidar_degenerated_ = false;
   double lidar_constraint_ratio_ = 0.0;
+  LioUpdateDiagnostics last_lio_diagnostics_;
 
   VoxelMapManager(VoxelMapConfig &config_setting, std::unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &voxel_map)
       : config_setting_(config_setting), voxel_map_(voxel_map)
@@ -272,8 +324,20 @@ public:
   void updateLidarDegeneracyStatus();
   bool isLidarDegenerated() const;
   double getLidarConstraintRatio() const;
+  const LioUpdateDiagnostics &getLastLioDiagnostics() const;
 
 private:
+  int degeneracy_bad_frame_count_ = 0;
+  int degeneracy_good_frame_count_ = 0;
+  int direction_conflict_frame_count_ = 0;
+  int direction_clear_frame_count_ = 0;
+  bool direction_guard_active_ = false;
+
+  bool classifyLidarDegeneracy(const fast_livo::LioObservabilityMetrics &metrics,
+                               int effective_features) const;
+  void updateLidarDegeneracyHysteresis(bool raw_degenerate);
+  void updateDirectionGuardHysteresis(bool conflict);
+
   void GetUpdatePlane(const VoxelOctoTree *current_octo, const int pub_max_voxel_layer, std::vector<VoxelPlane> &plane_list);
 
   void pubSinglePlane(visualization_msgs::MarkerArray &plane_pub, const std::string plane_ns, const VoxelPlane &single_plane, const float alpha,

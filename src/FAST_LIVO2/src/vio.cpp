@@ -475,6 +475,45 @@ void VIOManager::appendTimingLogLines(const vector<string> &lines)
   }
 }
 
+void VIOManager::logVisualDelta(double timestamp, int tracked_point_count,
+                                double image_saturated_fraction,
+                                double image_tile_saturated_fraction,
+                                double image_contrast,
+                                const std::string &skip_reason,
+                                const StatesGroup &before,
+                                const StatesGroup &attempted,
+                                double visual_total_nis, bool accepted)
+{
+  const V3D delta_position = attempted.pos_end - before.pos_end;
+  const M3D relative_rotation = before.rot_end.transpose() * attempted.rot_end;
+  const V3D delta_rotation = Log(relative_rotation);
+  const V3D delta_velocity = attempted.vel_end - before.vel_end;
+  const V3D delta_acc_bias = attempted.bias_a - before.bias_a;
+  const V3D delta_gyro_bias = attempted.bias_g - before.bias_g;
+  std::ostringstream oss;
+  oss << std::setprecision(9)
+      << "[VIO_DELTA] timestamp=" << timestamp
+      << " tracked_point_count=" << tracked_point_count
+      << " measurement_dof=" << last_visual_measurement_dof
+      << " image_saturated_fraction=" << image_saturated_fraction
+      << " image_tile_saturated_fraction=" << image_tile_saturated_fraction
+      << " image_contrast=" << image_contrast
+      << " skip_reason=" << (skip_reason.empty() ? "none" : skip_reason)
+      << " delta_position=(" << delta_position.transpose() << ")"
+      << " delta_rotation=(" << delta_rotation.transpose() << ")"
+      << " delta_velocity=(" << delta_velocity.transpose() << ")"
+      << " delta_acc_bias=(" << delta_acc_bias.transpose() << ")"
+      << " delta_gyro_bias=(" << delta_gyro_bias.transpose() << ")"
+      << " total_nis=" << visual_total_nis
+      << " normalized_nis=" << last_visual_normalized_nis
+      << " accepted=" << static_cast<int>(accepted);
+  if ((frame_count % std::max(1, diagnostics_console_interval_frames)) == 0)
+  {
+    std::cout << oss.str() << std::endl;
+  }
+  appendTimingLogLines({oss.str()});
+}
+
 void VIOManager::resetGrid()
 {
   fill(grid_num.begin(), grid_num.end(), TYPE_UNKNOWN);
@@ -1461,6 +1500,9 @@ bool VIOManager::computeJacobianAndUpdateEKF(cv::Mat img)
 {
   G.setZero();
   H_T_H.setZero();
+  last_visual_measurement_dof = 0;
+  last_visual_total_nis = std::numeric_limits<double>::quiet_NaN();
+  last_visual_normalized_nis = std::numeric_limits<double>::quiet_NaN();
   if (total_points == 0) return false;
   
   compute_jacobian_time = update_ekf_time = 0.0;
@@ -2304,6 +2346,12 @@ bool VIOManager::updateStateInverse(cv::Mat img, int level)
       H_T_H.block<6, 6>(0, 0) = H_sub_T * H_sub;
       MD(DIM_STATE, DIM_STATE) &&K_1 = (H_T_H + (state->cov / img_point_cov).inverse()).inverse();
       auto &&HTz = H_sub_T * z;
+      last_visual_measurement_dof = n_meas;
+      last_visual_total_nis = std::max(0.0, (z.squaredNorm() - HTz.dot(K_1.block<6, 6>(0, 0) * HTz)) /
+                                                  std::max(img_point_cov, 1e-12));
+      last_visual_normalized_nis = last_visual_measurement_dof > 0
+                                       ? last_visual_total_nis / last_visual_measurement_dof
+                                       : std::numeric_limits<double>::quiet_NaN();
       auto vec = (*state_propagat) - (*state);
       G.block<DIM_STATE, 6>(0, 0) = K_1.block<DIM_STATE, 6>(0, 0) * H_T_H.block<6, 6>(0, 0);
       MD(DIM_STATE, 1) solution =
@@ -2500,6 +2548,12 @@ bool VIOManager::updateState(cv::Mat img, int level)
       H_T_H.block<7, 7>(0, 0) = H_sub_T * H_sub;
       MD(DIM_STATE, DIM_STATE) &&K_1 = (H_T_H + (state->cov / img_point_cov).inverse()).inverse();
       auto &&HTz = H_sub_T * z;
+      last_visual_measurement_dof = n_meas;
+      last_visual_total_nis = std::max(0.0, (z.squaredNorm() - HTz.dot(K_1.block<7, 7>(0, 0) * HTz)) /
+                                                  std::max(img_point_cov, 1e-12));
+      last_visual_normalized_nis = last_visual_measurement_dof > 0
+                                       ? last_visual_total_nis / last_visual_measurement_dof
+                                       : std::numeric_limits<double>::quiet_NaN();
       auto vec = (*state_propagat) - (*state);
       G.block<DIM_STATE, 7>(0, 0) = K_1.block<DIM_STATE, 7>(0, 0) * H_T_H.block<7, 7>(0, 0);
       MD(DIM_STATE, 1)
@@ -3405,6 +3459,10 @@ void VIOManager::updateStateWithBoardObservation()
 
 void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time)
 {
+  const StatesGroup state_before_frame = *state;
+  last_visual_measurement_dof = 0;
+  last_visual_total_nis = std::numeric_limits<double>::quiet_NaN();
+  last_visual_normalized_nis = std::numeric_limits<double>::quiet_NaN();
   auto rememberVisualGuardPose = [&]()
   {
     last_visual_guard_time = img_time;
@@ -3448,7 +3506,7 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   double max_tile_saturated_fraction = 0.0;
   double dark_fraction = 0.0;
   double intensity_std = 0.0;
-  if (image_quality_gate_en && !img.empty())
+  if (!img.empty())
   {
     cv::Mat mean, stddev;
     cv::meanStdDev(img, mean, stddev);
@@ -3488,11 +3546,11 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
       }
     }
 
-    image_quality_reject =
-        (saturated_fraction > image_quality_max_saturated_fraction) ||
-        (max_tile_saturated_fraction > image_quality_max_tile_saturated_fraction) ||
-        (dark_fraction > image_quality_max_dark_fraction) ||
-        (intensity_std < image_quality_min_intensity_std);
+    image_quality_reject = image_quality_gate_en &&
+        ((saturated_fraction > image_quality_max_saturated_fraction) ||
+         (max_tile_saturated_fraction > image_quality_max_tile_saturated_fraction) ||
+         (dark_fraction > image_quality_max_dark_fraction) ||
+         (intensity_std < image_quality_min_intensity_std));
   }
 
   if (image_quality_reject)
@@ -3548,6 +3606,9 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
       lines.push_back(oss.str());
       appendTimingLogLines(lines);
     }
+    logVisualDelta(img_time, 0, saturated_fraction, max_tile_saturated_fraction,
+                   intensity_std, "bad_image_quality", state_before_frame,
+                   *state, last_visual_total_nis, false);
     rememberVisualGuardPose();
     return;
   }
@@ -3599,6 +3660,10 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   double visual_update_backward_limit_m = visual_update_max_backward_m;
   double visual_update_lateral_limit_m = visual_update_max_lateral_m;
   double visual_update_exposure_delta = 0.0;
+  double visual_update_velocity_mps = 0.0;
+  double visual_update_acc_bias_mps2 = 0.0;
+  double visual_update_gyro_bias_rps = 0.0;
+  bool visual_ekf_updated = false;
 
   if (!skip_visual_ekf)
   {
@@ -3608,7 +3673,7 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
              total_points, min_retrieve_points, low_track_force_update_stride, low_track_force_min_points);
     }
 
-    computeJacobianAndUpdateEKF(img);
+    visual_ekf_updated = computeJacobianAndUpdateEKF(img);
 
     if (run_aruco_this_frame)
     {
@@ -3800,6 +3865,12 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
       appendTimingLogLines(lines);
     }
 
+    logVisualDelta(img_time, total_points, saturated_fraction,
+                   max_tile_saturated_fraction, intensity_std,
+                   aruco_update_ran ? "direct_low_tracks_aruco_only" : "low_tracked_points",
+                   state_before_visual_update, *state, last_visual_total_nis,
+                   aruco_update_ran);
+
     rememberVisualGuardPose();
     return;
   }
@@ -3811,6 +3882,9 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
     const Eigen::Matrix3d delta_rot = state_before_visual_update.rot_end.transpose() * state->rot_end;
     visual_update_rot_deg = Eigen::AngleAxisd(delta_rot).angle() * 57.29577951308232;
     visual_update_exposure_delta = std::fabs(state->inv_expo_time - state_before_visual_update.inv_expo_time);
+    visual_update_velocity_mps = (state->vel_end - state_before_visual_update.vel_end).norm();
+    visual_update_acc_bias_mps2 = (state->bias_a - state_before_visual_update.bias_a).norm();
+    visual_update_gyro_bias_rps = (state->bias_g - state_before_visual_update.bias_g).norm();
 
     const double speed = state_before_visual_update.vel_end.norm();
     if (speed > 0.2)
@@ -3848,7 +3922,12 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
         std::isfinite(visual_update_correction_backward_m) &&
         std::isfinite(visual_update_lateral_m) &&
         std::isfinite(visual_update_exposure_delta) &&
+        std::isfinite(visual_update_velocity_mps) &&
+        std::isfinite(visual_update_acc_bias_mps2) &&
+        std::isfinite(visual_update_gyro_bias_rps) &&
         std::isfinite(state->pos_end[0]) && std::isfinite(state->pos_end[1]) && std::isfinite(state->pos_end[2]) &&
+        state->rot_end.allFinite() && state->vel_end.allFinite() &&
+        state->bias_a.allFinite() && state->bias_g.allFinite() && state->cov.allFinite() &&
         std::isfinite(state->inv_expo_time) && state->inv_expo_time > 0.0;
 
     if (!finite_state)
@@ -3865,6 +3944,28 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
     {
       visual_update_rejected_by_guard = true;
       visual_update_reject_reason = "large_rotation";
+    }
+    else if (visual_update_velocity_mps > std::max(0.0, visual_update_max_velocity_increment_mps))
+    {
+      visual_update_rejected_by_guard = true;
+      visual_update_reject_reason = "large_velocity_change";
+    }
+    else if (visual_update_acc_bias_mps2 > std::max(0.0, visual_update_max_acc_bias_increment_mps2))
+    {
+      visual_update_rejected_by_guard = true;
+      visual_update_reject_reason = "large_acc_bias_change";
+    }
+    else if (visual_update_gyro_bias_rps > std::max(0.0, visual_update_max_gyro_bias_increment_rps))
+    {
+      visual_update_rejected_by_guard = true;
+      visual_update_reject_reason = "large_gyro_bias_change";
+    }
+    else if (visual_update_normalized_nis_max > 0.0 && visual_ekf_updated &&
+             (!std::isfinite(last_visual_normalized_nis) ||
+              last_visual_normalized_nis > visual_update_normalized_nis_max))
+    {
+      visual_update_rejected_by_guard = true;
+      visual_update_reject_reason = "large_visual_normalized_nis";
     }
     else if (visual_update_backward_m > std::max(0.0, visual_update_backward_limit_m))
     {
@@ -3884,6 +3985,11 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 
     if (visual_update_rejected_by_guard)
     {
+      const StatesGroup attempted_state = *state;
+      logVisualDelta(img_time, total_points, saturated_fraction,
+                     max_tile_saturated_fraction, intensity_std,
+                     visual_update_reject_reason, state_before_visual_update,
+                     attempted_state, last_visual_total_nis, false);
       *state = state_before_visual_update;
       state->cov = cov_before_visual_update;
       G.setZero();
@@ -3933,6 +4039,12 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
     rememberVisualGuardPose();
     return;
   }
+
+  logVisualDelta(img_time, total_points, saturated_fraction,
+                 max_tile_saturated_fraction, intensity_std,
+                 visual_ekf_updated ? "" : "ekf_no_valid_measurement",
+                 state_before_visual_update, *state, last_visual_total_nis,
+                 visual_ekf_updated);
 
   double t3 = omp_get_wtime();
 

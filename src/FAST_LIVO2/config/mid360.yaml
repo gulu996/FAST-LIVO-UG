@@ -100,6 +100,10 @@ vio:
   visual_update_max_lateral_m: 0.08 # 垂直于速度方向的视觉修正硬上限
   visual_update_max_lateral_ratio: 0.35 # 横向修正不能超过当前帧预测前进距离的比例
   visual_update_max_exposure_delta: 0.30 # 曝光估计突变较大时回滚视觉更新
+  visual_update_max_velocity_increment_mps: 0.15
+  visual_update_max_acc_bias_increment_mps2: 0.03
+  visual_update_max_gyro_bias_increment_rps: 0.005
+  visual_update_normalized_nis_max: 0.0 # 0 disables the normalized-NIS gate until calibrated
   image_quality_gate_en: true # 打开整帧质量门，过曝/过暗/低对比图像直接跳过VIO更新
   image_quality_max_saturated_fraction: 0.10 # 全图过曝比例超过该值时跳过VIO
   image_quality_max_tile_saturated_fraction: 0.25 # 局部区域过曝严重时跳过VIO，适合隧道出口强光
@@ -193,9 +197,42 @@ lio:
   max_points_num: 50
   layer_init_num: [5, 5, 5, 5, 5]
 
+# Whole-frame LiDAR pose observability. This is deliberately separate from
+# lio/min_eigen_value, which only classifies an individual voxel as planar.
+lio_degeneracy:
+  enable_observability_diagnostics: true
+  enable_state_intervention: false # experimental intervention is intentionally unavailable in this stable baseline
+  use_conditional_translation_information: true # Schur-complement rotation before testing translation
+  rotation_regularization: 1.0e-6 # positive regularizer for Hrr in the Schur complement
+  min_effective_features: 50
+  min_translation_eigenvalue: 0.0 # 0 disables the absolute gate until sensor-specific calibration is available
+  max_translation_condition_number: 1000.0
+  min_translation_eigenvalue_ratio: 0.02
+  enter_consecutive_frames: 3
+  exit_consecutive_frames: 8
+
+lio_direction_guard:
+  mode: "diagnostic" # off/diagnostic/enforce; enforce currently falls back to diagnostic
+  min_predicted_speed_mps: 0.30
+  min_velocity_weak_direction_cos: 0.70
+  max_opposite_correction_m: 0.03
+  max_opposite_velocity_correction_mps: 0.03 # cross-covariance can slow velocity before position corrections become large
+  enter_consecutive_frames: 1 # diagnostic log showed isolated bad corrections before the first zero crossing
+  exit_consecutive_frames: 5
+
+lio_map_guard:
+  mode: "off" # off/diagnostic/enforce
+  freeze_on_degeneracy: true
+  freeze_on_direction_reject: true
+  severe_translation_eigenvalue_ratio: 0.002 # below the diagnostic P1=0.00315; ordinary tunnel anisotropy must not starve the local map
+  recovery_consecutive_frames: 3
+  maximum_freeze_frames: 20 # hard limit counted only on map-insertion-eligible frames
+
 local_map:  
   map_sliding_en: true
-  half_map_size: 10
+  # Root-voxel half extent, not meters. With lio/voxel_size=0.8 m,
+  # 100 retains about +/-80 m along each world axis (201 root voxels per axis).
+  half_map_size: 100
   sliding_thresh: 4
   long_term_visual_map_en: false # 关闭长期视觉地图，降低长期运行计算开销
   long_term_visual_max_voxels: 5000 # 长期视觉地图最大体素数，超过后会逐步裁剪以限制内存
@@ -317,6 +354,10 @@ debug:
   print_console_timing_stride: 1
   vio_console_timing_print_en: true
   vio_console_timing_print_stride: 1
+
+diagnostics:
+  console_interval_frames: 20
+  csv_flush_interval_rows: 100
 
 evo:
   seq_name: "CBD_Building_01"

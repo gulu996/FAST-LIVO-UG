@@ -213,6 +213,7 @@ add_executable(gnss_fault_injector_self_test src/gnss_fault_injector_self_test.c
 add_executable(rtk_fixed_lag_backend_node src/rtk_fixed_lag_backend_node.cpp)
 add_executable(rtk_fixed_lag_backend_self_test src/rtk_fixed_lag_backend_self_test.cpp)
 add_executable(voxel_filter_self_test src/voxel_filter_self_test.cpp)
+add_executable(lio_degeneracy_self_test src/lio_degeneracy_self_test.cpp)
 
 add_dependencies(fastlivo_mapping ${catkin_EXPORTED_TARGETS})
 add_dependencies(gnss_manager_self_test ${catkin_EXPORTED_TARGETS})
