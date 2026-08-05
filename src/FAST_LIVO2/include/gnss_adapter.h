@@ -13,6 +13,7 @@ This file is part of FAST-LIVO2: Fast, Direct LiDAR-Inertial-Visual Odometry.
 #include <Eigen/Core>
 #include <fast_livo/GnssStatus.h>
 #include <gnss_comm/GnssPVTSolnMsg.h>
+#include <gnss_serial_driver/GnssPvtStamped.h>
 #include <nav_msgs/Odometry.h>
 #include <ros/ros.h>
 
@@ -29,6 +30,7 @@ enum class GnssQuality : uint8_t
 struct GnssAdapterConfig
 {
   bool enable = true;
+  std::string input_mode = "legacy_gnss_comm";
   std::string input_topic = "/ublox_driver/receiver_pvt";
   std::string output_odom_topic = "/gnss/enu_odom";
   std::string output_status_topic = "/gnss/status";
@@ -93,6 +95,8 @@ public:
   // Public to leave one small, ROS-master-free processing seam for replay/self-tests.
   GnssAdapterResult process(const gnss_comm::GnssPVTSolnMsg &message,
                             const ros::Time &callback_time);
+  GnssAdapterResult process(const gnss_serial_driver::GnssPvtStamped &message,
+                            const ros::Time &callback_time);
 
 private:
   enum class TrackingState
@@ -106,7 +110,14 @@ private:
   bool loadConfig(ros::NodeHandle &nh, GnssAdapterConfig &config) const;
   bool validateConfig(const GnssAdapterConfig &config) const;
   void resetRuntimeState();
-  void pvtCallback(const gnss_comm::GnssPVTSolnMsgConstPtr &message);
+  void legacyPvtCallback(const gnss_comm::GnssPVTSolnMsgConstPtr &message);
+  void stampedLocalPvtCallback(
+      const gnss_serial_driver::GnssPvtStampedConstPtr &message);
+  GnssAdapterResult processPvt(const gnss_comm::GnssPVTSolnMsg &message,
+                               const ros::Time &measurement_stamp,
+                               bool local_measurement_time_valid,
+                               bool valid_for_fusion,
+                               const ros::Time &callback_time);
 
   bool convertGpsToUtc(uint32_t week, double tow, ros::Time &stamp) const;
   GnssQuality classify(const gnss_comm::GnssPVTSolnMsg &message,
@@ -138,8 +149,8 @@ private:
   uint32_t consecutive_fixed_count_ = 0;
   uint32_t consecutive_lost_count_ = 0;
 
-  bool have_last_gps_time_ = false;
-  double last_gps_time_s_ = 0.0;
+  bool have_last_measurement_time_ = false;
+  std::int64_t last_measurement_time_ns_ = 0;
 
   bool origin_initialized_ = false;
   Eigen::Vector3d origin_lla_ = Eigen::Vector3d::Zero();

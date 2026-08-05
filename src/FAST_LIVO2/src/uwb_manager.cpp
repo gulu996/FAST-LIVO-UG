@@ -3,6 +3,7 @@ This file is part of FAST-LIVO2: Fast, Direct LiDAR-Inertial-Visual Odometry.
 */
 
 #include "uwb_manager.h"
+#include "gnss_fusion_policy.h"
 
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
@@ -744,6 +745,9 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
   nh.param<bool>("uwb/enable", en_, en_);
   nh.param<bool>("uwb/update_en", update_en_, true);
   nh.param<bool>("uwb/update_enable", update_en_, update_en_);
+  GnssFusionPolicy fusion_policy;
+  if (!loadGnssFusionPolicy(nh, fusion_policy)) return false;
+  update_en_ = fusion_policy.absoluteUpdateEnabled(update_en_);
   nh.param<bool>("uwb/residual_debug_only", residual_debug_only_, false);
   nh.param<bool>("uwb/update_xy_only", update_xy_only_, true);
   nh.param<bool>("uwb/use_3d_range_model", use_3d_range_model_, true);

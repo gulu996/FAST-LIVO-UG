@@ -3,6 +3,7 @@ This file is part of FAST-LIVO2: Fast, Direct LiDAR-Inertial-Visual Odometry.
 */
 
 #include "gnss_adapter.h"
+#include "gnss_fusion_policy.h"
 
 #include <algorithm>
 #include <cmath>
@@ -17,7 +18,7 @@ namespace
 {
 constexpr double kGpsWeekSeconds = 604800.0;
 constexpr uint32_t kMaxSupportedGpsWeek = 7000;
-constexpr double kTimestampEqualityToleranceS = 1e-6;
+constexpr std::int64_t kTimestampEqualityToleranceNs = 1000;
 constexpr double kUnknownOrientationVariance = 1e6;
 constexpr int kSubscriberQueueSize = 100;
 
@@ -103,6 +104,9 @@ bool GnssAdapter::initialize(ros::NodeHandle &nh)
 {
   GnssAdapterConfig loaded_config;
   if (!loadConfig(nh, loaded_config) || !validateConfig(loaded_config)) return false;
+  GnssFusionPolicy fusion_policy;
+  if (!loadGnssFusionPolicy(nh, fusion_policy)) return false;
+  loaded_config.enable = fusion_policy.componentEnabled(loaded_config.enable);
 
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -118,11 +122,20 @@ bool GnssAdapter::initialize(ros::NodeHandle &nh)
 
   odom_publisher_ = nh.advertise<nav_msgs::Odometry>(config_.output_odom_topic, 10);
   status_publisher_ = nh.advertise<fast_livo::GnssStatus>(config_.output_status_topic, 10);
-  pvt_subscriber_ = nh.subscribe(config_.input_topic, kSubscriberQueueSize,
-                                 &GnssAdapter::pvtCallback, this);
+  if (config_.input_mode == "stamped_local")
+  {
+    pvt_subscriber_ = nh.subscribe(config_.input_topic, kSubscriberQueueSize,
+                                   &GnssAdapter::stampedLocalPvtCallback, this);
+  }
+  else
+  {
+    pvt_subscriber_ = nh.subscribe(config_.input_topic, kSubscriberQueueSize,
+                                   &GnssAdapter::legacyPvtCallback, this);
+  }
 
-  ROS_INFO("[GNSS_ADAPTER] input=%s odom=%s status=%s origin_mode=%s",
-           config_.input_topic.c_str(), config_.output_odom_topic.c_str(),
+  ROS_INFO("[GNSS_ADAPTER] mode=%s input=%s odom=%s status=%s origin_mode=%s",
+           config_.input_mode.c_str(), config_.input_topic.c_str(),
+           config_.output_odom_topic.c_str(),
            config_.output_status_topic.c_str(), config_.origin_mode.c_str());
   if (origin_initialized_)
   {
@@ -137,6 +150,7 @@ bool GnssAdapter::loadConfig(ros::NodeHandle &nh, GnssAdapterConfig &config) con
 {
   ros::NodeHandle params(nh, "gnss_adapter");
   params.param<bool>("enable", config.enable, config.enable);
+  params.param<std::string>("input_mode", config.input_mode, config.input_mode);
   params.param<std::string>("input_topic", config.input_topic, config.input_topic);
   params.param<std::string>("output_odom_topic", config.output_odom_topic, config.output_odom_topic);
   params.param<std::string>("output_status_topic", config.output_status_topic, config.output_status_topic);
@@ -185,6 +199,12 @@ bool GnssAdapter::loadConfig(ros::NodeHandle &nh, GnssAdapterConfig &config) con
 
 bool GnssAdapter::validateConfig(const GnssAdapterConfig &config) const
 {
+  if (config.input_mode != "legacy_gnss_comm" &&
+      config.input_mode != "stamped_local")
+  {
+    ROS_ERROR("[GNSS_ADAPTER] input_mode must be legacy_gnss_comm or stamped_local.");
+    return false;
+  }
   if (config.origin_mode != "manual" && config.origin_mode != "first_fixed" &&
       config.origin_mode != "average_fixed")
   {
@@ -238,8 +258,8 @@ void GnssAdapter::resetRuntimeState()
   was_active_once_ = false;
   consecutive_fixed_count_ = 0;
   consecutive_lost_count_ = 0;
-  have_last_gps_time_ = false;
-  last_gps_time_s_ = 0.0;
+  have_last_measurement_time_ = false;
+  last_measurement_time_ns_ = 0;
   origin_initialized_ = false;
   origin_lla_.setZero();
   origin_ecef_.setZero();
@@ -253,13 +273,24 @@ void GnssAdapter::resetRuntimeState()
   }
 }
 
-void GnssAdapter::pvtCallback(const gnss_comm::GnssPVTSolnMsgConstPtr &message)
+void GnssAdapter::legacyPvtCallback(
+    const gnss_comm::GnssPVTSolnMsgConstPtr &message)
 {
   const ros::Time callback_time = ros::Time::now();
   const GnssAdapterResult result = process(*message, callback_time);
   status_publisher_.publish(result.status);
   if (result.publish_odometry) odom_publisher_.publish(result.odometry);
   logResult(*message, callback_time, result);
+}
+
+void GnssAdapter::stampedLocalPvtCallback(
+    const gnss_serial_driver::GnssPvtStampedConstPtr &message)
+{
+  const ros::Time callback_time = ros::Time::now();
+  const GnssAdapterResult result = process(*message, callback_time);
+  status_publisher_.publish(result.status);
+  if (result.publish_odometry) odom_publisher_.publish(result.odometry);
+  logResult(message->pvt, callback_time, result);
 }
 
 bool GnssAdapter::convertGpsToUtc(uint32_t week, double tow, ros::Time &stamp) const
@@ -510,24 +541,23 @@ bool GnssAdapter::updateOrigin(GnssQuality filtered_quality,
 GnssAdapterResult GnssAdapter::process(const gnss_comm::GnssPVTSolnMsg &message,
                                        const ros::Time &callback_time)
 {
-  std::lock_guard<std::mutex> lock(mutex_);
-  GnssAdapterResult result;
-  fast_livo::GnssStatus &status = result.status;
-  status.header.frame_id = config_.frame_id;
-  status.valid_fix = message.valid_fix;
-  status.diff_soln = message.diff_soln;
-  status.fix_type = message.fix_type;
-  status.carr_soln = message.carr_soln;
-  status.num_sv = message.num_sv;
-  status.h_acc = message.h_acc;
-  status.v_acc = message.v_acc;
-  status.p_dop = message.p_dop;
-  status.vel_acc = message.vel_acc;
-
   ros::Time measurement_stamp;
   if (!convertGpsToUtc(message.time.week, message.time.tow, measurement_stamp))
   {
+    std::lock_guard<std::mutex> lock(mutex_);
+    GnssAdapterResult result;
+    fast_livo::GnssStatus &status = result.status;
     status.header.stamp = callback_time;
+    status.header.frame_id = config_.frame_id;
+    status.valid_fix = message.valid_fix;
+    status.diff_soln = message.diff_soln;
+    status.fix_type = message.fix_type;
+    status.carr_soln = message.carr_soln;
+    status.num_sv = message.num_sv;
+    status.h_acc = message.h_acc;
+    status.v_acc = message.v_acc;
+    status.p_dop = message.p_dop;
+    status.vel_acc = message.vel_acc;
     status.raw_quality = static_cast<uint8_t>(GnssQuality::INVALID);
     status.filtered_quality = static_cast<uint8_t>(GnssQuality::INVALID);
     status.origin_initialized = origin_initialized_;
@@ -540,15 +570,67 @@ GnssAdapterResult GnssAdapter::process(const gnss_comm::GnssPVTSolnMsg &message,
     result.detail = detail.str();
     return result;
   }
-  status.header.stamp = measurement_stamp;
+  return processPvt(message, measurement_stamp, true, true, callback_time);
+}
 
-  const double gps_time_s = static_cast<double>(message.time.week) * kGpsWeekSeconds +
-                            message.time.tow;
+GnssAdapterResult GnssAdapter::process(
+    const gnss_serial_driver::GnssPvtStamped &message,
+    const ros::Time &callback_time)
+{
+  return processPvt(message.pvt, message.header.stamp,
+                    message.local_measurement_time_valid,
+                    message.valid_for_fusion, callback_time);
+}
+
+GnssAdapterResult GnssAdapter::processPvt(
+    const gnss_comm::GnssPVTSolnMsg &message,
+    const ros::Time &measurement_stamp,
+    bool local_measurement_time_valid,
+    bool valid_for_fusion,
+    const ros::Time &callback_time)
+{
+  (void)callback_time;
+  std::lock_guard<std::mutex> lock(mutex_);
+  GnssAdapterResult result;
+  fast_livo::GnssStatus &status = result.status;
+  status.header.stamp = measurement_stamp;
+  status.header.frame_id = config_.frame_id;
+  status.valid_fix = message.valid_fix;
+  status.diff_soln = message.diff_soln;
+  status.fix_type = message.fix_type;
+  status.carr_soln = message.carr_soln;
+  status.num_sv = message.num_sv;
+  status.h_acc = message.h_acc;
+  status.v_acc = message.v_acc;
+  status.p_dop = message.p_dop;
+  status.vel_acc = message.vel_acc;
+
+  const auto reject_without_state_change = [&](const std::string &reason) {
+    status.raw_quality = static_cast<uint8_t>(GnssQuality::INVALID);
+    status.filtered_quality = static_cast<uint8_t>(GnssQuality::INVALID);
+    status.origin_initialized = origin_initialized_;
+    status.accepted = false;
+    status.consecutive_fixed_count = consecutive_fixed_count_;
+    status.consecutive_lost_count = consecutive_lost_count_;
+    status.reject_reason = reason;
+    return result;
+  };
+  if (!config_.enable) return reject_without_state_change("ADAPTER_DISABLED");
+  if (measurement_stamp.isZero())
+    return reject_without_state_change("ZERO_MEASUREMENT_TIMESTAMP");
+  if (!local_measurement_time_valid)
+    return reject_without_state_change("LOCAL_MEASUREMENT_TIME_INVALID");
+  if (!valid_for_fusion)
+    return reject_without_state_change("INVALID_FOR_FUSION");
+
+  const std::int64_t measurement_time_ns =
+      static_cast<std::int64_t>(measurement_stamp.toNSec());
   bool time_gap = false;
-  if (have_last_gps_time_)
+  if (have_last_measurement_time_)
   {
-    const double delta_s = gps_time_s - last_gps_time_s_;
-    if (std::fabs(delta_s) <= kTimestampEqualityToleranceS)
+    const std::int64_t delta_ns = measurement_time_ns - last_measurement_time_ns_;
+    const double delta_s = static_cast<double>(delta_ns) * 1e-9;
+    if (std::abs(delta_ns) <= kTimestampEqualityToleranceNs)
     {
       status.raw_quality = static_cast<uint8_t>(GnssQuality::INVALID);
       status.filtered_quality = static_cast<uint8_t>(GnssQuality::INVALID);
@@ -558,8 +640,8 @@ GnssAdapterResult GnssAdapter::process(const gnss_comm::GnssPVTSolnMsg &message,
       status.consecutive_lost_count = consecutive_lost_count_;
       status.reject_reason = "DUPLICATE_GNSS_TIME";
       std::ostringstream detail;
-      detail << std::setprecision(16) << "current_gpst=" << gps_time_s
-             << " previous_gpst=" << last_gps_time_s_;
+      detail << "current_stamp_ns=" << measurement_time_ns
+             << " previous_stamp_ns=" << last_measurement_time_ns_;
       result.detail = detail.str();
       return result;
     }
@@ -573,8 +655,8 @@ GnssAdapterResult GnssAdapter::process(const gnss_comm::GnssPVTSolnMsg &message,
       status.consecutive_lost_count = consecutive_lost_count_;
       status.reject_reason = "NON_MONOTONIC_TIME";
       std::ostringstream detail;
-      detail << std::setprecision(16) << "current_gpst=" << gps_time_s
-             << " previous_gpst=" << last_gps_time_s_;
+      detail << "current_stamp_ns=" << measurement_time_ns
+             << " previous_stamp_ns=" << last_measurement_time_ns_;
       result.detail = detail.str();
       return result;
     }
@@ -586,14 +668,14 @@ GnssAdapterResult GnssAdapter::process(const gnss_comm::GnssPVTSolnMsg &message,
       origin_ecef_samples_.clear();
       time_gap = true;
       std::ostringstream detail;
-      detail << std::setprecision(16) << "current_gpst=" << gps_time_s
-             << " previous_gpst=" << last_gps_time_s_
+      detail << "current_stamp_ns=" << measurement_time_ns
+             << " previous_stamp_ns=" << last_measurement_time_ns_
              << " gap_s=" << delta_s;
       result.detail = detail.str();
     }
   }
-  have_last_gps_time_ = true;
-  last_gps_time_s_ = gps_time_s;
+  have_last_measurement_time_ = true;
+  last_measurement_time_ns_ = measurement_time_ns;
 
   std::string reject_reason;
   const GnssQuality raw_quality = classify(message, reject_reason);
@@ -603,8 +685,9 @@ GnssAdapterResult GnssAdapter::process(const gnss_comm::GnssPVTSolnMsg &message,
     gates_passed = passesQualityGates(message, reject_reason, result.warning);
   }
 
-  const bool fixed_candidate = raw_quality == GnssQuality::RTK_FIXED && gates_passed;
-  const GnssQuality fixed_state_quality = updateFixedState(fixed_candidate);
+  const bool fixed_solution = raw_quality == GnssQuality::RTK_FIXED;
+  const bool fixed_measurement_usable = fixed_solution && gates_passed;
+  const GnssQuality fixed_state_quality = updateFixedState(fixed_solution);
   GnssQuality filtered_quality = GnssQuality::INVALID;
   if (raw_quality == GnssQuality::RTK_FIXED)
   {
@@ -638,18 +721,19 @@ GnssAdapterResult GnssAdapter::process(const gnss_comm::GnssPVTSolnMsg &message,
     }
   }
 
-  if (!origin_initialized_ && config_.origin_mode == "average_fixed" && !fixed_candidate)
+  if (!origin_initialized_ && config_.origin_mode == "average_fixed" &&
+      !fixed_measurement_usable)
   {
     origin_ecef_samples_.clear();
   }
-  result.origin_initialized_now = fixed_candidate &&
+  result.origin_initialized_now = fixed_measurement_usable &&
                                   updateOrigin(fixed_state_quality, lla, current_ecef);
   status.origin_initialized = origin_initialized_;
 
   bool current_quality_enabled = false;
   if (raw_quality == GnssQuality::RTK_FIXED)
   {
-    current_quality_enabled = fixed_candidate &&
+    current_quality_enabled = fixed_measurement_usable &&
                               fixed_state_quality == GnssQuality::RTK_FIXED &&
                               config_.accept_rtk_fixed;
   }

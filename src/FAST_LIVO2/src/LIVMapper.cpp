@@ -11,6 +11,7 @@ which is included as part of this source code package.
 */
 
 #include "LIVMapper.h"
+#include "gnss_fusion_policy.h"
 #include "run_log_directory.h"
 #include <algorithm>
 #include <arpa/inet.h>
@@ -21,6 +22,7 @@ which is included as part of this source code package.
 #include <limits>
 #include <netinet/in.h>
 #include <sstream>
+#include <stdexcept>
 #include <sys/socket.h>
 #include <system_error>
 #include <unistd.h>
@@ -81,6 +83,16 @@ LIVMapper::LIVMapper(ros::NodeHandle &nh)
   p_imu.reset(new ImuProcess());
 
   readParameters(nh);
+  GnssFusionPolicy fusion_policy;
+  if (!loadGnssFusionPolicy(nh, fusion_policy))
+    throw std::runtime_error("missing GNSS fusion unified enable parameter");
+  gnss_fusion_fixed_lag_mode_ = fusion_policy.managed && fusion_policy.enabled;
+  if (gnss_fusion_fixed_lag_mode_)
+  {
+    ROS_WARN("[GNSS_FUSION] RTK fixed-lag mode active: legacy GPS input and "
+             "front-end GPS/UWB absolute state updates are suppressed; "
+             "/backend/livo_odom_raw remains pure LIVO.");
+  }
   VoxelMapConfig voxel_config;
   loadVoxelConfig(nh, voxel_config);
 

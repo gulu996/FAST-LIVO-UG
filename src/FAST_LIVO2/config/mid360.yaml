@@ -254,92 +254,8 @@ uav:
   imu_rate_odom: false
   gravity_align_en: true
 
-gps:
-  enable: false # GNSS总开关；true才启动GNSS串口读取。
-  update_en: false # GNSS位置融合开关；实机确认串口、时间、坐标对齐和杆臂后再打开。
-
-  source: "serial" # 当前实现走serial。
-  serial_port: "/dev/ttyUSB0" # GNSS串口设备名，按目标电脑实际枚举修改。
-  baudrate: 921600 # GNSS输出波特率，必须和设备配置一致。
-  dtr: true # 部分USB串口需要拉高DTR才输出数据。
-  rts: false # 部分USB串口硬件流控相关；无要求时保持false。
-
-  parser_mode: "auto" # 自动解析KSXT、NMEA、AGRICA；legacy_imugnss_json仅兼容旧设备。
-  primary_position_message: "KSXT" # KSXT有效时作为唯一主位置源。
-  fallback_position_message: "GGA" # KSXT无可用位置时才允许GGA后备。
-  time_offset_s: 0.0 # GNSS时间戳加到FAST-LIVO时间轴的偏移；GNSS滞后时通常需要调。
-  # TODO(confirm): 实测GNSS输出频率后，再调match_threshold_s和stale_timeout_s。
-  match_threshold_s: 0.10 # GNSS量测与LiDAR帧允许的最大时间差。
-  stale_timeout_s: 0.50 # 超过该时间无新GNSS数据就认为数据过期。
-
-  startup_convergence_s: 30.0 # 启动后等待GNSS收敛的最短时间。
-  fixed_confirm_count: 10 # 连续固定解次数达到后才进入可用状态。
-  reacquire_confirm_count: 5 # 失锁后重新确认固定解的连续次数。
-
-  ksxt: # KSXT position_quality：0 invalid, 1 single, 2 RTK float, 4 RTK fixed。
-    invalid_quality_values: [0]
-    single_quality_values: [1]
-    float_quality_values: [2]
-    fixed_quality_values: [4]
-
-  gga: # GGA quality：0 invalid, 1 single, 2 differential, 4 fixed, 5 float。
-    invalid_quality_values: [0]
-    single_quality_values: [1]
-    differential_quality_values: [2]
-    fixed_quality_values: [4]
-    float_quality_values: [5]
-
-  agrica: # AGRICA position_type：0 invalid, 1 single, 2 differential, 4 fixed, 5 float, 7 manual fixed。
-    invalid_position_types: [0]
-    single_position_types: [1]
-    differential_position_types: [2]
-    fixed_position_types: [4]
-    float_position_types: [5]
-    manual_fixed_position_types: [7]
-    crc_check_en: false # 当前只记录AGRICA；CRC算法确认前不把它当NMEA两位XOR。
-
-  fixed_only: true # true=只接受固定解；测试浮点解时才改false。
-
-  origin_mode: "first_fixed" # first_fixed=第一帧固定解作ENU原点；manual=使用下面手填原点。
-  origin_latitude_deg: 0.0 # manual模式下的原点纬度。
-  origin_longitude_deg: 0.0 # manual模式下的原点经度。
-  origin_altitude_m: 0.0 # manual模式下的原点高程。
-
-  altitude_type: "ellipsoid" # ellipsoid=椭球高；orthometric=正常高，会加geoid_separation_m转椭球高。
-  geoid_separation_m: 0.0 # 正常高到椭球高的改正量，仅altitude_type=orthometric时使用。
-
-  frame_align_en: true # 自动估计GNSS ENU到FAST-LIVO世界系的2D yaw和平移。
-  frame_align_mode: "trajectory_2d" # trajectory_2d=用运动轨迹自动对齐；manual=使用下面yaw/translation。
-  frame_align_min_samples: 20 # 自动对齐至少需要的GNSS样本数。
-  frame_align_min_motion_m: 10.0 # 自动对齐前轨迹至少要移动的距离。
-  frame_align_max_rms_m: 0.50 # 自动对齐成功的RMS残差上限。
-  frame_align_max_error_m: 1.50 # 自动对齐成功的最大单点误差上限。
-  frame_align_freeze_after_success: true # 成功对齐后冻结外参，避免运行中漂移。
-
-  frame_align_yaw_deg: 0.0 # manual模式下ENU到FAST-LIVO世界系的yaw角。
-  frame_align_translation: [0.0, 0.0, 0.0] # manual模式下ENU到FAST-LIVO世界系的平移。
-
-  update_xy_only: true # 默认只用GNSS约束水平位置。
-  update_z: false # true会融合高度；高度源可靠且高程类型确认后再打开。
-  update_orientation: false # 当前主流程不使用GNSS姿态更新，保持false。
-
-  sigma_xy_fixed_m: 0.10 # 固定解水平标准差；越小越相信GNSS。
-  sigma_z_fixed_m: 0.30 # 固定解高程标准差；仅update_z=true时明显影响。
-  position_cov_floor_m: 0.20 # GNSS位置协方差下限，防止权重过大。
-
-  chi2_gate_2d: 9.21 # 2D卡方门限；9.21约等于99%置信门。
-  max_residual_m: 3.0 # GNSS残差硬门限，超过直接拒绝。
-  max_update_step_m: 0.20 # 单次GNSS融合允许的最大位置修正。
-
-  lever_arm_body_to_gnss: [0.0, 0.0, 0.0] # GNSS天线相位中心相对FAST-LIVO body原点的杆臂，单位米。
-
-  pause_map_update_frames: 3 # GNSS大修正后暂停插入局部地图的帧数，减少错误地图写入。
-  pause_map_update_min_correction_m: 0.05 # 修正量超过该值才触发暂停建图。
-
-  raw_log_filename: "gnss_raw.txt" # 原始串口行日志，写到pcd_save/save_path。
-  parsed_log_filename: "gnss_parsed.txt" # 解析后的GNSS量测日志。
-  update_log_filename: "gnss_updates.txt" # 融合/拒绝结果日志。
-  log_flush_stride: 1 # 每多少条日志flush一次；调大可减少IO但断电时更易丢尾部日志。
+gnss_fusion:
+  enable: true # MID360自采数据的GNSS固定时滞后端总开关
 
 publish:
   dense_map_en: true
@@ -368,7 +284,7 @@ pos_output:
   format: "timestamp_xyz_quat"
 
 pcd_save:
-  pcd_save_en: false
+  pcd_save_en: true
   save_log_en: true # 日志写盘
   save_path: "/home/gulu/data"
   global_map_pub: true   #need to set pcd_save_en true, x86上请设为false

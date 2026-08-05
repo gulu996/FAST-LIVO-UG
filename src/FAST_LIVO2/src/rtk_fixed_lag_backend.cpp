@@ -1,4 +1,5 @@
 #include "rtk_fixed_lag_backend.h"
+#include "gnss_fusion_policy.h"
 
 #include <geometry_msgs/PoseStamped.h>
 #include <gtsam/inference/Symbol.h>
@@ -95,8 +96,13 @@ gtsam::Vector GnssPositionArmFactor::evaluateError(
 
 RtkFixedLagBackend::RtkFixedLagBackend(ros::NodeHandle &nh) {
   loadParameters(nh);
+  GnssFusionPolicy fusion_policy;
+  if (!loadGnssFusionPolicy(nh, fusion_policy)) {
+    throw std::invalid_argument("missing GNSS fusion unified enable parameter");
+  }
+  config_.enable = fusion_policy.componentEnabled(config_.enable);
   if (!config_.enable) {
-    ROS_INFO("[RTK_BACKEND] Disabled by rtk_backend/enable=false.");
+    ROS_INFO("[RTK_BACKEND] Disabled by effective GNSS fusion configuration.");
     return;
   }
   validateParameters();
@@ -105,6 +111,10 @@ RtkFixedLagBackend::RtkFixedLagBackend(ros::NodeHandle &nh) {
   bool uwb_update_enabled = false;
   nh.param("gps/update_en", legacy_gnss_update_enabled, false);
   nh.param("uwb/update_en", uwb_update_enabled, false);
+  legacy_gnss_update_enabled =
+      fusion_policy.absoluteUpdateEnabled(legacy_gnss_update_enabled);
+  uwb_update_enabled =
+      fusion_policy.absoluteUpdateEnabled(uwb_update_enabled);
   if (legacy_gnss_update_enabled || uwb_update_enabled) {
     throw std::invalid_argument(
         "rtk_fixed_lag_backend requires gps/update_en=false and "
@@ -721,11 +731,11 @@ void RtkFixedLagBackend::gnssStatusCallback(
   std::lock_guard<std::mutex> lock(state_mutex_);
   newest_sensor_stamp_ = std::max(newest_sensor_stamp_, message->header.stamp);
   ++gnss_received_;
-  const bool fixed = message->accepted &&
-                     message->filtered_quality ==
-                         fast_livo::GnssStatus::RTK_FIXED;
-  if (!fixed) {
-    if (!alignment_.valid) {
+  const bool filtered_fixed =
+      message->filtered_quality == fast_livo::GnssStatus::RTK_FIXED;
+  const bool usable_fixed = message->accepted && filtered_fixed;
+  if (!usable_fixed) {
+    if (!alignment_.valid && !filtered_fixed) {
       resetAlignmentCollection(message->reject_reason.empty()
                                    ? "NOT_RTK_FIXED"
                                    : message->reject_reason);

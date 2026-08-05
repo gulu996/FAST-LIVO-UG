@@ -208,6 +208,7 @@ add_executable(gnss_manager_self_test src/gnss_manager_self_test.cpp)
 add_executable(uwb_manager_self_test src/uwb_manager_self_test.cpp)
 add_executable(gnss_adapter_node src/gnss_adapter_node.cpp)
 add_executable(gnss_adapter_self_test src/gnss_adapter_self_test.cpp)
+add_executable(gnss_fusion_policy_self_test src/gnss_fusion_policy_self_test.cpp)
 add_executable(gnss_fault_injector_node src/gnss_fault_injector_node.cpp)
 add_executable(gnss_fault_injector_self_test src/gnss_fault_injector_self_test.cpp)
 add_executable(rtk_fixed_lag_backend_node src/rtk_fixed_lag_backend_node.cpp)
@@ -222,6 +223,7 @@ add_dependencies(uwb_manager_self_test ${catkin_EXPORTED_TARGETS})
 add_dependencies(gnss_adapter ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 add_dependencies(gnss_adapter_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 add_dependencies(gnss_adapter_self_test ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+add_dependencies(gnss_fusion_policy_self_test ${catkin_EXPORTED_TARGETS})
 add_dependencies(gnss_fault_injector ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 add_dependencies(gnss_fault_injector_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 add_dependencies(gnss_fault_injector_self_test ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
@@ -273,6 +275,10 @@ target_link_libraries(gnss_adapter_node
 
 target_link_libraries(gnss_adapter_self_test
   gnss_adapter
+  ${catkin_LIBRARIES}
+)
+
+target_link_libraries(gnss_fusion_policy_self_test
   ${catkin_LIBRARIES}
 )
 

@@ -57,6 +57,111 @@ gnss_comm::GnssPVTSolnMsg fixedMessage(double tow = 186157.8)
   return message;
 }
 
+gnss_serial_driver::GnssPvtStamped stampedFixed(std::uint64_t stamp_ns)
+{
+  gnss_serial_driver::GnssPvtStamped message;
+  message.header.stamp.fromNSec(stamp_ns);
+  message.local_measurement_time_valid = true;
+  message.valid_for_fusion = true;
+  message.pvt = fixedMessage();
+  message.pvt.time.week = 0;
+  message.pvt.time.tow = 0.0;
+  return message;
+}
+
+void testStampedLocalTimeAndMetadataGates()
+{
+  GnssAdapter adapter(manualConfig());
+  const ros::Time callback_time(999, 123);
+  const std::uint64_t first_stamp_ns = 100123456789ULL;
+  const std::uint64_t second_stamp_ns = first_stamp_ns + 100000000ULL;
+
+  const GnssAdapterResult first =
+      adapter.process(stampedFixed(first_stamp_ns), callback_time);
+  check(first.status.header.stamp.toNSec() == first_stamp_ns,
+        "stamped-local status must preserve wrapper header stamp exactly");
+  check(first.status.reject_reason == "RTK_NOT_CONFIRMED",
+        "stamped-local fixed confirmation must use the shared state machine");
+
+  const GnssAdapterResult second =
+      adapter.process(stampedFixed(second_stamp_ns), callback_time);
+  check(second.status.accepted && second.publish_odometry,
+        "stamped-local confirmed fixed sample must publish");
+  check(second.status.header.stamp.toNSec() == second_stamp_ns &&
+        second.odometry.header.stamp.toNSec() == second_stamp_ns,
+        "stamped-local odometry and status stamps must match at nanosecond precision");
+  check(second.status.header.stamp != callback_time,
+        "callback time must not replace stamped-local measurement time");
+
+  GnssAdapter zero_adapter(manualConfig());
+  auto zero = stampedFixed(0);
+  check(zero_adapter.process(zero, callback_time).status.reject_reason ==
+            "ZERO_MEASUREMENT_TIMESTAMP",
+        "zero stamped-local header must be rejected");
+
+  GnssAdapter local_time_adapter(manualConfig());
+  auto invalid_local_time = stampedFixed(first_stamp_ns);
+  invalid_local_time.local_measurement_time_valid = false;
+  check(local_time_adapter.process(invalid_local_time, callback_time)
+            .status.reject_reason == "LOCAL_MEASUREMENT_TIME_INVALID",
+        "invalid local measurement time flag must be rejected");
+
+  GnssAdapter fusion_flag_adapter(manualConfig());
+  auto invalid_for_fusion = stampedFixed(first_stamp_ns);
+  invalid_for_fusion.valid_for_fusion = false;
+  check(fusion_flag_adapter.process(invalid_for_fusion, callback_time)
+            .status.reject_reason == "INVALID_FOR_FUSION",
+        "invalid-for-fusion wrapper must be rejected");
+}
+
+void testStampedLocalLossAndRecovery()
+{
+  GnssAdapter adapter(manualConfig());
+  std::uint64_t stamp_ns = 200000000000ULL;
+  adapter.process(stampedFixed(stamp_ns), ros::Time(999));
+  stamp_ns += 100000000ULL;
+  check(adapter.process(stampedFixed(stamp_ns), ros::Time(999)).status.accepted,
+        "stamped-local fixed confirmation count must activate");
+
+  auto lost = stampedFixed(stamp_ns + 100000000ULL);
+  lost.pvt.valid_fix = false;
+  adapter.process(lost, ros::Time(999));
+  lost.header.stamp.fromNSec(stamp_ns + 200000000ULL);
+  check(adapter.process(lost, ros::Time(999)).status.filtered_quality ==
+            fast_livo::GnssStatus::INVALID,
+        "stamped-local fixed loss count must enter LOST");
+
+  stamp_ns += 300000000ULL;
+  check(adapter.process(stampedFixed(stamp_ns), ros::Time(999))
+            .status.filtered_quality == fast_livo::GnssStatus::RECOVERING,
+        "stamped-local first fixed after loss must recover, not publish");
+  stamp_ns += 100000000ULL;
+  adapter.process(stampedFixed(stamp_ns), ros::Time(999));
+  stamp_ns += 100000000ULL;
+  check(adapter.process(stampedFixed(stamp_ns), ros::Time(999)).status.accepted,
+        "stamped-local recovery confirmation count must reactivate");
+}
+
+void testFixedStateIgnoresUnavailableAccuracyRecord()
+{
+  GnssAdapter adapter(manualConfig());
+  std::uint64_t stamp_ns = 300000000000ULL;
+  adapter.process(stampedFixed(stamp_ns), ros::Time(999));
+
+  auto unavailable_accuracy = stampedFixed(stamp_ns + 100000000ULL);
+  unavailable_accuracy.pvt.h_acc = 999.0;
+  const GnssAdapterResult filtered =
+      adapter.process(unavailable_accuracy, ros::Time(999));
+  check(filtered.status.filtered_quality == fast_livo::GnssStatus::RTK_FIXED &&
+        !filtered.status.accepted &&
+        filtered.status.reject_reason == "H_ACC_TOO_LARGE",
+        "a fixed carrier solution with unavailable accuracy must be filtered, not count as fixed loss");
+
+  stamp_ns += 200000000ULL;
+  check(adapter.process(stampedFixed(stamp_ns), ros::Time(999)).status.accepted,
+        "the next usable fixed record must retain the confirmed carrier state");
+}
+
 void testTimeStateEnuAndCovariance()
 {
   GnssAdapter adapter(manualConfig());
@@ -213,6 +318,9 @@ int main()
 {
   try
   {
+    testStampedLocalTimeAndMetadataGates();
+    testStampedLocalLossAndRecovery();
+    testFixedStateIgnoresUnavailableAccuracyRecord();
     testTimeStateEnuAndCovariance();
     testInvalidInputs();
     testTimeOrderingAndMissingOrigin();

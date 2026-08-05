@@ -1,4 +1,5 @@
 #include "rtk_fixed_lag_backend.h"
+#include "gnss_fusion_policy.h"
 #include "run_log_directory.h"
 
 #include <exception>
@@ -11,6 +12,9 @@ bool configureRunLogDirectory(ros::NodeHandle &node) {
   bool save_text_log = true;
   std::string output_directory;
   params.param("enable", enabled, enabled);
+  GnssFusionPolicy fusion_policy;
+  if (!loadGnssFusionPolicy(node, fusion_policy)) return false;
+  enabled = fusion_policy.componentEnabled(enabled);
   params.param("save_results", save_results, save_results);
   params.param("save_text_log", save_text_log, save_text_log);
   params.param("output_directory", output_directory, output_directory);
@@ -48,7 +52,10 @@ int main(int argc, char **argv) {
   if (!configureRunLogDirectory(node)) return 1;
   try {
     fast_livo_backend::RtkFixedLagBackend backend(node);
-    if (!backend.enabled()) return 0;
+    if (!backend.enabled()) {
+      ros::spin();
+      return 0;
+    }
     ros::spin();
   } catch (const std::exception &error) {
     ROS_FATAL_STREAM("[RTK_BACKEND] startup failed: " << error.what());

@@ -3,6 +3,7 @@ This file is part of FAST-LIVO2: Fast, Direct LiDAR-Inertial-Visual Odometry.
 */
 
 #include "gnss_manager.h"
+#include "gnss_fusion_policy.h"
 
 #include <Eigen/Dense>
 #include <algorithm>
@@ -1134,6 +1135,14 @@ bool GnssManager::loadParameters(ros::NodeHandle &nh)
   {
     ROS_WARN("[GNSS] gps/update_en=%d overrides legacy gps/use_gps_position=%d.",
              static_cast<int>(update_en_primary), static_cast<int>(use_gps_position_legacy));
+  }
+
+  GnssFusionPolicy fusion_policy;
+  if (!loadGnssFusionPolicy(nh, fusion_policy)) return false;
+  if (fusion_policy.managed && fusion_policy.enabled)
+  {
+    en_ = false;
+    update_en_ = false;
   }
 
   nh.param<std::string>("gps/input_mode", input_mode_, "legacy_internal");

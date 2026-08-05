@@ -8,6 +8,7 @@
 #include <iostream>
 #include <set>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace fast_livo_backend {
@@ -161,6 +162,40 @@ struct RtkFixedLagBackendSelfTestAccess {
     result.conservation_delta = backend.gnssConservationDelta();
     return result;
   }
+
+  static std::pair<bool, bool> runFilteredFixedAlignmentResetCheck() {
+    RtkFixedLagBackend backend;
+    backend.config_.enable = false;
+    backend.config_.save_results = false;
+    backend.config_.save_text_log = false;
+    backend.alignment_pairs_.push_back(
+        AlignmentPair{gtsam::Point3(), gtsam::Point3(), 1000000000LL});
+    gtsam::Vector3 sigmas;
+    sigmas.setConstant(0.1);
+    backend.pending_alignment_gnss_.push_back(
+        RtkFixedLagBackend::GnssMeasurement{
+            ros::Time(1, 0), gtsam::Point3(), sigmas});
+
+    fast_livo::GnssStatusPtr filtered_fixed(new fast_livo::GnssStatus());
+    filtered_fixed->header.stamp = ros::Time(1, 100000000);
+    filtered_fixed->filtered_quality = fast_livo::GnssStatus::RTK_FIXED;
+    filtered_fixed->accepted = false;
+    filtered_fixed->reject_reason = "H_ACC_TOO_LARGE";
+    backend.gnssStatusCallback(filtered_fixed);
+    const bool quality_gate_preserved =
+        backend.alignment_pairs_.size() == 1 &&
+        backend.pending_alignment_gnss_.size() == 1;
+
+    fast_livo::GnssStatusPtr fixed_lost(new fast_livo::GnssStatus());
+    fixed_lost->header.stamp = ros::Time(1, 200000000);
+    fixed_lost->filtered_quality = fast_livo::GnssStatus::INVALID;
+    fixed_lost->accepted = false;
+    fixed_lost->reject_reason = "INVALID_FIX";
+    backend.gnssStatusCallback(fixed_lost);
+    const bool true_loss_reset = backend.alignment_pairs_.empty() &&
+                                 backend.pending_alignment_gnss_.empty();
+    return {quality_gate_preserved, true_loss_reset};
+  }
 };
 
 }  // namespace fast_livo_backend
@@ -309,6 +344,15 @@ void testAlignmentBoundaryTransition() {
           "duplicate_factor_count must be zero");
 }
 
+void testFilteredFixedDoesNotResetAlignment() {
+  const auto result = fast_livo_backend::RtkFixedLagBackendSelfTestAccess::
+      runFilteredFixedAlignmentResetCheck();
+  require(result.first,
+          "a filtered RTK_FIXED record must not reset collected alignment");
+  require(result.second,
+          "a confirmed RTK fixed loss must reset collected alignment");
+}
+
 void testTrueFixedLagMarginalization() {
   gtsam::IncrementalFixedLagSmoother smoother(2.0);
   gtsam::Vector6 sigmas;
@@ -351,6 +395,7 @@ int main() {
     testLeverArmFactor();
     testRawPoseInterpolation();
     testAlignmentBoundaryTransition();
+    testFilteredFixedDoesNotResetAlignment();
     testTrueFixedLagMarginalization();
   } catch (const std::exception &error) {
     std::cerr << "rtk_fixed_lag_backend_self_test: FAIL: " << error.what()

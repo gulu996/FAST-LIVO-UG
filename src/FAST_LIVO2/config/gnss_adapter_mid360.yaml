@@ -1,10 +1,9 @@
 gnss_adapter:
   enable: true
-  input_mode: "legacy_gnss_comm"
-  input_topic: "/ublox_driver/receiver_pvt"
-
-  output_odom_topic: "/gnss/enu_odom"
-  output_status_topic: "/gnss/status"
+  input_mode: "stamped_local"
+  input_topic: "/gnss/pvt_local"
+  output_odom_topic: "/gnss_fusion/enu_odom"
+  output_status_topic: "/gnss_fusion/status"
 
   # manual: configured LLA; first_fixed: first state-machine-confirmed RTK Fixed;
   # average_fixed: ECEF average of confirmed, consecutive RTK Fixed samples.
@@ -14,13 +13,13 @@ gnss_adapter:
 
   min_num_sv: 10
   max_num_sv: 100
-  max_pdop: 3.0
+  # The recorded driver's binary PVT samples use 999 for unavailable PDOP and
+  # velocity accuracy. Strict h_acc/v_acc gates below still reject the
+  # alternating NMEA-derived samples whose position accuracy is unavailable.
+  max_pdop: 1000.0
   max_h_acc_m: 0.30
   max_v_acc_m: 0.50
-  max_vel_acc_mps: 1.0
-
-  # Non-positive receiver fields are rejected by default. Set false to ignore only
-  # that gate; NaN/Inf remain invalid and an explicit throttled warning is emitted.
+  max_vel_acc_mps: 1000.0
   reject_nonpositive_pdop: true
   reject_nonpositive_vel_acc: true
 
@@ -34,7 +33,6 @@ gnss_adapter:
   fixed_confirm_count: 5
   fixed_lost_count: 3
   recovery_confirm_count: 10
-
   max_time_gap_s: 0.5
   require_monotonic_time: true
 
@@ -46,6 +44,4 @@ gnss_adapter:
   frame_id: "map"
   child_frame_id: "gnss_antenna"
   log_interval_s: 1.0
-
-  # Reserved for a later factor-graph antenna lever-arm model; unused here.
   antenna_lever_arm_body: [0.0, 0.0, 0.0]

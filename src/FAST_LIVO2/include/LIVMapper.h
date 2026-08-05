@@ -266,6 +266,7 @@ public:
   VIOManagerPtr vio_manager;
   UwbManagerPtr uwb_manager;
   GnssManagerPtr gnss_manager;
+  bool gnss_fusion_fixed_lag_mode_ = false;
 
   ros::Publisher plane_pub;
   ros::Publisher voxel_pub;
