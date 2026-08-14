@@ -158,6 +158,8 @@ bool GnssAdapter::loadConfig(ros::NodeHandle &nh, GnssAdapterConfig &config) con
   params.param<std::string>("origin_mode", config.origin_mode, config.origin_mode);
   if (!loadVector3(params, "origin_lla", config.origin_lla)) return false;
   params.param<int>("origin_average_count", config.origin_average_count, config.origin_average_count);
+  params.param<double>("origin_average_max_gap_s", config.origin_average_max_gap_s,
+                       config.origin_average_max_gap_s);
 
   params.param<int>("min_num_sv", config.min_num_sv, config.min_num_sv);
   params.param<int>("max_num_sv", config.max_num_sv, config.max_num_sv);
@@ -193,7 +195,6 @@ bool GnssAdapter::loadConfig(ros::NodeHandle &nh, GnssAdapterConfig &config) con
   params.param<std::string>("frame_id", config.frame_id, config.frame_id);
   params.param<std::string>("child_frame_id", config.child_frame_id, config.child_frame_id);
   params.param<double>("log_interval_s", config.log_interval_s, config.log_interval_s);
-  if (!loadVector3(params, "antenna_lever_arm_body", config.antenna_lever_arm_body)) return false;
   return true;
 }
 
@@ -237,16 +238,17 @@ bool GnssAdapter::validateConfig(const GnssAdapterConfig &config) const
         config.min_sigma_vel_mps > 0.0 &&
         config.max_sigma_xy_m >= config.min_sigma_xy_m &&
         config.max_sigma_z_m >= config.min_sigma_z_m &&
+        config.origin_average_max_gap_s > 0.0 &&
         config.max_time_gap_s > 0.0 && config.log_interval_s > 0.0))
   {
-    ROS_ERROR("[GNSS_ADAPTER] Accuracy, sigma, time-gap, and log parameters must be positive and ordered.");
+    ROS_ERROR("[GNSS_ADAPTER] Accuracy, sigma, origin-average gap, time-gap, and log parameters must be positive and ordered.");
     return false;
   }
   if (config.input_topic.empty() || config.output_odom_topic.empty() ||
       config.output_status_topic.empty() || config.frame_id.empty() ||
-      config.child_frame_id.empty() || !finiteVector(config.antenna_lever_arm_body))
+      config.child_frame_id.empty())
   {
-    ROS_ERROR("[GNSS_ADAPTER] Topics, frame IDs, and reserved antenna lever arm must be valid.");
+    ROS_ERROR("[GNSS_ADAPTER] Topics and frame IDs must be non-empty.");
     return false;
   }
   return true;
@@ -260,10 +262,13 @@ void GnssAdapter::resetRuntimeState()
   consecutive_lost_count_ = 0;
   have_last_measurement_time_ = false;
   last_measurement_time_ns_ = 0;
+  have_source_identity_ = false;
+  last_session_id_ = 0;
+  last_writer_epoch_ = 0;
   origin_initialized_ = false;
   origin_lla_.setZero();
   origin_ecef_.setZero();
-  origin_ecef_samples_.clear();
+  clearOriginAverageState();
 
   if (config_.origin_mode == "manual" && finiteVector(config_.origin_lla))
   {
@@ -511,9 +516,47 @@ bool GnssAdapter::qualityAccepted(GnssQuality quality) const
   return false;
 }
 
+bool GnssAdapter::averageOriginPending() const
+{
+  return !origin_initialized_ && config_.origin_mode == "average_fixed";
+}
+
+void GnssAdapter::markOriginAverageSkip(const std::string &reason,
+                                        GnssAdapterResult &result) const
+{
+  if (!averageOriginPending() || result.origin_average_accepted) return;
+  result.origin_average_skipped = true;
+  result.origin_average_count =
+      static_cast<uint32_t>(origin_ecef_samples_.size());
+  result.origin_average_skip_reason = reason.empty() ? "NOT_ORIGIN_CANDIDATE" : reason;
+}
+
+void GnssAdapter::clearOriginAverageState()
+{
+  origin_ecef_samples_.clear();
+  have_last_origin_candidate_time_ = false;
+  last_origin_candidate_time_ns_ = 0;
+}
+
+void GnssAdapter::resetOriginAverage(const std::string &reason,
+                                     double gap_s,
+                                     GnssAdapterResult &result)
+{
+  if (!averageOriginPending()) return;
+  result.origin_average_reset = true;
+  result.origin_average_old_count =
+      static_cast<uint32_t>(origin_ecef_samples_.size());
+  result.origin_average_reset_reason = reason;
+  result.origin_average_gap_s = gap_s;
+  clearOriginAverageState();
+  result.origin_average_count = 0;
+}
+
 bool GnssAdapter::updateOrigin(GnssQuality filtered_quality,
                                const Eigen::Vector3d &lla,
-                               const Eigen::Vector3d &ecef)
+                               const Eigen::Vector3d &ecef,
+                               std::int64_t measurement_time_ns,
+                               GnssAdapterResult &result)
 {
   if (origin_initialized_ || filtered_quality != GnssQuality::RTK_FIXED) return false;
 
@@ -526,15 +569,42 @@ bool GnssAdapter::updateOrigin(GnssQuality filtered_quality,
   }
   if (config_.origin_mode != "average_fixed") return false;
 
+  if (have_last_origin_candidate_time_)
+  {
+    const std::int64_t delta_ns =
+        measurement_time_ns - last_origin_candidate_time_ns_;
+    if (std::abs(delta_ns) <= kTimestampEqualityToleranceNs)
+    {
+      markOriginAverageSkip("DUPLICATE_ORIGIN_CANDIDATE", result);
+      return false;
+    }
+
+    const double delta_s = static_cast<double>(delta_ns) * 1e-9;
+    if (delta_s < 0.0)
+    {
+      resetOriginAverage("TIME_REGRESSION", delta_s, result);
+    }
+    else if (delta_s > config_.origin_average_max_gap_s)
+    {
+      resetOriginAverage("VALID_FIXED_GAP", delta_s, result);
+    }
+  }
+
   origin_ecef_samples_.push_back(ecef);
-  if (origin_ecef_samples_.size() < static_cast<size_t>(config_.origin_average_count)) return false;
+  have_last_origin_candidate_time_ = true;
+  last_origin_candidate_time_ns_ = measurement_time_ns;
+  result.origin_average_accepted = true;
+  result.origin_average_count =
+      static_cast<uint32_t>(origin_ecef_samples_.size());
+  if (origin_ecef_samples_.size() < static_cast<size_t>(config_.origin_average_count))
+    return false;
 
   origin_ecef_.setZero();
   for (const Eigen::Vector3d &sample : origin_ecef_samples_) origin_ecef_ += sample;
   origin_ecef_ /= static_cast<double>(origin_ecef_samples_.size());
   origin_lla_ = gnss_serial_driver::ecefToGeodetic(origin_ecef_);
   origin_initialized_ = finiteVector(origin_lla_) && finiteVector(origin_ecef_);
-  origin_ecef_samples_.clear();
+  clearOriginAverageState();
   return origin_initialized_;
 }
 
@@ -568,9 +638,11 @@ GnssAdapterResult GnssAdapter::process(const gnss_comm::GnssPVTSolnMsg &message,
     std::ostringstream detail;
     detail << "week=" << message.time.week << " tow=" << message.time.tow;
     result.detail = detail.str();
+    markOriginAverageSkip("INVALID_GPS_TIME", result);
     return result;
   }
-  return processPvt(message, measurement_stamp, true, true, callback_time);
+  return processPvt(message, measurement_stamp, true, true, false, 0, 0,
+                    callback_time);
 }
 
 GnssAdapterResult GnssAdapter::process(
@@ -579,7 +651,8 @@ GnssAdapterResult GnssAdapter::process(
 {
   return processPvt(message.pvt, message.header.stamp,
                     message.local_measurement_time_valid,
-                    message.valid_for_fusion, callback_time);
+                    message.valid_for_fusion, true, message.session_id,
+                    message.writer_epoch, callback_time);
 }
 
 GnssAdapterResult GnssAdapter::processPvt(
@@ -587,6 +660,9 @@ GnssAdapterResult GnssAdapter::processPvt(
     const ros::Time &measurement_stamp,
     bool local_measurement_time_valid,
     bool valid_for_fusion,
+    bool source_identity_available,
+    uint64_t session_id,
+    uint64_t writer_epoch,
     const ros::Time &callback_time)
 {
   (void)callback_time;
@@ -605,6 +681,26 @@ GnssAdapterResult GnssAdapter::processPvt(
   status.p_dop = message.p_dop;
   status.vel_acc = message.vel_acc;
 
+  if (source_identity_available)
+  {
+    const bool source_changed =
+        have_source_identity_ &&
+        (session_id != last_session_id_ || writer_epoch != last_writer_epoch_);
+    if (source_changed && averageOriginPending())
+    {
+      resetOriginAverage("SOURCE_EPOCH_CHANGED", 0.0, result);
+      tracking_state_ = TrackingState::WAITING;
+      was_active_once_ = false;
+      consecutive_fixed_count_ = 0;
+      consecutive_lost_count_ = 0;
+      have_last_measurement_time_ = false;
+      last_measurement_time_ns_ = 0;
+    }
+    have_source_identity_ = true;
+    last_session_id_ = session_id;
+    last_writer_epoch_ = writer_epoch;
+  }
+
   const auto reject_without_state_change = [&](const std::string &reason) {
     status.raw_quality = static_cast<uint8_t>(GnssQuality::INVALID);
     status.filtered_quality = static_cast<uint8_t>(GnssQuality::INVALID);
@@ -613,6 +709,7 @@ GnssAdapterResult GnssAdapter::processPvt(
     status.consecutive_fixed_count = consecutive_fixed_count_;
     status.consecutive_lost_count = consecutive_lost_count_;
     status.reject_reason = reason;
+    markOriginAverageSkip(reason, result);
     return result;
   };
   if (!config_.enable) return reject_without_state_change("ADAPTER_DISABLED");
@@ -620,11 +717,29 @@ GnssAdapterResult GnssAdapter::processPvt(
     return reject_without_state_change("ZERO_MEASUREMENT_TIMESTAMP");
   if (!local_measurement_time_valid)
     return reject_without_state_change("LOCAL_MEASUREMENT_TIME_INVALID");
-  if (!valid_for_fusion)
-    return reject_without_state_change("INVALID_FOR_FUSION");
 
   const std::int64_t measurement_time_ns =
       static_cast<std::int64_t>(measurement_stamp.toNSec());
+  if (averageOriginPending() && have_last_origin_candidate_time_)
+  {
+    const std::int64_t candidate_delta_ns =
+        measurement_time_ns - last_origin_candidate_time_ns_;
+    if (candidate_delta_ns < -kTimestampEqualityToleranceNs)
+    {
+      resetOriginAverage("TIME_REGRESSION",
+                         static_cast<double>(candidate_delta_ns) * 1e-9,
+                         result);
+      tracking_state_ = TrackingState::WAITING;
+      was_active_once_ = false;
+      consecutive_fixed_count_ = 0;
+      consecutive_lost_count_ = 0;
+      have_last_measurement_time_ = false;
+      last_measurement_time_ns_ = 0;
+    }
+  }
+  if (!valid_for_fusion)
+    return reject_without_state_change("INVALID_FOR_FUSION");
+
   bool time_gap = false;
   if (have_last_measurement_time_)
   {
@@ -643,6 +758,7 @@ GnssAdapterResult GnssAdapter::processPvt(
       detail << "current_stamp_ns=" << measurement_time_ns
              << " previous_stamp_ns=" << last_measurement_time_ns_;
       result.detail = detail.str();
+      markOriginAverageSkip("DUPLICATE_GNSS_TIME", result);
       return result;
     }
     if (delta_s < 0.0 && config_.require_monotonic_time)
@@ -658,6 +774,7 @@ GnssAdapterResult GnssAdapter::processPvt(
       detail << "current_stamp_ns=" << measurement_time_ns
              << " previous_stamp_ns=" << last_measurement_time_ns_;
       result.detail = detail.str();
+      markOriginAverageSkip("NON_MONOTONIC_TIME", result);
       return result;
     }
     if (delta_s > config_.max_time_gap_s)
@@ -665,7 +782,6 @@ GnssAdapterResult GnssAdapter::processPvt(
       tracking_state_ = was_active_once_ ? TrackingState::LOST : TrackingState::WAITING;
       consecutive_fixed_count_ = 0;
       consecutive_lost_count_ = 0;
-      origin_ecef_samples_.clear();
       time_gap = true;
       std::ostringstream detail;
       detail << "current_stamp_ns=" << measurement_time_ns
@@ -686,7 +802,7 @@ GnssAdapterResult GnssAdapter::processPvt(
   }
 
   const bool fixed_solution = raw_quality == GnssQuality::RTK_FIXED;
-  const bool fixed_measurement_usable = fixed_solution && gates_passed;
+  bool fixed_measurement_usable = fixed_solution && gates_passed;
   const GnssQuality fixed_state_quality = updateFixedState(fixed_solution);
   GnssQuality filtered_quality = GnssQuality::INVALID;
   if (raw_quality == GnssQuality::RTK_FIXED)
@@ -715,19 +831,16 @@ GnssAdapterResult GnssAdapter::processPvt(
     if (!finiteVector(current_ecef))
     {
       gates_passed = false;
+      fixed_measurement_usable = false;
       filtered_quality = GnssQuality::INVALID;
       status.filtered_quality = static_cast<uint8_t>(filtered_quality);
       reject_reason = "INVALID_ECEF_RESULT";
     }
   }
 
-  if (!origin_initialized_ && config_.origin_mode == "average_fixed" &&
-      !fixed_measurement_usable)
-  {
-    origin_ecef_samples_.clear();
-  }
   result.origin_initialized_now = fixed_measurement_usable &&
-                                  updateOrigin(fixed_state_quality, lla, current_ecef);
+                                  updateOrigin(fixed_state_quality, lla, current_ecef,
+                                               measurement_time_ns, result);
   status.origin_initialized = origin_initialized_;
 
   bool current_quality_enabled = false;
@@ -787,6 +900,7 @@ GnssAdapterResult GnssAdapter::processPvt(
     }
   }
   status.reject_reason = reject_reason;
+  markOriginAverageSkip(reject_reason, result);
   return result;
 }
 
@@ -845,11 +959,47 @@ void GnssAdapter::logResult(const gnss_comm::GnssPVTSolnMsg &message,
     ROS_WARN_STREAM_THROTTLE(config_.log_interval_s,
                              "[GNSS_ADAPTER] warning=" << result.warning);
   }
+  if (result.origin_average_reset)
+  {
+    ROS_WARN_STREAM("[ORIGIN_AVERAGE_RESET] reason="
+                    << result.origin_average_reset_reason
+                    << " gap_s=" << result.origin_average_gap_s
+                    << " old_count=" << result.origin_average_old_count);
+  }
+  if (result.origin_average_accepted)
+  {
+    ROS_INFO_STREAM("[ORIGIN_AVERAGE_ACCEPT] count="
+                    << result.origin_average_count << "/"
+                    << config_.origin_average_count
+                    << " quality=RTK_FIXED stamp="
+                    << std::setprecision(12)
+                    << result.status.header.stamp.toSec());
+  }
+  if (result.origin_average_skipped)
+  {
+    ROS_DEBUG_STREAM_THROTTLE(
+        config_.log_interval_s,
+        "[ORIGIN_AVERAGE_SKIP] reason="
+        << result.origin_average_skip_reason
+        << " count_preserved=" << result.origin_average_count << "/"
+        << config_.origin_average_count);
+  }
   if (result.origin_initialized_now)
   {
-    ROS_INFO_STREAM("[GNSS_ADAPTER_ORIGIN] mode=" << config_.origin_mode
-                    << " lla=[" << std::setprecision(12) << origin_lla_.transpose()
-                    << "] ecef=[" << origin_ecef_.transpose() << "]");
+    if (config_.origin_mode == "average_fixed")
+    {
+      ROS_INFO_STREAM("[ORIGIN_AVERAGE_SUCCESS] samples="
+                      << result.origin_average_count
+                      << " origin_lla=[" << std::setprecision(12)
+                      << origin_lla_.transpose() << "]");
+    }
+    else
+    {
+      ROS_INFO_STREAM("[GNSS_ADAPTER_ORIGIN] mode=" << config_.origin_mode
+                      << " lla=[" << std::setprecision(12)
+                      << origin_lla_.transpose()
+                      << "] ecef=[" << origin_ecef_.transpose() << "]");
+    }
   }
   if (!result.status.accepted)
   {

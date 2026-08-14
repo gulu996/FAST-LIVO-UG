@@ -267,9 +267,6 @@ gps:
   max_residual_m: 3.0
   max_update_step_m: 0.20
 
-  # TODO(confirm): GNSS antenna lever arm in FAST-LIVO body frame, meters.
-  lever_arm_body_to_gnss: [0.0, 0.0, 0.0]
-
   pause_map_update_frames: 3
   pause_map_update_min_correction_m: 0.05
 

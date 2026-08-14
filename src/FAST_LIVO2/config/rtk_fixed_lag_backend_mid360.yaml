@@ -28,7 +28,17 @@ rtk_backend:
   alignment_min_baseline_m: 8.0
   alignment_max_pair_time_diff_s: 0.05
   alignment_max_rmse_m: 0.5
-  antenna_lever_arm_body_m: [0.0, 0.0, 0.0]
+
+  # GNSS antenna lever arm.
+  # Direction: FAST-LIVO body pose origin -> GNSS antenna reference point.
+  # Expressed in the FAST-LIVO body/IMU state frame, unit: metre.
+  # Axes are the body/IMU state axes. With config/mid360.yaml's current
+  # extrinsic_R=identity they are parallel and same-sign to the Mid-360
+  # point-cloud/IMU axes; vehicle forward/left/up still depends on mounting.
+  # The endpoint must represent the physical point corresponding to the GNSS
+  # position measurement, preferably the antenna ARP or calibrated APC,
+  # not an arbitrary enclosure edge or top surface.
+  antenna_lever_arm_body_m: [-0.140, 0.000, 0.011]
 
   min_gnss_sigma_xy_m: 0.03
   min_gnss_sigma_z_m: 0.05

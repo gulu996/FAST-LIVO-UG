@@ -33,6 +33,17 @@ GnssAdapterConfig manualConfig()
   return config;
 }
 
+GnssAdapterConfig averageConfig(int sample_count = 10)
+{
+  GnssAdapterConfig config = manualConfig();
+  config.origin_mode = "average_fixed";
+  config.fixed_confirm_count = 1;
+  config.origin_average_count = sample_count;
+  config.origin_average_max_gap_s = 2.0;
+  config.max_time_gap_s = 10.0;
+  return config;
+}
+
 gnss_comm::GnssPVTSolnMsg fixedMessage(double tow = 186157.8)
 {
   gnss_comm::GnssPVTSolnMsg message;
@@ -61,6 +72,8 @@ gnss_serial_driver::GnssPvtStamped stampedFixed(std::uint64_t stamp_ns)
 {
   gnss_serial_driver::GnssPvtStamped message;
   message.header.stamp.fromNSec(stamp_ns);
+  message.session_id = 1;
+  message.writer_epoch = 1;
   message.local_measurement_time_valid = true;
   message.valid_for_fusion = true;
   message.pvt = fixedMessage();
@@ -266,7 +279,7 @@ void testTimeOrderingAndMissingOrigin()
         "enabled non-fixed quality must still wait for a confirmed-fixed origin");
 }
 
-void testLossRecoveryAndAverageOrigin()
+void testLossAndRecovery()
 {
   GnssAdapter adapter(manualConfig());
   adapter.process(fixedMessage(), ros::Time(1));
@@ -293,24 +306,194 @@ void testLossRecoveryAndAverageOrigin()
         recovery.status.accepted,
         "recovery confirmation count must restore active fixed state");
 
-  GnssAdapterConfig average_config = manualConfig();
-  average_config.origin_mode = "average_fixed";
-  average_config.fixed_confirm_count = 1;
-  average_config.origin_average_count = 2;
-  GnssAdapter average_adapter(average_config);
-  check(!average_adapter.process(fixedMessage(), ros::Time(1)).status.origin_initialized,
-        "average origin must wait for the configured sample count");
-  gnss_comm::GnssPVTSolnMsg interrupted_float = fixedMessage(186157.9);
-  interrupted_float.carr_soln = 1;
-  average_adapter.process(interrupted_float, ros::Time(1));
-  gnss_comm::GnssPVTSolnMsg shifted = fixedMessage(186158.0);
-  shifted.longitude += 1e-7;
-  check(!average_adapter.process(shifted, ros::Time(1)).status.origin_initialized,
-        "average_fixed must discard a sequence interrupted by RTK Float");
-  shifted.time.tow = 186158.1;
-  const GnssAdapterResult averaged = average_adapter.process(shifted, ros::Time(1));
-  check(averaged.status.origin_initialized && averaged.status.accepted,
-        "average_fixed must initialize from consecutive confirmed ECEF samples");
+}
+
+void testAverageOriginContinuousFixed()
+{
+  GnssAdapter adapter(averageConfig());
+  const std::uint64_t base_ns = 100000000000ULL;
+  GnssAdapterResult result;
+  for (int index = 0; index < 10; ++index)
+  {
+    result = adapter.process(
+        stampedFixed(base_ns + static_cast<std::uint64_t>(index) * 100000000ULL),
+        ros::Time(999));
+    check(result.origin_average_accepted,
+          "every usable Fixed candidate must be accepted into the average");
+    check(result.origin_average_count == static_cast<uint32_t>(index + 1),
+          "average candidate count must increase exactly once per epoch");
+    if (index < 9)
+      check(!result.status.origin_initialized,
+            "average origin must wait for all configured samples");
+  }
+  check(result.origin_initialized_now && result.status.origin_initialized &&
+        result.status.accepted,
+        "the tenth continuous Fixed candidate must initialize the origin");
+}
+
+void testAverageOriginSkipsRejectedRecords()
+{
+  GnssAdapter adapter(averageConfig());
+  const std::uint64_t base_ns = 200000000000ULL;
+  GnssAdapterResult result;
+  for (int index = 0; index < 10; ++index)
+  {
+    const std::uint64_t good_stamp =
+        base_ns + static_cast<std::uint64_t>(index) * 200000000ULL;
+    result = adapter.process(stampedFixed(good_stamp), ros::Time(999));
+    check(result.origin_average_count == static_cast<uint32_t>(index + 1),
+          "usable Fixed records must accumulate across rejected records");
+
+    if (index == 0)
+    {
+      auto invalid_for_fusion = stampedFixed(good_stamp + 25000000ULL);
+      invalid_for_fusion.valid_for_fusion = false;
+      const GnssAdapterResult skipped =
+          adapter.process(invalid_for_fusion, ros::Time(999));
+      check(skipped.origin_average_skipped &&
+            skipped.origin_average_count == 1 &&
+            skipped.origin_average_skip_reason == "INVALID_FOR_FUSION",
+            "invalid_for_fusion must preserve collected origin candidates");
+    }
+
+    if (index < 9)
+    {
+      auto rejected_accuracy = stampedFixed(good_stamp + 50000000ULL);
+      rejected_accuracy.pvt.h_acc = 999.0;
+      rejected_accuracy.pvt.v_acc = 999.0;
+      const GnssAdapterResult skipped =
+          adapter.process(rejected_accuracy, ros::Time(999));
+      check(skipped.status.reject_reason == "H_ACC_TOO_LARGE" &&
+            skipped.origin_average_skipped &&
+            !skipped.origin_average_reset &&
+            skipped.origin_average_count == static_cast<uint32_t>(index + 1),
+            "quality-gate rejection must skip without clearing the average");
+    }
+
+    if (index == 0)
+    {
+      auto non_candidate_quality = stampedFixed(good_stamp + 75000000ULL);
+      non_candidate_quality.pvt.carr_soln = 1;
+      const GnssAdapterResult skipped =
+          adapter.process(non_candidate_quality, ros::Time(999));
+      check(skipped.origin_average_skipped &&
+            !skipped.origin_average_reset &&
+            skipped.origin_average_count == 1,
+            "a non-candidate RTK Float record must preserve the average");
+    }
+  }
+  check(result.origin_initialized_now && result.origin_average_count == 10,
+        "the tenth usable Fixed record must initialize despite alternating rejects");
+}
+
+void testAverageOriginCandidateGapReset()
+{
+  GnssAdapter adapter(averageConfig());
+  const std::uint64_t base_ns = 300000000000ULL;
+  for (int index = 0; index < 9; ++index)
+  {
+    adapter.process(
+        stampedFixed(base_ns + static_cast<std::uint64_t>(index) * 100000000ULL),
+        ros::Time(999));
+  }
+
+  const GnssAdapterResult after_gap =
+      adapter.process(stampedFixed(base_ns + 3000000000ULL), ros::Time(999));
+  check(after_gap.origin_average_reset &&
+        after_gap.origin_average_reset_reason == "VALID_FIXED_GAP" &&
+        after_gap.origin_average_old_count == 9 &&
+        after_gap.origin_average_accepted &&
+        after_gap.origin_average_count == 1 &&
+        !after_gap.status.origin_initialized,
+        "a long candidate-to-candidate gap must restart the average at one");
+}
+
+void testAverageOriginTimeRegressionReset()
+{
+  GnssAdapter adapter(averageConfig());
+  const std::uint64_t base_ns = 400000000000ULL;
+  for (int index = 0; index < 3; ++index)
+  {
+    adapter.process(
+        stampedFixed(base_ns + static_cast<std::uint64_t>(index) * 100000000ULL),
+        ros::Time(999));
+  }
+
+  const GnssAdapterResult regressed =
+      adapter.process(stampedFixed(390000000000ULL), ros::Time(999));
+  check(regressed.origin_average_reset &&
+        regressed.origin_average_reset_reason == "TIME_REGRESSION" &&
+        regressed.origin_average_old_count == 3 &&
+        regressed.origin_average_accepted &&
+        regressed.origin_average_count == 1 &&
+        !regressed.status.origin_initialized,
+        "time regression must reset collected origin candidates");
+
+  const GnssAdapterResult restarted =
+      adapter.process(stampedFixed(390100000000ULL), ros::Time(999));
+  check(restarted.origin_average_accepted &&
+        restarted.origin_average_count == 2 &&
+        !restarted.status.origin_initialized,
+        "the post-regression stream must continue from the new epoch");
+}
+
+void testAverageOriginDuplicateEpochSkipped()
+{
+  GnssAdapter adapter(averageConfig(2));
+  const std::uint64_t first_ns = 500000000000ULL;
+  adapter.process(stampedFixed(first_ns), ros::Time(999));
+
+  const GnssAdapterResult duplicate =
+      adapter.process(stampedFixed(first_ns), ros::Time(999));
+  check(duplicate.status.reject_reason == "DUPLICATE_GNSS_TIME" &&
+        duplicate.origin_average_skipped &&
+        duplicate.origin_average_count == 1 &&
+        !duplicate.status.origin_initialized,
+        "a duplicate GNSS epoch must not count twice");
+
+  const GnssAdapterResult second =
+      adapter.process(stampedFixed(first_ns + 100000000ULL), ros::Time(999));
+  check(second.origin_initialized_now && second.origin_average_count == 2,
+        "one later unique epoch must complete the two-sample average");
+}
+
+void testAverageOriginSourceEpochReset()
+{
+  GnssAdapter adapter(averageConfig(2));
+  auto first = stampedFixed(600000000000ULL);
+  adapter.process(first, ros::Time(999));
+
+  auto new_source_epoch = stampedFixed(100000000000ULL);
+  new_source_epoch.session_id = 2;
+  const GnssAdapterResult reset =
+      adapter.process(new_source_epoch, ros::Time(999));
+  check(reset.origin_average_reset &&
+        reset.origin_average_reset_reason == "SOURCE_EPOCH_CHANGED" &&
+        reset.origin_average_old_count == 1 &&
+        reset.origin_average_accepted &&
+        reset.origin_average_count == 1 &&
+        !reset.status.origin_initialized,
+        "session/writer epoch change must restart the average with the new sample");
+
+  auto second_new_source_sample = stampedFixed(100100000000ULL);
+  second_new_source_sample.session_id = 2;
+  const GnssAdapterResult completed =
+      adapter.process(second_new_source_sample, ros::Time(999));
+  check(completed.origin_initialized_now && completed.origin_average_count == 2,
+        "the new source epoch must be able to complete a fresh average");
+}
+
+void testFirstFixedModeUnchanged()
+{
+  GnssAdapterConfig config = manualConfig();
+  config.origin_mode = "first_fixed";
+  config.fixed_confirm_count = 1;
+  GnssAdapter adapter(config);
+  const GnssAdapterResult result = adapter.process(fixedMessage(), ros::Time(1));
+  check(result.origin_initialized_now && result.status.origin_initialized &&
+        result.status.accepted && !result.origin_average_accepted &&
+        !result.origin_average_reset,
+        "first_fixed must retain its single confirmed-Fixed initialization behavior");
 }
 } // namespace
 
@@ -324,7 +507,14 @@ int main()
     testTimeStateEnuAndCovariance();
     testInvalidInputs();
     testTimeOrderingAndMissingOrigin();
-    testLossRecoveryAndAverageOrigin();
+    testLossAndRecovery();
+    testAverageOriginContinuousFixed();
+    testAverageOriginSkipsRejectedRecords();
+    testAverageOriginCandidateGapReset();
+    testAverageOriginTimeRegressionReset();
+    testAverageOriginDuplicateEpochSkipped();
+    testAverageOriginSourceEpochReset();
+    testFirstFixedModeUnchanged();
   }
   catch (const std::exception &error)
   {

@@ -269,7 +269,7 @@ private:
   double chi2_gate_2d_ = 9.21;
   double max_residual_m_ = 3.0;
   double max_update_step_m_ = 0.20;
-  V3D lever_arm_body_to_gnss_ = V3D::Zero();
+  V3D antenna_lever_arm_body_m_ = V3D::Zero();
   int pause_map_update_frames_ = 3;
   double pause_map_update_min_correction_m_ = 0.05;
 

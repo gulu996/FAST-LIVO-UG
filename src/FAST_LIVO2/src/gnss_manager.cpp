@@ -1224,9 +1224,14 @@ bool GnssManager::loadParameters(ros::NodeHandle &nh)
   nh.param<double>("gps/chi2_gate_2d", chi2_gate_2d_, 9.21);
   nh.param<double>("gps/max_residual_m", max_residual_m_, 3.0);
   nh.param<double>("gps/max_update_step_m", max_update_step_m_, 0.20);
-  if (!loadVec3Param(nh, "gps/lever_arm_body_to_gnss", lever_arm_body_to_gnss_))
+  if (en_ &&
+      (!loadVec3Param(nh, "rtk_backend/antenna_lever_arm_body_m",
+                      antenna_lever_arm_body_m_) ||
+       !antenna_lever_arm_body_m_.allFinite()))
   {
-    lever_arm_body_to_gnss_.setZero();
+    ROS_ERROR("[GNSS] /rtk_backend/antenna_lever_arm_body_m must contain "
+              "exactly 3 finite values.");
+    return false;
   }
 
   nh.param<int>("gps/pause_map_update_frames", pause_map_update_frames_, 3);
@@ -1867,7 +1872,8 @@ void GnssManager::collectAlignSample(const GnssMeasurement &measurement,
 
   GnssFrameAlignSample sample;
   sample.enu_position = enu;
-  sample.world_position = state.pos_end + state.rot_end * lever_arm_body_to_gnss_;
+  sample.world_position =
+      state.pos_end + state.rot_end * antenna_lever_arm_body_m_;
   sample.stamp = measurement.stamp;
   frame_align_samples_.push_back(sample);
   if (frame_align_samples_.size() > 400)
@@ -2067,7 +2073,7 @@ GnssUpdateResult GnssManager::applyPositionUpdateAt(StatesGroup &state,
   double time_diff_s = 0.0;
   V3D enu = V3D::Zero();
   V3D world = V3D::Zero();
-  V3D pred = state.pos_end + state.rot_end * lever_arm_body_to_gnss_;
+  V3D pred = state.pos_end + state.rot_end * antenna_lever_arm_body_m_;
   V3D residual = V3D::Zero();
 
   if (!en_)
@@ -2156,7 +2162,7 @@ GnssUpdateResult GnssManager::applyPositionUpdateAt(StatesGroup &state,
                         residual, 0.0, 0.0);
   }
 
-  pred = state.pos_end + state.rot_end * lever_arm_body_to_gnss_;
+  pred = state.pos_end + state.rot_end * antenna_lever_arm_body_m_;
   residual = world - pred;
   const double residual_norm_xy = std::hypot(residual.x(), residual.y());
   if (max_residual_m_ > 0.0 && residual_norm_xy > max_residual_m_)
@@ -2178,7 +2184,8 @@ GnssUpdateResult GnssManager::applyPositionUpdateAt(StatesGroup &state,
   }
   if (update_orientation_ && !update_xy_only_)
   {
-    const Eigen::Matrix3d dpos_dtheta = -state.rot_end * skewSymmetric(lever_arm_body_to_gnss_);
+    const Eigen::Matrix3d dpos_dtheta =
+        -state.rot_end * skewSymmetric(antenna_lever_arm_body_m_);
     h.block(0, 0, h.rows(), 3) = dpos_dtheta.block(0, 0, h.rows(), 3);
   }
 

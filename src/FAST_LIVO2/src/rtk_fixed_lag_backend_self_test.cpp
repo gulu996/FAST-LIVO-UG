@@ -31,6 +31,20 @@ struct RtkFixedLagBackendSelfTestAccess {
     std::int64_t conservation_delta = 0;
   };
 
+  static bool rejectsNonFiniteLeverArm() {
+    RtkFixedLagBackend backend;
+    backend.config_.save_results = false;
+    backend.config_.save_text_log = false;
+    backend.config_.antenna_lever_arm_body_m =
+        gtsam::Point3(std::nan(""), 0.0, 0.0);
+    try {
+      backend.validateParameters();
+    } catch (const std::invalid_argument &) {
+      return true;
+    }
+    return false;
+  }
+
   static void initializeTestGraph(
       RtkFixedLagBackend &backend,
       const RtkFixedLagBackend::RawOdomSample &sample) {
@@ -263,6 +277,9 @@ void testLeverArmFactor() {
           "lever arm prediction is wrong");
   require(jacobian.rows() == 3 && jacobian.cols() == 6,
           "lever arm Jacobian dimensions are wrong");
+  require(fast_livo_backend::RtkFixedLagBackendSelfTestAccess::
+              rejectsNonFiniteLeverArm(),
+          "non-finite antenna lever arm was not rejected");
 }
 
 void testRawPoseInterpolation() {

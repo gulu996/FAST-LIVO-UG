@@ -38,6 +38,7 @@ struct GnssAdapterConfig
   std::string origin_mode = "first_fixed";
   Eigen::Vector3d origin_lla = Eigen::Vector3d::Zero();
   int origin_average_count = 30;
+  double origin_average_max_gap_s = 2.0;
 
   int min_num_sv = 10;
   int max_num_sv = 100;
@@ -69,9 +70,6 @@ struct GnssAdapterConfig
   std::string frame_id = "map";
   std::string child_frame_id = "gnss_antenna";
   double log_interval_s = 1.0;
-
-  // Reserved for the later factor-graph GNSS factor. It is intentionally unused here.
-  Eigen::Vector3d antenna_lever_arm_body = Eigen::Vector3d::Zero();
 };
 
 struct GnssAdapterResult
@@ -80,6 +78,14 @@ struct GnssAdapterResult
   nav_msgs::Odometry odometry;
   bool publish_odometry = false;
   bool origin_initialized_now = false;
+  bool origin_average_accepted = false;
+  bool origin_average_skipped = false;
+  bool origin_average_reset = false;
+  uint32_t origin_average_count = 0;
+  uint32_t origin_average_old_count = 0;
+  double origin_average_gap_s = 0.0;
+  std::string origin_average_skip_reason;
+  std::string origin_average_reset_reason;
   std::string warning;
   std::string detail;
 };
@@ -117,6 +123,9 @@ private:
                                const ros::Time &measurement_stamp,
                                bool local_measurement_time_valid,
                                bool valid_for_fusion,
+                               bool source_identity_available,
+                               uint64_t session_id,
+                               uint64_t writer_epoch,
                                const ros::Time &callback_time);
 
   bool convertGpsToUtc(uint32_t week, double tow, ros::Time &stamp) const;
@@ -129,7 +138,16 @@ private:
   bool qualityAccepted(GnssQuality quality) const;
   bool updateOrigin(GnssQuality filtered_quality,
                     const Eigen::Vector3d &lla,
-                    const Eigen::Vector3d &ecef);
+                    const Eigen::Vector3d &ecef,
+                    std::int64_t measurement_time_ns,
+                    GnssAdapterResult &result);
+  bool averageOriginPending() const;
+  void markOriginAverageSkip(const std::string &reason,
+                             GnssAdapterResult &result) const;
+  void resetOriginAverage(const std::string &reason,
+                          double gap_s,
+                          GnssAdapterResult &result);
+  void clearOriginAverageState();
   void fillOdometry(const gnss_comm::GnssPVTSolnMsg &message,
                     const ros::Time &stamp,
                     const Eigen::Vector3d &enu,
@@ -152,10 +170,16 @@ private:
   bool have_last_measurement_time_ = false;
   std::int64_t last_measurement_time_ns_ = 0;
 
+  bool have_source_identity_ = false;
+  uint64_t last_session_id_ = 0;
+  uint64_t last_writer_epoch_ = 0;
+
   bool origin_initialized_ = false;
   Eigen::Vector3d origin_lla_ = Eigen::Vector3d::Zero();
   Eigen::Vector3d origin_ecef_ = Eigen::Vector3d::Zero();
   std::vector<Eigen::Vector3d> origin_ecef_samples_;
+  bool have_last_origin_candidate_time_ = false;
+  std::int64_t last_origin_candidate_time_ns_ = 0;
 };
 
 #endif // GNSS_ADAPTER_H

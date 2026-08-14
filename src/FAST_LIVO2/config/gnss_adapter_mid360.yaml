@@ -6,10 +6,12 @@ gnss_adapter:
   output_status_topic: "/gnss_fusion/status"
 
   # manual: configured LLA; first_fixed: first state-machine-confirmed RTK Fixed;
-  # average_fixed: ECEF average of confirmed, consecutive RTK Fixed samples.
-  origin_mode: "first_fixed"
+  # average_fixed: ECEF average of confirmed RTK Fixed origin candidates.
+  origin_mode: "average_fixed"
   origin_lla: [22.5299731, 113.9331154, 39.324]
-  origin_average_count: 30
+  origin_average_count: 10
+  # Maximum gap between accepted Fixed origin candidates; rejected records are skipped.
+  origin_average_max_gap_s: 2.0
 
   min_num_sv: 10
   max_num_sv: 100
@@ -44,4 +46,3 @@ gnss_adapter:
   frame_id: "map"
   child_frame_id: "gnss_antenna"
   log_interval_s: 1.0
-  antenna_lever_arm_body: [0.0, 0.0, 0.0]

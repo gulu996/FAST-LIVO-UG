@@ -9,6 +9,7 @@ gnss_adapter:
   origin_mode: "manual"
   origin_lla: [34.027085, 108.7619911, 393.280]
   origin_average_count: 30
+  origin_average_max_gap_s: 2.0
 
   min_num_sv: 10
   max_num_sv: 100
@@ -51,5 +52,3 @@ gnss_adapter:
   child_frame_id: "gnss_antenna"
 
   log_interval_s: 1.0
-
-  antenna_lever_arm_body: [0.0, 0.0, 0.0]

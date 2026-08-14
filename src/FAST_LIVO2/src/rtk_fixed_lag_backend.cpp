@@ -106,6 +106,14 @@ RtkFixedLagBackend::RtkFixedLagBackend(ros::NodeHandle &nh) {
     return;
   }
   validateParameters();
+  ROS_INFO_STREAM(
+      "[RTK_BACKEND_LEVER_ARM] "
+      "parameter_name=/rtk_backend/antenna_lever_arm_body_m "
+      "direction=body_origin_to_gnss_antenna "
+      "frame=" << config_.body_frame_id << " unit=m value=["
+      << config_.antenna_lever_arm_body_m.x() << ","
+      << config_.antenna_lever_arm_body_m.y() << ","
+      << config_.antenna_lever_arm_body_m.z() << "]");
 
   bool legacy_gnss_update_enabled = false;
   bool uwb_update_enabled = false;
@@ -318,18 +326,29 @@ void RtkFixedLagBackend::loadParameters(ros::NodeHandle &nh) {
   params.param("text_log_file", config_.text_log_file,
                config_.text_log_file);
 
-  std::vector<double> lever_arm{0.0, 0.0, 0.0};
-  if (params.getParam("antenna_lever_arm_body_m", lever_arm)) {
-    if (lever_arm.size() != 3) {
-      throw std::invalid_argument(
-          "rtk_backend/antenna_lever_arm_body_m must contain 3 values");
-    }
-    config_.antenna_lever_arm_body_m =
-        gtsam::Point3(lever_arm[0], lever_arm[1], lever_arm[2]);
+  std::vector<double> lever_arm;
+  if (!params.getParam("antenna_lever_arm_body_m", lever_arm)) {
+    throw std::invalid_argument(
+        "required parameter /rtk_backend/antenna_lever_arm_body_m is missing");
   }
+  if (lever_arm.size() != 3) {
+    throw std::invalid_argument(
+        "/rtk_backend/antenna_lever_arm_body_m must contain exactly 3 values");
+  }
+  if (!std::all_of(lever_arm.begin(), lever_arm.end(),
+                   [](double value) { return std::isfinite(value); })) {
+    throw std::invalid_argument(
+        "/rtk_backend/antenna_lever_arm_body_m values must be finite");
+  }
+  config_.antenna_lever_arm_body_m =
+      gtsam::Point3(lever_arm[0], lever_arm[1], lever_arm[2]);
 }
 
 void RtkFixedLagBackend::validateParameters() const {
+  if (!config_.antenna_lever_arm_body_m.allFinite()) {
+    throw std::invalid_argument(
+        "/rtk_backend/antenna_lever_arm_body_m values must be finite");
+  }
   if (config_.lag_seconds <= 0.0 ||
       config_.keyframe_translation_m <= 0.0 ||
       config_.keyframe_rotation_deg <= 0.0 ||
