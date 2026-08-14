@@ -20,6 +20,7 @@ which is included as part of this source code package.
 #include <opencv2/aruco/dictionary.hpp>
 #include <opencv2/core/eigen.hpp>
 #include <pcl/filters/voxel_grid.h>
+#include <cstdint>
 #include <limits>
 #include <set>
 #include <unordered_set>
@@ -104,6 +105,11 @@ public:
   vector<float> patch_buffer;
   bool normal_en, inverse_composition_en, exposure_estimate_en, raycast_en, has_ref_patch_cache;
   bool ncc_en = false, colmap_output_en = false;
+  bool visual_robust_kernel_en = true;
+  double visual_robust_delta = 20.0;
+  bool visual_observability_gate_en = true;
+  double visual_observability_relative_eigen_threshold = 0.02;
+  double visual_observability_absolute_eigen_threshold = 0.0;
 
   int width, height, grid_n_width, grid_n_height, length;
   double image_resize_factor;
@@ -173,6 +179,34 @@ public:
   int patch_pyrimid_level, patch_size, patch_size_total, patch_size_half, border, warp_len;
   int max_iterations, total_points;
   int min_retrieve_points = 30;
+  bool visual_spatial_coverage_gate_en = false;
+  int relaxed_min_retrieve_points = 20;
+  int relaxed_min_occupied_good_tiles = 8;
+  double relaxed_min_good_tile_ratio = 0.85;
+  double relaxed_min_horizontal_coverage = 0.50;
+  double relaxed_min_vertical_coverage = 0.50;
+  bool lidar_degenerated = false;
+  bool lidar_weak_translation_direction_valid = false;
+  V3D lidar_weak_translation_direction_world = V3D::Zero();
+  bool degeneracy_relaxed_track_gate_en = false;
+  int degeneracy_relaxed_min_retrieve_points = 5;
+  int degeneracy_relaxed_min_occupied_good_tiles = 4;
+  double degeneracy_relaxed_min_good_tile_ratio = 0.60;
+  double degeneracy_relaxed_min_horizontal_coverage = 0.40;
+  double degeneracy_relaxed_min_vertical_coverage = 0.40;
+  double degeneracy_visual_position_scale = 0.05;
+  double degeneracy_visual_max_position_step_m = 0.003;
+  bool visual_reference_refresh_en = false;
+  int visual_reference_refresh_max_age_frames = 30;
+  int visual_reference_refresh_min_tracked_points = 8;
+  int visual_reference_refresh_min_occupied_good_tiles = 4;
+  double visual_reference_refresh_min_horizontal_coverage = 0.30;
+  double visual_reference_refresh_min_vertical_coverage = 0.30;
+  int visual_reference_refresh_max_per_frame = 30;
+  bool last_visual_tracked_gate_pass = false;
+  bool last_visual_relaxed_track_gate_pass = false;
+  bool last_visual_degeneracy_relaxed_track_gate_pass = false;
+  double last_visual_degeneracy_constrained_step_m = 0.0;
   int min_update_meas = 600;
   int low_track_force_update_stride = 0;
   int low_track_force_min_points = 8;
@@ -194,17 +228,44 @@ public:
   double visual_update_max_acc_bias_increment_mps2 = 0.03;
   double visual_update_max_gyro_bias_increment_rps = 0.005;
   double visual_update_normalized_nis_max = 0.0;
+  bool last_visual_nis_rejected = false;
   int last_visual_measurement_dof = 0; // one scalar photometric residual per measurement
   double last_visual_total_nis = std::numeric_limits<double>::quiet_NaN();
   double last_visual_normalized_nis = std::numeric_limits<double>::quiet_NaN();
+  double last_visual_rotation_min_eigenvalue = std::numeric_limits<double>::quiet_NaN();
+  double last_visual_rotation_max_eigenvalue = std::numeric_limits<double>::quiet_NaN();
+  double last_visual_rotation_condition = std::numeric_limits<double>::quiet_NaN();
+  double last_visual_translation_min_eigenvalue = std::numeric_limits<double>::quiet_NaN();
+  double last_visual_translation_max_eigenvalue = std::numeric_limits<double>::quiet_NaN();
+  double last_visual_translation_condition = std::numeric_limits<double>::quiet_NaN();
+  int last_visual_observability_suppressed_directions = 0;
+  int last_visual_candidate_patches = 0;
+  int last_visual_patch_quality_rejects = 0;
+  int last_visual_ncc_rejects = 0;
+  int last_visual_photometric_rejects = 0;
+  int last_visual_ref_age_count = 0;
+  int64_t last_visual_ref_age_sum = 0;
+  int last_visual_ref_age_max = 0;
+  int last_visual_ncc_pass_ref_age_count = 0;
+  int64_t last_visual_ncc_pass_ref_age_sum = 0;
+  int last_visual_ncc_pass_ref_age_max = 0;
+  int last_visual_tracked_ref_age_count = 0;
+  int64_t last_visual_tracked_ref_age_sum = 0;
+  int last_visual_tracked_ref_age_max = 0;
+  int last_visual_converged_ref_candidates = 0;
+  int last_visual_reference_refreshes = 0;
   int diagnostics_console_interval_frames = 20;
 
-  double img_point_cov, outlier_threshold, ncc_thre;
+  double img_point_cov, outlier_threshold, ncc_thre = 0.4;
   bool image_quality_gate_en = false;
   double image_quality_max_saturated_fraction = 0.20;
   double image_quality_max_tile_saturated_fraction = 0.35;
   double image_quality_max_dark_fraction = 0.98;
   double image_quality_min_intensity_std = 6.0;
+  bool image_quality_tile_mask_en = false;
+  double image_quality_min_usable_tile_ratio = 0.25;
+  double image_quality_min_usable_horizontal_coverage = 0.50;
+  double image_quality_min_usable_vertical_coverage = 0.50;
   bool visual_patch_quality_gate_en = true;
   double visual_patch_max_saturated_fraction = 0.10;
   double visual_patch_min_intensity_std = 2.0;
@@ -212,6 +273,26 @@ public:
   int image_quality_dark_pixel_value = 5;
   int image_quality_tile_rows = 4;
   int image_quality_tile_cols = 4;
+  std::vector<uint8_t> image_quality_usable_tiles;
+  int image_quality_mask_width = 0;
+  int image_quality_mask_height = 0;
+  std::vector<uint8_t> tracked_occupied_tiles;
+  double last_image_saturated_fraction = 0.0;
+  double last_image_max_tile_saturated_fraction = 0.0;
+  double last_image_dark_fraction = 0.0;
+  double last_image_contrast = 0.0;
+  int last_image_usable_tiles = 0;
+  int last_image_unusable_tiles = 0;
+  int last_image_overexposed_tiles = 0;
+  int last_image_underexposed_tiles = 0;
+  int last_image_low_contrast_tiles = 0;
+  double last_image_usable_tile_ratio = 0.0;
+  double last_image_usable_horizontal_coverage = 0.0;
+  double last_image_usable_vertical_coverage = 0.0;
+  bool last_image_global_saturation_fail = false;
+  bool last_image_global_dark_fail = false;
+  bool last_image_global_contrast_fail = false;
+  std::string last_image_quality_reject_reason = "none";
   double max_state_update_rot_deg = 0.8;
   double max_state_update_trans_m = 0.08;
   bool visual_map_prune_en = true;
@@ -233,6 +314,16 @@ public:
   size_t last_visual_map_total_points_after = 0;
   size_t last_visual_map_voxels_before = 0;
   size_t last_visual_map_voxels_after = 0;
+  size_t last_visual_map_points_at_retrieve = 0;
+  size_t last_visual_map_voxels_at_retrieve = 0;
+  int last_visual_projected_candidates = 0;
+  int last_visual_inside_image_candidates = 0;
+  int last_visual_good_tile_candidates = 0;
+  int last_visual_grid_candidates = 0;
+  int last_visual_occupied_good_tiles = 0;
+  double last_visual_occupied_tile_ratio = 0.0;
+  double last_visual_horizontal_coverage = 0.0;
+  double last_visual_vertical_coverage = 0.0;
   double visual_voxel_size = 0.5;
   bool console_timing_print_en = true;
   int console_timing_print_stride = 1;
@@ -275,6 +366,11 @@ public:
 
   ofstream fout_camera, fout_colmap;
   ofstream timing_log_file;
+  ofstream visual_patch_quality_file;
+  ofstream visual_funnel_file;
+  int visual_patch_quality_pending_rows = 0;
+  int visual_funnel_pending_rows = 0;
+  double current_visual_time = 0.0;
   unordered_map<VOXEL_LOCATION, VOXEL_POINTS *> feat_map;
   unordered_map<VOXEL_LOCATION, int> sub_feat_map; 
   std::unordered_set<const VisualPoint *> protected_visual_points_;
@@ -339,6 +435,16 @@ public:
   Eigen::Matrix3d skewSymmetric(const Eigen::Vector3d& v);
   void initializeTimingLogFileIfNeeded();
   void appendTimingLogLines(const vector<string> &lines);
+  void logVisualPatchQuality(double photometric_mse, double ncc,
+                             const char *decision);
+  void logVisualFunnel(const std::string &skip_reason, bool ekf_attempted,
+                       bool final_guard_rejected, bool accepted);
+  bool isPixelInUsableTile(const V2D &px) const;
+  void updateTrackedSpatialCoverage();
+  void refreshTrackedReferencePatches(cv::Mat img);
+  void applyPatchRobustWeights(Eigen::VectorXd &residuals,
+                               Eigen::MatrixXd &jacobian) const;
+  bool applyPoseObservabilityGate(Eigen::MatrixXd &jacobian);
   void logVisualDelta(double timestamp, int tracked_point_count,
                       double image_saturated_fraction,
                       double image_tile_saturated_fraction,

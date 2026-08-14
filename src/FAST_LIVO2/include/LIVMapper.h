@@ -23,6 +23,7 @@ which is included as part of this source code package.
 #include <image_transport/image_transport.h>
 #include <nav_msgs/Path.h>
 #include <netinet/in.h>
+#include <std_msgs/Bool.h>
 #include <vikit/camera_loader.h>
 
 #include <cstdint>
@@ -53,6 +54,9 @@ public:
   bool shouldSelectVisualFrame();
   void updateVisualObservationHints();
   void updateRuntimeGuard(double frame_time_s);
+  bool startupWarmupReady();
+  void updateMappingReady();
+  void logRuntimeMemory();
   void logLioDegeneracy(bool map_insert_skipped, const std::string &map_insert_skip_reason,
                         bool map_guard_requested, bool map_guard_enforced);
   
@@ -175,6 +179,27 @@ public:
   std::string udp_device_id_;
   int grid_size, patch_size, grid_n_width, grid_n_height, patch_pyrimid_level;
   int vio_min_retrieve_points_ = 45;
+  bool vio_visual_spatial_coverage_gate_en_ = false;
+  int vio_relaxed_min_retrieve_points_ = 20;
+  int vio_relaxed_min_occupied_good_tiles_ = 8;
+  double vio_relaxed_min_good_tile_ratio_ = 0.85;
+  double vio_relaxed_min_horizontal_coverage_ = 0.50;
+  double vio_relaxed_min_vertical_coverage_ = 0.50;
+  bool vio_degeneracy_relaxed_track_gate_en_ = false;
+  int vio_degeneracy_relaxed_min_retrieve_points_ = 5;
+  int vio_degeneracy_relaxed_min_occupied_good_tiles_ = 4;
+  double vio_degeneracy_relaxed_min_good_tile_ratio_ = 0.60;
+  double vio_degeneracy_relaxed_min_horizontal_coverage_ = 0.40;
+  double vio_degeneracy_relaxed_min_vertical_coverage_ = 0.40;
+  double vio_degeneracy_visual_position_scale_ = 0.05;
+  double vio_degeneracy_visual_max_position_step_m_ = 0.003;
+  bool vio_visual_reference_refresh_en_ = false;
+  int vio_visual_reference_refresh_max_age_frames_ = 30;
+  int vio_visual_reference_refresh_min_tracked_points_ = 8;
+  int vio_visual_reference_refresh_min_occupied_good_tiles_ = 4;
+  double vio_visual_reference_refresh_min_horizontal_coverage_ = 0.30;
+  double vio_visual_reference_refresh_min_vertical_coverage_ = 0.30;
+  int vio_visual_reference_refresh_max_per_frame_ = 30;
   int vio_min_update_meas_ = 900;
   int vio_low_track_force_update_stride_ = 0;
   int vio_low_track_force_min_points_ = 8;
@@ -205,11 +230,22 @@ public:
   double vio_visual_update_max_acc_bias_increment_mps2_ = 0.03;
   double vio_visual_update_max_gyro_bias_increment_rps_ = 0.005;
   double vio_visual_update_normalized_nis_max_ = 0.0;
+  bool vio_ncc_en_ = false;
+  double vio_ncc_threshold_ = 0.4;
+  bool vio_visual_robust_kernel_en_ = true;
+  double vio_visual_robust_delta_ = 20.0;
+  bool vio_visual_observability_gate_en_ = true;
+  double vio_visual_observability_relative_eigen_threshold_ = 0.02;
+  double vio_visual_observability_absolute_eigen_threshold_ = 0.0;
   bool vio_image_quality_gate_en_ = false;
   double vio_image_quality_max_saturated_fraction_ = 0.20;
   double vio_image_quality_max_tile_saturated_fraction_ = 0.35;
   double vio_image_quality_max_dark_fraction_ = 0.98;
   double vio_image_quality_min_intensity_std_ = 6.0;
+  bool vio_image_quality_tile_mask_en_ = false;
+  double vio_image_quality_min_usable_tile_ratio_ = 0.25;
+  double vio_image_quality_min_usable_horizontal_coverage_ = 0.50;
+  double vio_image_quality_min_usable_vertical_coverage_ = 0.50;
   bool vio_visual_patch_quality_gate_en_ = true;
   double vio_visual_patch_max_saturated_fraction_ = 0.10;
   double vio_visual_patch_min_intensity_std_ = 2.0;
@@ -247,7 +283,8 @@ public:
   PointCloudXYZRGB::Ptr pcl_wait_save;
   PointCloudXYZI::Ptr pcl_wait_save_intensity;
 
-  ofstream fout_pre, fout_out, fout_pcd_pos, fout_points, fout_lio_degeneracy;
+  ofstream fout_pre, fout_out, fout_pcd_pos, fout_points, fout_lio_degeneracy,
+      fout_runtime_memory;
 
   V3D euler_cur;
 
@@ -286,6 +323,8 @@ public:
   ros::Publisher pubLaserCloudDynDbg;
   image_transport::Publisher pubImage;
   ros::Publisher mavros_pose_publisher;
+  ros::Publisher pubSubscribersReady;
+  ros::Publisher pubMappingReady;
   std::string raw_backend_odom_topic_ = "/backend/livo_odom_raw";
   std::string raw_backend_odom_frame_id_ = "odom";
   std::string raw_backend_body_frame_id_ = "body";
@@ -364,5 +403,15 @@ public:
   int max_prop_imu_buffer_size_ = 3000;
   int sync_img_buffer_min_size_ = 1;
   double sync_img_lookahead_time_ = 0.0;
+  bool startup_wait_for_sensor_publishers_ = true;
+  int startup_imu_warmup_min_samples_ = 30;
+  double startup_imu_warmup_min_duration_s_ = 0.15;
+  bool startup_require_lidar_frame_ = true;
+  bool startup_require_image_buffer_ = true;
+  bool startup_warmup_announced_ = false;
+  bool mapping_ready_published_ = false;
+  bool runtime_memory_monitor_en_ = true;
+  double runtime_memory_monitor_period_s_ = 1.0;
+  double last_runtime_memory_log_wall_s_ = -1.0;
 };
 #endif

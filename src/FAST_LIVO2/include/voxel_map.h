@@ -258,6 +258,7 @@ class VoxelMapManager
 {
 public:
   VoxelMapManager() = default;
+  ~VoxelMapManager() { clearLocalMap(); }
   VoxelMapConfig config_setting_;
   int current_frame_id_ = 0;
   ros::Publisher voxel_map_pub_;

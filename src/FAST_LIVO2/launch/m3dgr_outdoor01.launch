@@ -7,13 +7,14 @@
   <arg name="use_sim_time" default="true" />
 
   <arg name="bag"
-       default="/media/gulu/一只沙糖桔/Outdoor01/Outdoor01.bag" />
+       default="/media/gulu/Data/数据集/Outdoor01/Outdoor01.bag" />
   <arg name="bag_start" default="0.0" />
 
   <!-- GNSS融合第一次测试建议使用1.0，不要先用3倍速 -->
-  <arg name="bag_rate" default="1.0" />
+  <arg name="bag_rate" default="3.0" />
   <arg name="bag_delay" default="2.0" />
   <arg name="bag_queue" default="10000" />
+  <arg name="img_time_offset" default="0.0" />
 
   <arg name="debug_prefix" default="" />
 
@@ -44,6 +45,8 @@
   <!-- ==================== FAST-LIVO2配置 ==================== -->
   <rosparam command="load"
             file="$(find fast_livo)/config/m3dgr/mid360.yaml" />
+  <param name="/time_offset/img_time_offset"
+         value="$(arg img_time_offset)" />
 
   <param name="/bag_start_offset" value="$(arg bag_start)" />
 

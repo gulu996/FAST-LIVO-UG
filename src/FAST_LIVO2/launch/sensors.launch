@@ -14,6 +14,7 @@
     <arg name="msg_frame_id" default="livox_frame"/>
     <arg name="lidar_bag" default="true"/>
     <arg name="imu_bag" default="true"/>
+    <arg name="wait_for_fast_livo" default="true"/>
     <!-- user configure parameters for ros end--> 
 
     <param name="xfer_format" value="$(arg xfer_format)"/>
@@ -28,9 +29,17 @@
     <param name="enable_lidar_bag" type="bool" value="$(arg lidar_bag)"/>
     <param name="enable_imu_bag" type="bool" value="$(arg imu_bag)"/>
 
-    <node name="livox_lidar_publisher2" pkg="livox_ros_driver2"
-          type="livox_ros_driver2_node" required="true"
-          output="screen" args="$(arg cmdline_arg)"/>
+    <group if="$(arg wait_for_fast_livo)">
+        <node name="livox_lidar_publisher2" pkg="livox_ros_driver2"
+              type="livox_ros_driver2_node" required="true"
+              launch-prefix="$(find fast_livo)/scripts/wait_for_fast_livo_ready.sh"
+              output="screen" args="$(arg cmdline_arg)"/>
+    </group>
+    <group unless="$(arg wait_for_fast_livo)">
+        <node name="livox_lidar_publisher2" pkg="livox_ros_driver2"
+              type="livox_ros_driver2_node" required="true"
+              output="screen" args="$(arg cmdline_arg)"/>
+    </group>
 
     <group if="$(arg rosbag_enable)">
         <node pkg="rosbag" type="record" name="record" output="screen"
@@ -38,14 +47,19 @@
     </group>
 
     <!-- ==================== 相机节点配置 ==================== -->
-    <node 
-        pkg="mvs_ros_driver"
-        type="grabImgWithTrigger"
-        name="mvs_camera_trigger"
-        args="$(find mvs_ros_driver)/config/left_camera_trigger.yaml"
-        respawn="true"
-        output="screen"
-    />
+    <group if="$(arg wait_for_fast_livo)">
+        <node pkg="mvs_ros_driver" type="grabImgWithTrigger"
+              name="mvs_camera_trigger"
+              args="$(find mvs_ros_driver)/config/left_camera_trigger.yaml"
+              launch-prefix="$(find fast_livo)/scripts/wait_for_fast_livo_ready.sh"
+              respawn="true" output="screen"/>
+    </group>
+    <group unless="$(arg wait_for_fast_livo)">
+        <node pkg="mvs_ros_driver" type="grabImgWithTrigger"
+              name="mvs_camera_trigger"
+              args="$(find mvs_ros_driver)/config/left_camera_trigger.yaml"
+              respawn="true" output="screen"/>
+    </group>
     
     <!-- 注意：rviz节点通常只需启动一个 -->
     <node 

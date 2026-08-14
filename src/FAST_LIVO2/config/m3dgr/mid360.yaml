@@ -48,7 +48,7 @@ extrin_calib:
  
 time_offset: 
   imu_time_offset: 0.0
-  img_time_offset: 0.1
+  img_time_offset: 0.0
   exposure_time_init: 0.0
 
 preprocess:
@@ -60,7 +60,14 @@ preprocess:
 
 vio:
   max_iterations: 5 # 提高视觉EKF迭代次数，优先把可用帧跑起来
-  outlier_threshold: 1000 # 78 100 156 #100 200 500 700 infinite
+  outlier_threshold: 1000 # mean squared intensity error per patch pixel; retained until CSV calibration
+  ncc_en: true # NCC complements, rather than replaces, the photometric error gate
+  ncc_threshold: 0.40
+  visual_robust_kernel_en: true # patch-level Huber weight for correlated pixel residuals
+  visual_robust_delta: 20.0 # intensity residual units (RMS per patch)
+  visual_observability_gate_en: true
+  visual_observability_relative_eigen_threshold: 0.02
+  visual_observability_absolute_eigen_threshold: 0.0
   visual_map_prune_en: true
   visual_map_max_voxels: 1800 # 视觉体素硬上限；到上限后淘汰最早的非当前子图体素
   visual_map_max_points_per_voxel: 10 # 每个视觉体素最多保留点数；满后用新点替换更早的点
@@ -68,6 +75,27 @@ vio:
   visual_map_max_add_per_frame: 300 # 控制单帧新增点数量，适合Jetson长时间运行
   visual_map_min_shi_tomasi_score: 8.0 # 提高角点质量阈值，低质量纹理不轻易加入视觉地图
   min_retrieve_points: 30 # 至少跟踪到足够视觉点才进入视觉EKF，坏图/低纹理帧尽量跳过
+  visual_spatial_coverage_gate_en: true
+  relaxed_min_retrieve_points: 15
+  relaxed_min_occupied_good_tiles: 6
+  relaxed_min_good_tile_ratio: 0.50
+  relaxed_min_horizontal_coverage: 0.50
+  relaxed_min_vertical_coverage: 0.50
+  degeneracy_relaxed_track_gate_en: false # Outdoor01已由专用15点guarded-relaxed覆盖
+  degeneracy_relaxed_min_retrieve_points: 5
+  degeneracy_relaxed_min_occupied_good_tiles: 4
+  degeneracy_relaxed_min_good_tile_ratio: 0.60
+  degeneracy_relaxed_min_horizontal_coverage: 0.40
+  degeneracy_relaxed_min_vertical_coverage: 0.40
+  degeneracy_visual_position_scale: 0.05
+  degeneracy_visual_max_position_step_m: 0.003
+  visual_reference_refresh_en: true
+  visual_reference_refresh_max_age_frames: 30
+  visual_reference_refresh_min_tracked_points: 8
+  visual_reference_refresh_min_occupied_good_tiles: 4
+  visual_reference_refresh_min_horizontal_coverage: 0.30
+  visual_reference_refresh_min_vertical_coverage: 0.30
+  visual_reference_refresh_max_per_frame: 30
   min_update_meas: 500 # 提高视觉残差数量门限，观测太少时只检索/建图，不更新状态
   low_track_force_update_stride: 0 # 关闭低跟踪强制VIO，避免坏图像靠少量点硬更新
   low_track_force_min_points: 12 # 备用参数；low_track_force_update_stride=0时不生效
@@ -80,11 +108,19 @@ vio:
   visual_update_max_lateral_m: 0.08 # 垂直于速度方向的视觉修正硬上限
   visual_update_max_lateral_ratio: 0.35 # 横向修正不能超过当前帧预测前进距离的比例
   visual_update_max_exposure_delta: 0.30 # 曝光估计突变较大时回滚视觉更新
+  visual_update_max_velocity_increment_mps: 0.15
+  visual_update_max_acc_bias_increment_mps2: 0.03
+  visual_update_max_gyro_bias_increment_rps: 0.005
+  visual_update_normalized_nis_max: 2.0
   image_quality_gate_en: true # 打开整帧质量门，过曝/过暗/低对比图像直接跳过VIO更新
   image_quality_max_saturated_fraction: 0.10 # 全图过曝比例超过该值时跳过VIO
   image_quality_max_tile_saturated_fraction: 0.25 # 局部区域过曝严重时跳过VIO，适合隧道出口强光
   image_quality_max_dark_fraction: 0.95 # 灰度<=阈值的像素比例超过该值认为画面近乎全黑
   image_quality_min_intensity_std: 10.0 # 灰度标准差低于该值认为低纹理/低对比
+  image_quality_tile_mask_en: true
+  image_quality_min_usable_tile_ratio: 0.25
+  image_quality_min_usable_horizontal_coverage: 0.50
+  image_quality_min_usable_vertical_coverage: 0.50
   visual_patch_quality_gate_en: true # 对单个视觉patch做过曝/低纹理过滤，处理出口刚出现时面积小、全图门限尚未触发的纯白区域
   visual_patch_max_saturated_fraction: 0.10 # patch内过曝过多时不参与跟踪/建图
   visual_patch_min_intensity_std: 4.0 # patch灰度标准差过低时不参与跟踪/建图
@@ -288,6 +324,12 @@ debug:
   print_console_timing_stride: 1
   vio_console_timing_print_en: true
   vio_console_timing_print_stride: 1
+
+diagnostics:
+  console_interval_frames: 20
+  csv_flush_interval_rows: 100
+  runtime_memory_monitor_en: true
+  runtime_memory_monitor_period_s: 1.0
 
 evo:
   seq_name: "CBD_Building_01"

@@ -18,6 +18,7 @@ which is included as part of this source code package.
 #include <cctype>
 #include <filesystem>
 #include <iomanip>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <netinet/in.h>
@@ -67,6 +68,14 @@ std::string makeRunOutputDir(const std::string &base_dir, bool &ready)
   }
   ready = true;
   return ensureTrailingSlash(run_dir);
+}
+
+size_t countOctreeNodes(const VoxelOctoTree *node)
+{
+  if (node == nullptr) return 0;
+  size_t count = 1;
+  for (const VoxelOctoTree *child : node->leaves_) count += countOctreeNodes(child);
+  return count;
 }
 }
 
@@ -120,6 +129,7 @@ LIVMapper::LIVMapper(ros::NodeHandle &nh)
 LIVMapper::~LIVMapper()
 {
   if (fout_lio_degeneracy.is_open()) fout_lio_degeneracy.flush();
+  if (fout_runtime_memory.is_open()) fout_runtime_memory.flush();
   if (gnss_manager) gnss_manager->shutdown();
   if (uwb_manager) uwb_manager->shutdown();
   if (udp_socket_fd_ >= 0)
@@ -192,6 +202,55 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   vio_max_state_update_rot_deg_ = 0.8;
   vio_max_state_update_trans_m_ = 0.08;
   nh.param<int>("vio/min_retrieve_points", vio_min_retrieve_points_, 45);
+  nh.param<bool>("vio/visual_spatial_coverage_gate_en", vio_visual_spatial_coverage_gate_en_, false);
+  nh.param<int>("vio/relaxed_min_retrieve_points", vio_relaxed_min_retrieve_points_, 20);
+  nh.param<int>("vio/relaxed_min_occupied_good_tiles", vio_relaxed_min_occupied_good_tiles_, 8);
+  nh.param<double>("vio/relaxed_min_good_tile_ratio", vio_relaxed_min_good_tile_ratio_, 0.85);
+  nh.param<double>("vio/relaxed_min_horizontal_coverage", vio_relaxed_min_horizontal_coverage_, 0.50);
+  nh.param<double>("vio/relaxed_min_vertical_coverage", vio_relaxed_min_vertical_coverage_, 0.50);
+  nh.param<bool>("vio/degeneracy_relaxed_track_gate_en", vio_degeneracy_relaxed_track_gate_en_, false);
+  nh.param<int>("vio/degeneracy_relaxed_min_retrieve_points", vio_degeneracy_relaxed_min_retrieve_points_, 5);
+  nh.param<int>("vio/degeneracy_relaxed_min_occupied_good_tiles", vio_degeneracy_relaxed_min_occupied_good_tiles_, 4);
+  nh.param<double>("vio/degeneracy_relaxed_min_good_tile_ratio", vio_degeneracy_relaxed_min_good_tile_ratio_, 0.60);
+  nh.param<double>("vio/degeneracy_relaxed_min_horizontal_coverage", vio_degeneracy_relaxed_min_horizontal_coverage_, 0.40);
+  nh.param<double>("vio/degeneracy_relaxed_min_vertical_coverage", vio_degeneracy_relaxed_min_vertical_coverage_, 0.40);
+  nh.param<double>("vio/degeneracy_visual_position_scale", vio_degeneracy_visual_position_scale_, 0.05);
+  nh.param<double>("vio/degeneracy_visual_max_position_step_m", vio_degeneracy_visual_max_position_step_m_, 0.003);
+  nh.param<bool>("vio/visual_reference_refresh_en", vio_visual_reference_refresh_en_, false);
+  nh.param<int>("vio/visual_reference_refresh_max_age_frames", vio_visual_reference_refresh_max_age_frames_, 30);
+  nh.param<int>("vio/visual_reference_refresh_min_tracked_points", vio_visual_reference_refresh_min_tracked_points_, 8);
+  nh.param<int>("vio/visual_reference_refresh_min_occupied_good_tiles", vio_visual_reference_refresh_min_occupied_good_tiles_, 4);
+  nh.param<double>("vio/visual_reference_refresh_min_horizontal_coverage", vio_visual_reference_refresh_min_horizontal_coverage_, 0.30);
+  nh.param<double>("vio/visual_reference_refresh_min_vertical_coverage", vio_visual_reference_refresh_min_vertical_coverage_, 0.30);
+  nh.param<int>("vio/visual_reference_refresh_max_per_frame", vio_visual_reference_refresh_max_per_frame_, 30);
+  vio_relaxed_min_retrieve_points_ = std::max(1, vio_relaxed_min_retrieve_points_);
+  vio_relaxed_min_occupied_good_tiles_ = std::max(1, vio_relaxed_min_occupied_good_tiles_);
+  vio_relaxed_min_good_tile_ratio_ =
+      std::min(1.0, std::max(0.0, vio_relaxed_min_good_tile_ratio_));
+  vio_relaxed_min_horizontal_coverage_ =
+      std::min(1.0, std::max(0.0, vio_relaxed_min_horizontal_coverage_));
+  vio_relaxed_min_vertical_coverage_ =
+      std::min(1.0, std::max(0.0, vio_relaxed_min_vertical_coverage_));
+  vio_degeneracy_relaxed_min_retrieve_points_ = std::max(1, vio_degeneracy_relaxed_min_retrieve_points_);
+  vio_degeneracy_relaxed_min_occupied_good_tiles_ = std::max(1, vio_degeneracy_relaxed_min_occupied_good_tiles_);
+  vio_degeneracy_relaxed_min_good_tile_ratio_ =
+      std::min(1.0, std::max(0.0, vio_degeneracy_relaxed_min_good_tile_ratio_));
+  vio_degeneracy_relaxed_min_horizontal_coverage_ =
+      std::min(1.0, std::max(0.0, vio_degeneracy_relaxed_min_horizontal_coverage_));
+  vio_degeneracy_relaxed_min_vertical_coverage_ =
+      std::min(1.0, std::max(0.0, vio_degeneracy_relaxed_min_vertical_coverage_));
+  vio_degeneracy_visual_position_scale_ =
+      std::min(1.0, std::max(0.0, vio_degeneracy_visual_position_scale_));
+  vio_degeneracy_visual_max_position_step_m_ =
+      std::max(0.0, vio_degeneracy_visual_max_position_step_m_);
+  vio_visual_reference_refresh_max_age_frames_ = std::max(1, vio_visual_reference_refresh_max_age_frames_);
+  vio_visual_reference_refresh_min_tracked_points_ = std::max(1, vio_visual_reference_refresh_min_tracked_points_);
+  vio_visual_reference_refresh_min_occupied_good_tiles_ = std::max(1, vio_visual_reference_refresh_min_occupied_good_tiles_);
+  vio_visual_reference_refresh_min_horizontal_coverage_ =
+      std::min(1.0, std::max(0.0, vio_visual_reference_refresh_min_horizontal_coverage_));
+  vio_visual_reference_refresh_min_vertical_coverage_ =
+      std::min(1.0, std::max(0.0, vio_visual_reference_refresh_min_vertical_coverage_));
+  vio_visual_reference_refresh_max_per_frame_ = std::max(1, vio_visual_reference_refresh_max_per_frame_);
   nh.param<int>("vio/min_update_meas", vio_min_update_meas_, 900);
   nh.param<int>("vio/low_track_force_update_stride", vio_low_track_force_update_stride_, 0);
   nh.param<int>("vio/low_track_force_min_points", vio_low_track_force_min_points_, 8);
@@ -212,6 +271,15 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
                    vio_visual_update_max_gyro_bias_increment_rps_, 0.005);
   nh.param<double>("vio/visual_update_normalized_nis_max",
                    vio_visual_update_normalized_nis_max_, 0.0);
+  nh.param<bool>("vio/ncc_en", vio_ncc_en_, false);
+  nh.param<double>("vio/ncc_threshold", vio_ncc_threshold_, 0.4);
+  nh.param<bool>("vio/visual_robust_kernel_en", vio_visual_robust_kernel_en_, true);
+  nh.param<double>("vio/visual_robust_delta", vio_visual_robust_delta_, 20.0);
+  nh.param<bool>("vio/visual_observability_gate_en", vio_visual_observability_gate_en_, true);
+  nh.param<double>("vio/visual_observability_relative_eigen_threshold",
+                   vio_visual_observability_relative_eigen_threshold_, 0.02);
+  nh.param<double>("vio/visual_observability_absolute_eigen_threshold",
+                   vio_visual_observability_absolute_eigen_threshold_, 0.0);
   nh.param<int>("diagnostics/console_interval_frames", diagnostics_console_interval_frames_, 20);
   nh.param<int>("diagnostics/csv_flush_interval_rows", diagnostics_csv_flush_interval_rows_, 100);
   diagnostics_console_interval_frames_ = std::max(1, diagnostics_console_interval_frames_);
@@ -221,6 +289,18 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<double>("vio/image_quality_max_tile_saturated_fraction", vio_image_quality_max_tile_saturated_fraction_, 0.35);
   nh.param<double>("vio/image_quality_max_dark_fraction", vio_image_quality_max_dark_fraction_, 0.98);
   nh.param<double>("vio/image_quality_min_intensity_std", vio_image_quality_min_intensity_std_, 6.0);
+  nh.param<bool>("vio/image_quality_tile_mask_en", vio_image_quality_tile_mask_en_, false);
+  nh.param<double>("vio/image_quality_min_usable_tile_ratio", vio_image_quality_min_usable_tile_ratio_, 0.25);
+  nh.param<double>("vio/image_quality_min_usable_horizontal_coverage",
+                   vio_image_quality_min_usable_horizontal_coverage_, 0.50);
+  nh.param<double>("vio/image_quality_min_usable_vertical_coverage",
+                   vio_image_quality_min_usable_vertical_coverage_, 0.50);
+  vio_image_quality_min_usable_tile_ratio_ =
+      std::min(1.0, std::max(0.0, vio_image_quality_min_usable_tile_ratio_));
+  vio_image_quality_min_usable_horizontal_coverage_ =
+      std::min(1.0, std::max(0.0, vio_image_quality_min_usable_horizontal_coverage_));
+  vio_image_quality_min_usable_vertical_coverage_ =
+      std::min(1.0, std::max(0.0, vio_image_quality_min_usable_vertical_coverage_));
   nh.param<bool>("vio/visual_patch_quality_gate_en", vio_visual_patch_quality_gate_en_, true);
   nh.param<double>("vio/visual_patch_max_saturated_fraction", vio_visual_patch_max_saturated_fraction_, 0.10);
   nh.param<double>("vio/visual_patch_min_intensity_std", vio_visual_patch_min_intensity_std_, 2.0);
@@ -405,6 +485,23 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   runtime_over_budget_trigger_frames_ = std::max(1, runtime_over_budget_trigger_frames_);
   runtime_recover_trigger_frames_ = std::max(1, runtime_recover_trigger_frames_);
 
+  nh.param<bool>("startup/wait_for_sensor_publishers", startup_wait_for_sensor_publishers_, true);
+  nh.param<int>("startup/imu_warmup_min_samples", startup_imu_warmup_min_samples_, 30);
+  nh.param<double>("startup/imu_warmup_min_duration_s", startup_imu_warmup_min_duration_s_, 0.15);
+  nh.param<bool>("startup/require_lidar_frame", startup_require_lidar_frame_, true);
+  nh.param<bool>("startup/require_image_buffer", startup_require_image_buffer_, true);
+  nh.param<bool>("diagnostics/runtime_memory_monitor_en", runtime_memory_monitor_en_, true);
+  nh.param<double>("diagnostics/runtime_memory_monitor_period_s", runtime_memory_monitor_period_s_, 1.0);
+  startup_imu_warmup_min_samples_ = std::max(1, startup_imu_warmup_min_samples_);
+  startup_imu_warmup_min_duration_s_ = std::max(0.0, startup_imu_warmup_min_duration_s_);
+  runtime_memory_monitor_period_s_ = std::max(0.1, runtime_memory_monitor_period_s_);
+  vio_ncc_threshold_ = std::max(-1.0, std::min(1.0, vio_ncc_threshold_));
+  vio_visual_robust_delta_ = std::max(1e-6, vio_visual_robust_delta_);
+  vio_visual_observability_relative_eigen_threshold_ =
+      std::max(0.0, std::min(1.0, vio_visual_observability_relative_eigen_threshold_));
+  vio_visual_observability_absolute_eigen_threshold_ =
+      std::max(0.0, vio_visual_observability_absolute_eigen_threshold_);
+
   p_pre->blind_sqr = p_pre->blind * p_pre->blind;
 }
 
@@ -498,6 +595,117 @@ void LIVMapper::updateRuntimeGuard(double frame_time_s)
   }
 }
 
+bool LIVMapper::startupWarmupReady()
+{
+  if (!startup_wait_for_sensor_publishers_) return true;
+  if (startup_warmup_announced_) return true;
+
+  const bool lidar_ready = !lidar_en || !startup_require_lidar_frame_ ||
+                           !lid_raw_data_buffer.empty();
+  bool imu_ready = !imu_en;
+  double imu_duration_s = 0.0;
+  if (imu_en && !imu_buffer.empty())
+  {
+    double min_stamp = std::numeric_limits<double>::infinity();
+    double max_stamp = -std::numeric_limits<double>::infinity();
+    for (const auto &imu : imu_buffer)
+    {
+      if (!imu) continue;
+      const double stamp = imu->header.stamp.toSec();
+      min_stamp = std::min(min_stamp, stamp);
+      max_stamp = std::max(max_stamp, stamp);
+    }
+    if (std::isfinite(min_stamp) && std::isfinite(max_stamp))
+      imu_duration_s = std::max(0.0, max_stamp - min_stamp);
+    imu_ready = static_cast<int>(imu_buffer.size()) >= startup_imu_warmup_min_samples_ &&
+                imu_duration_s >= startup_imu_warmup_min_duration_s_;
+  }
+
+  bool image_ready = !img_en || !startup_require_image_buffer_;
+  if (img_en && startup_require_image_buffer_)
+  {
+    image_ready = static_cast<int>(img_buffer.size()) >= sync_img_buffer_min_size_;
+    if (image_ready && sync_img_lookahead_time_ > 0.0 && img_time_buffer.size() >= 2)
+      image_ready = img_time_buffer.back() - img_time_buffer.front() >= sync_img_lookahead_time_;
+  }
+
+  const bool ready = lidar_ready && imu_ready && image_ready;
+  if (ready && !startup_warmup_announced_)
+  {
+    startup_warmup_announced_ = true;
+    ROS_INFO("[STARTUP] SENSOR_WARMUP_READY imu_samples=%zu imu_duration=%.3f s lidar_frames=%zu image_frames=%zu",
+             imu_buffer.size(), imu_duration_s, lid_raw_data_buffer.size(), img_buffer.size());
+  }
+  else if (!ready)
+  {
+    ROS_INFO_THROTTLE(1.0,
+                      "[STARTUP] WAIT_SENSOR_DATA imu=%zu/%d duration=%.3f/%.3f lidar=%zu image=%zu/%d",
+                      imu_buffer.size(), startup_imu_warmup_min_samples_, imu_duration_s,
+                      startup_imu_warmup_min_duration_s_, lid_raw_data_buffer.size(),
+                      img_buffer.size(), img_en && startup_require_image_buffer_ ? sync_img_buffer_min_size_ : 0);
+  }
+  return ready;
+}
+
+void LIVMapper::updateMappingReady()
+{
+  if (mapping_ready_published_) return;
+  const bool imu_ready = !imu_en || !p_imu->imu_need_init;
+  const bool lidar_ready = !lidar_en || lidar_map_inited;
+  if (!imu_ready || !lidar_ready) return;
+
+  std_msgs::Bool status;
+  status.data = true;
+  pubMappingReady.publish(status);
+  mapping_ready_published_ = true;
+  ROS_INFO("[STARTUP] MAPPING_READY imu_initialized=%d lidar_map_initialized=%d mode=%d",
+           static_cast<int>(imu_ready), static_cast<int>(lidar_ready),
+           static_cast<int>(slam_mode_));
+}
+
+void LIVMapper::logRuntimeMemory()
+{
+  if (!runtime_memory_monitor_en_ || !fout_runtime_memory.is_open()) return;
+  const double wall_time_s = ros::WallTime::now().toSec();
+  if (last_runtime_memory_log_wall_s_ >= 0.0 &&
+      wall_time_s - last_runtime_memory_log_wall_s_ < runtime_memory_monitor_period_s_)
+    return;
+  last_runtime_memory_log_wall_s_ = wall_time_s;
+
+  double rss_mb = std::numeric_limits<double>::quiet_NaN();
+  std::ifstream status("/proc/self/status");
+  std::string key;
+  while (status >> key)
+  {
+    if (key == "VmRSS:")
+    {
+      double rss_kb = 0.0;
+      std::string unit;
+      status >> rss_kb >> unit;
+      rss_mb = rss_kb / 1024.0;
+      break;
+    }
+    status.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+  }
+
+  const auto &lio_voxel_map = voxelmap_manager->voxel_map_;
+  size_t octree_nodes = 0;
+  for (const auto &entry : lio_voxel_map) octree_nodes += countOctreeNodes(entry.second);
+  const size_t visual_voxels = vio_manager ? vio_manager->feat_map.size() : 0;
+  const size_t visual_points = vio_manager ? vio_manager->getVisualPointCount() : 0;
+  const size_t pcd_cache_points =
+      (pcl_wait_save ? pcl_wait_save->size() : 0) +
+      (pcl_wait_save_intensity ? pcl_wait_save_intensity->size() : 0);
+  const double sensor_time_s = LidarMeasures.last_lio_update_time;
+  fout_runtime_memory << std::fixed << std::setprecision(6)
+                      << wall_time_s << ',' << sensor_time_s << ',' << rss_mb << ','
+                      << lio_voxel_map.size() << ',' << octree_nodes << ','
+                      << visual_voxels << ',' << visual_points << ',' << pcd_cache_points << ','
+                      << img_buffer.size() << ',' << imu_buffer.size() << ','
+                      << lid_raw_data_buffer.size() << '\n';
+  fout_runtime_memory.flush();
+}
+
 void LIVMapper::initializeComponents(ros::NodeHandle &nh) 
 {
   validateVoxelLeafOrThrow(filter_size_surf_min, "preprocess/filter_size_surf");
@@ -535,6 +743,27 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
   vio_manager->grid_n_height = grid_n_height;
   vio_manager->patch_pyrimid_level = patch_pyrimid_level;
   vio_manager->min_retrieve_points = vio_min_retrieve_points_;
+  vio_manager->visual_spatial_coverage_gate_en = vio_visual_spatial_coverage_gate_en_;
+  vio_manager->relaxed_min_retrieve_points = vio_relaxed_min_retrieve_points_;
+  vio_manager->relaxed_min_occupied_good_tiles = vio_relaxed_min_occupied_good_tiles_;
+  vio_manager->relaxed_min_good_tile_ratio = vio_relaxed_min_good_tile_ratio_;
+  vio_manager->relaxed_min_horizontal_coverage = vio_relaxed_min_horizontal_coverage_;
+  vio_manager->relaxed_min_vertical_coverage = vio_relaxed_min_vertical_coverage_;
+  vio_manager->degeneracy_relaxed_track_gate_en = vio_degeneracy_relaxed_track_gate_en_;
+  vio_manager->degeneracy_relaxed_min_retrieve_points = vio_degeneracy_relaxed_min_retrieve_points_;
+  vio_manager->degeneracy_relaxed_min_occupied_good_tiles = vio_degeneracy_relaxed_min_occupied_good_tiles_;
+  vio_manager->degeneracy_relaxed_min_good_tile_ratio = vio_degeneracy_relaxed_min_good_tile_ratio_;
+  vio_manager->degeneracy_relaxed_min_horizontal_coverage = vio_degeneracy_relaxed_min_horizontal_coverage_;
+  vio_manager->degeneracy_relaxed_min_vertical_coverage = vio_degeneracy_relaxed_min_vertical_coverage_;
+  vio_manager->degeneracy_visual_position_scale = vio_degeneracy_visual_position_scale_;
+  vio_manager->degeneracy_visual_max_position_step_m = vio_degeneracy_visual_max_position_step_m_;
+  vio_manager->visual_reference_refresh_en = vio_visual_reference_refresh_en_;
+  vio_manager->visual_reference_refresh_max_age_frames = vio_visual_reference_refresh_max_age_frames_;
+  vio_manager->visual_reference_refresh_min_tracked_points = vio_visual_reference_refresh_min_tracked_points_;
+  vio_manager->visual_reference_refresh_min_occupied_good_tiles = vio_visual_reference_refresh_min_occupied_good_tiles_;
+  vio_manager->visual_reference_refresh_min_horizontal_coverage = vio_visual_reference_refresh_min_horizontal_coverage_;
+  vio_manager->visual_reference_refresh_min_vertical_coverage = vio_visual_reference_refresh_min_vertical_coverage_;
+  vio_manager->visual_reference_refresh_max_per_frame = vio_visual_reference_refresh_max_per_frame_;
   vio_manager->min_update_meas = vio_min_update_meas_;
   vio_manager->low_track_force_update_stride = vio_low_track_force_update_stride_;
   vio_manager->low_track_force_min_points = vio_low_track_force_min_points_;
@@ -556,12 +785,27 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
   vio_manager->visual_update_max_acc_bias_increment_mps2 = vio_visual_update_max_acc_bias_increment_mps2_;
   vio_manager->visual_update_max_gyro_bias_increment_rps = vio_visual_update_max_gyro_bias_increment_rps_;
   vio_manager->visual_update_normalized_nis_max = vio_visual_update_normalized_nis_max_;
+  vio_manager->ncc_en = vio_ncc_en_;
+  vio_manager->ncc_thre = vio_ncc_threshold_;
+  vio_manager->visual_robust_kernel_en = vio_visual_robust_kernel_en_;
+  vio_manager->visual_robust_delta = vio_visual_robust_delta_;
+  vio_manager->visual_observability_gate_en = vio_visual_observability_gate_en_;
+  vio_manager->visual_observability_relative_eigen_threshold =
+      vio_visual_observability_relative_eigen_threshold_;
+  vio_manager->visual_observability_absolute_eigen_threshold =
+      vio_visual_observability_absolute_eigen_threshold_;
   vio_manager->diagnostics_console_interval_frames = diagnostics_console_interval_frames_;
   vio_manager->image_quality_gate_en = vio_image_quality_gate_en_;
   vio_manager->image_quality_max_saturated_fraction = vio_image_quality_max_saturated_fraction_;
   vio_manager->image_quality_max_tile_saturated_fraction = vio_image_quality_max_tile_saturated_fraction_;
   vio_manager->image_quality_max_dark_fraction = vio_image_quality_max_dark_fraction_;
   vio_manager->image_quality_min_intensity_std = vio_image_quality_min_intensity_std_;
+  vio_manager->image_quality_tile_mask_en = vio_image_quality_tile_mask_en_;
+  vio_manager->image_quality_min_usable_tile_ratio = vio_image_quality_min_usable_tile_ratio_;
+  vio_manager->image_quality_min_usable_horizontal_coverage =
+      vio_image_quality_min_usable_horizontal_coverage_;
+  vio_manager->image_quality_min_usable_vertical_coverage =
+      vio_image_quality_min_usable_vertical_coverage_;
   vio_manager->visual_patch_quality_gate_en = vio_visual_patch_quality_gate_en_;
   vio_manager->visual_patch_max_saturated_fraction = vio_visual_patch_max_saturated_fraction_;
   vio_manager->visual_patch_min_intensity_std = vio_visual_patch_min_intensity_std_;
@@ -590,6 +834,32 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
            vio_visual_update_max_acc_bias_increment_mps2_,
            vio_visual_update_max_gyro_bias_increment_rps_,
            vio_visual_update_normalized_nis_max_);
+  ROS_INFO("[VIO_QUALITY_CONFIG] ncc=%d threshold=%.3f robust_huber=%d delta=%.3f observability=%d relative_eigen=%.6f absolute_eigen=%.6f",
+           static_cast<int>(vio_ncc_en_), vio_ncc_threshold_,
+           static_cast<int>(vio_visual_robust_kernel_en_), vio_visual_robust_delta_,
+           static_cast<int>(vio_visual_observability_gate_en_),
+           vio_visual_observability_relative_eigen_threshold_,
+           vio_visual_observability_absolute_eigen_threshold_);
+  ROS_INFO("[VIO_TILE_MASK_CONFIG] enable=%d grid=%dx%d min_good_ratio=%.3f min_coverage=%.3f/%.3f",
+           static_cast<int>(vio_image_quality_tile_mask_en_),
+           vio_image_quality_tile_rows_, vio_image_quality_tile_cols_,
+           vio_image_quality_min_usable_tile_ratio_,
+           vio_image_quality_min_usable_horizontal_coverage_,
+           vio_image_quality_min_usable_vertical_coverage_);
+  ROS_INFO("[VIO_SPATIAL_GATE_CONFIG] enable=%d normal_min=%d relaxed_min=%d occupied_tiles=%d good_ratio=%.3f coverage=%.3f/%.3f",
+           static_cast<int>(vio_visual_spatial_coverage_gate_en_), vio_min_retrieve_points_,
+           vio_relaxed_min_retrieve_points_, vio_relaxed_min_occupied_good_tiles_,
+           vio_relaxed_min_good_tile_ratio_,
+           vio_relaxed_min_horizontal_coverage_, vio_relaxed_min_vertical_coverage_);
+  ROS_INFO("[VIO_DEGENERACY_GATE_CONFIG] enable=%d relaxed_min=%d occupied_tiles=%d good_ratio=%.3f coverage=%.3f/%.3f position_scale=%.3f max_step=%.4f m",
+           static_cast<int>(vio_degeneracy_relaxed_track_gate_en_),
+           vio_degeneracy_relaxed_min_retrieve_points_,
+           vio_degeneracy_relaxed_min_occupied_good_tiles_,
+           vio_degeneracy_relaxed_min_good_tile_ratio_,
+           vio_degeneracy_relaxed_min_horizontal_coverage_,
+           vio_degeneracy_relaxed_min_vertical_coverage_,
+           vio_degeneracy_visual_position_scale_,
+           vio_degeneracy_visual_max_position_step_m_);
   initializeUdpReporter();
 
   p_imu->set_extrinsic(extT, extR);
@@ -633,6 +903,15 @@ void LIVMapper::initializeFiles()
   if(save_log_en) fout_pcd_pos.open(save_path + "scans_pos.json", std::ios::out);
   if (save_log_en)
   {
+    if (runtime_memory_monitor_en_)
+    {
+      fout_runtime_memory.open(save_path + "runtime_memory.csv", std::ios::out);
+      if (fout_runtime_memory.is_open())
+      {
+        fout_runtime_memory
+            << "wall_time_s,sensor_time_s,rss_mb,lio_root_voxels,lio_octree_nodes,visual_voxels,visual_points,pcd_cache_points,image_buffer_size,imu_buffer_size,lidar_buffer_size\n";
+      }
+    }
     fout_lio_degeneracy.open(save_path + "lio_degeneracy.csv", std::ios::out);
     if (fout_lio_degeneracy.is_open())
     {
@@ -821,11 +1100,14 @@ void LIVMapper::sendUdpPose(const Eigen::Vector3d &position)
 
 void LIVMapper::initializeSubscribersAndPublishers(ros::NodeHandle &nh, image_transport::ImageTransport &it) 
 {
-  sub_pcl = p_pre->lidar_type == AVIA ? 
-            nh.subscribe(lid_topic, sub_lidar_queue_size_, &LIVMapper::livox_pcl_cbk, this): 
-            nh.subscribe(lid_topic, sub_lidar_queue_size_, &LIVMapper::standard_pcl_cbk, this);
-  sub_imu = nh.subscribe(imu_topic, sub_imu_queue_size_, &LIVMapper::imu_cbk, this);
-  sub_img = nh.subscribe(img_topic, sub_img_queue_size_, &LIVMapper::img_cbk, this);
+  if (lidar_en)
+  {
+    sub_pcl = p_pre->lidar_type == AVIA ?
+              nh.subscribe(lid_topic, sub_lidar_queue_size_, &LIVMapper::livox_pcl_cbk, this):
+              nh.subscribe(lid_topic, sub_lidar_queue_size_, &LIVMapper::standard_pcl_cbk, this);
+  }
+  if (imu_en) sub_imu = nh.subscribe(imu_topic, sub_imu_queue_size_, &LIVMapper::imu_cbk, this);
+  if (img_en) sub_img = nh.subscribe(img_topic, sub_img_queue_size_, &LIVMapper::img_cbk, this);
   
   pubLaserCloudFullRes = nh.advertise<sensor_msgs::PointCloud2>("/cloud_registered", 100);
   pubNormal = nh.advertise<visualization_msgs::MarkerArray>("visualization_marker", 100);
@@ -854,6 +1136,15 @@ void LIVMapper::initializeSubscribersAndPublishers(ros::NodeHandle &nh, image_tr
   pubImuPropOdom = nh.advertise<nav_msgs::Odometry>("/LIVO2/imu_propagate", 10000);
   imu_prop_timer = nh.createTimer(ros::Duration(0.004), &LIVMapper::imu_prop_callback, this);
   voxelmap_manager->voxel_map_pub_= nh.advertise<visualization_msgs::MarkerArray>("/planes", 10000);
+  pubSubscribersReady = nh.advertise<std_msgs::Bool>("/fast_livo/subscribers_ready", 1, true);
+  pubMappingReady = nh.advertise<std_msgs::Bool>("/fast_livo/mapping_ready", 1, true);
+  std_msgs::Bool status;
+  status.data = false;
+  pubMappingReady.publish(status);
+  status.data = true;
+  pubSubscribersReady.publish(status);
+  ROS_INFO("[STARTUP] SUBSCRIBERS_READY lidar=%d imu=%d image=%d",
+           lidar_en, static_cast<int>(imu_en), img_en);
 }
 
 bool LIVMapper::publishRawBackendOdometry()
@@ -1235,6 +1526,16 @@ V3D LIVMapper::outputPosition() const
 
 void LIVMapper::handleVIO() 
 {
+  const LioUpdateDiagnostics &lio_diagnostics = voxelmap_manager->getLastLioDiagnostics();
+  vio_manager->lidar_degenerated = voxelmap_manager->isLidarDegenerated();
+  vio_manager->lidar_weak_translation_direction_valid =
+      lio_diagnostics.observability.valid &&
+      lio_diagnostics.observability.weak_translation_direction_world.allFinite() &&
+      lio_diagnostics.observability.weak_translation_direction_world.norm() > 1e-6;
+  vio_manager->lidar_weak_translation_direction_world =
+      vio_manager->lidar_weak_translation_direction_valid
+          ? lio_diagnostics.observability.weak_translation_direction_world.normalized()
+          : V3D::Zero();
 
   euler_cur = RotMtoEuler(_state.rot_end);
   fout_pre << std::setw(20) << LidarMeasures.last_lio_update_time - _first_lidar_time << " " << euler_cur.transpose() * 57.3 << " "
@@ -1955,6 +2256,12 @@ void LIVMapper::run()
     const double t1 = omp_get_wtime();
     ros::spinOnce();
     const double t_spin_end = omp_get_wtime();
+    logRuntimeMemory();
+    if (!startupWarmupReady())
+    {
+      rate.sleep();
+      continue;
+    }
     if (!sync_packages(LidarMeasures)) 
     {
       rate.sleep();
@@ -1970,6 +2277,7 @@ void LIVMapper::run()
 
     const EKF_STATE frame_mode = LidarMeasures.lio_vio_flg;
     stateEstimationAndMapping();
+    updateMappingReady();
 
     const double t2 = omp_get_wtime();
     const double frame_time = t2 - t1;

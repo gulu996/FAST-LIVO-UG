@@ -11,8 +11,10 @@ which is included as part of this source code package.
 */
 
 #include "vio.h"
+#include <Eigen/Eigenvalues>
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cmath>
 #include <ctime>
 #include <iomanip>
@@ -157,6 +159,8 @@ VIOManager::VIOManager()
 VIOManager::~VIOManager()
 {
   if (timing_log_file.is_open()) timing_log_file.close();
+  if (visual_patch_quality_file.is_open()) visual_patch_quality_file.close();
+  if (visual_funnel_file.is_open()) visual_funnel_file.close();
   delete visual_submap;
   for (auto& pair : warp_map) delete pair.second;
   warp_map.clear();
@@ -475,6 +479,339 @@ void VIOManager::appendTimingLogLines(const vector<string> &lines)
   }
 }
 
+void VIOManager::logVisualPatchQuality(double photometric_mse, double ncc,
+                                       const char *decision)
+{
+  if (!timing_log_enable || timing_log_dir.empty()) return;
+  if (!visual_patch_quality_file.is_open())
+  {
+    std::string dir = timing_log_dir;
+    if (dir.back() != '/') dir += '/';
+    visual_patch_quality_file.open(dir + "visual_patch_quality.csv", std::ios::out);
+    if (!visual_patch_quality_file.is_open()) return;
+    visual_patch_quality_file << "timestamp,photometric_mse,ncc,decision\n";
+  }
+  visual_patch_quality_file << std::setprecision(12) << current_visual_time << ','
+                            << photometric_mse << ',' << ncc << ','
+                            << (decision ? decision : "unknown") << '\n';
+  if (++visual_patch_quality_pending_rows >= 100)
+  {
+    visual_patch_quality_file.flush();
+    visual_patch_quality_pending_rows = 0;
+  }
+}
+
+bool VIOManager::isPixelInUsableTile(const V2D &px) const
+{
+  if (!image_quality_tile_mask_en || image_quality_usable_tiles.empty()) return true;
+  if (!std::isfinite(px[0]) || !std::isfinite(px[1]) ||
+      image_quality_mask_width <= 0 || image_quality_mask_height <= 0)
+    return false;
+
+  const int tile_rows = std::max(1, image_quality_tile_rows);
+  const int tile_cols = std::max(1, image_quality_tile_cols);
+  // A patch crossing a tile boundary is usable only when every touched tile is
+  // usable, so pixels from a rejected tile never enter a photometric residual.
+  for (const int v : {static_cast<int>(px[1]) - patch_size_half,
+                      static_cast<int>(px[1]) + patch_size_half})
+  {
+    for (const int u : {static_cast<int>(px[0]) - patch_size_half,
+                        static_cast<int>(px[0]) + patch_size_half})
+    {
+      const int col = std::min(tile_cols - 1,
+                               std::max(0, u * tile_cols / image_quality_mask_width));
+      const int row = std::min(tile_rows - 1,
+                               std::max(0, v * tile_rows / image_quality_mask_height));
+      if (image_quality_usable_tiles[row * tile_cols + col] == 0) return false;
+    }
+  }
+  return true;
+}
+
+void VIOManager::updateTrackedSpatialCoverage()
+{
+  last_visual_occupied_good_tiles = 0;
+  last_visual_occupied_tile_ratio = 0.0;
+  last_visual_horizontal_coverage = 0.0;
+  last_visual_vertical_coverage = 0.0;
+  const int tile_rows = std::max(1, image_quality_tile_rows);
+  const int tile_cols = std::max(1, image_quality_tile_cols);
+  tracked_occupied_tiles.assign(tile_rows * tile_cols, 0);
+
+  double min_u = std::numeric_limits<double>::infinity();
+  double max_u = -std::numeric_limits<double>::infinity();
+  double min_v = std::numeric_limits<double>::infinity();
+  double max_v = -std::numeric_limits<double>::infinity();
+  int valid_points = 0;
+  for (const VisualPoint *pt : visual_submap->voxel_points)
+  {
+    if (pt == nullptr) continue;
+    const V2D px = snapPixelForDeterminism(new_frame_->w2c(pt->pos_));
+    if (!new_frame_->cam_->isInFrame(px.cast<int>(), border) || !isPixelInUsableTile(px)) continue;
+    const int col = std::min(tile_cols - 1,
+                             std::max(0, static_cast<int>(px[0]) * tile_cols / image_quality_mask_width));
+    const int row = std::min(tile_rows - 1,
+                             std::max(0, static_cast<int>(px[1]) * tile_rows / image_quality_mask_height));
+    tracked_occupied_tiles[row * tile_cols + col] = 1;
+    min_u = std::min(min_u, px[0]);
+    max_u = std::max(max_u, px[0]);
+    min_v = std::min(min_v, px[1]);
+    max_v = std::max(max_v, px[1]);
+    ++valid_points;
+  }
+  last_visual_occupied_good_tiles =
+      static_cast<int>(std::count(tracked_occupied_tiles.begin(), tracked_occupied_tiles.end(), uint8_t{1}));
+  if (last_image_usable_tiles > 0)
+    last_visual_occupied_tile_ratio =
+        static_cast<double>(last_visual_occupied_good_tiles) / last_image_usable_tiles;
+  if (valid_points >= 2)
+  {
+    last_visual_horizontal_coverage = (max_u - min_u) / std::max(1, image_quality_mask_width);
+    last_visual_vertical_coverage = (max_v - min_v) / std::max(1, image_quality_mask_height);
+  }
+}
+
+void VIOManager::refreshTrackedReferencePatches(cv::Mat img)
+{
+  if (!visual_reference_refresh_en || total_points < visual_reference_refresh_min_tracked_points ||
+      last_visual_occupied_good_tiles < visual_reference_refresh_min_occupied_good_tiles ||
+      last_visual_horizontal_coverage < visual_reference_refresh_min_horizontal_coverage ||
+      last_visual_vertical_coverage < visual_reference_refresh_min_vertical_coverage)
+    return;
+
+  const int max_refresh = std::max(1, visual_reference_refresh_max_per_frame);
+  const int min_age = std::max(1, visual_reference_refresh_max_age_frames);
+  for (int i = 0; i < total_points && last_visual_reference_refreshes < max_refresh; ++i)
+  {
+    VisualPoint *pt = visual_submap->voxel_points[i];
+    if (pt == nullptr || pt->ref_patch == nullptr) continue;
+    if (new_frame_->id_ - pt->ref_patch->id_ < min_age) continue;
+
+    const V2D pc = snapPixelForDeterminism(new_frame_->w2c(pt->pos_));
+    if (!new_frame_->cam_->isInFrame(pc.cast<int>(), border) || !isPixelInUsableTile(pc)) continue;
+
+    float *patch = new float[patch_size_total];
+    getImagePatch(img, pc, patch, 0);
+    if (visual_patch_quality_gate_en)
+    {
+      const int sat_threshold = std::min(255, std::max(0, image_quality_saturated_pixel_value));
+      if (!isPatchPhotometricallyUsable(patch, patch_size_total, sat_threshold,
+                                        visual_patch_max_saturated_fraction,
+                                        visual_patch_min_intensity_std))
+      {
+        delete[] patch;
+        continue;
+      }
+    }
+
+    const int search_level = i < static_cast<int>(visual_submap->search_levels.size())
+        ? visual_submap->search_levels[i] : 0;
+    Feature *replacement = new Feature(pt, patch, pc, cam->cam2world(pc),
+                                       new_frame_->T_f_w_, search_level);
+    replacement->img_ = img;
+    replacement->id_ = new_frame_->id_;
+    replacement->inv_expo_time_ = state->inv_expo_time;
+
+    std::vector<Feature *> old_observations(pt->obs_.begin(), pt->obs_.end());
+    pt->addFrameRef(replacement);
+    pt->ref_patch = replacement;
+    pt->has_ref_patch_ = true;
+    for (Feature *old_observation : old_observations)
+      pt->deleteFeatureRef(old_observation);
+    ++last_visual_reference_refreshes;
+  }
+}
+
+void VIOManager::logVisualFunnel(const std::string &skip_reason, bool ekf_attempted,
+                                 bool final_guard_rejected, bool accepted)
+{
+  if (!timing_log_enable || timing_log_dir.empty()) return;
+  if (!visual_funnel_file.is_open())
+  {
+    std::string dir = timing_log_dir;
+    if (dir.back() != '/') dir += '/';
+    visual_funnel_file.open(dir + "visual_funnel.csv", std::ios::out);
+    if (!visual_funnel_file.is_open()) return;
+    visual_funnel_file
+        << "timestamp,image_quality_pass,quality_reject_reason,saturated_fraction,max_tile_saturated_fraction,"
+           "dark_fraction,contrast,global_saturation_fail,global_dark_fail,global_contrast_fail,"
+           "usable_tiles,unusable_tiles,overexposed_tiles,underexposed_tiles,low_contrast_tiles,"
+           "good_tile_ratio,good_tile_horizontal_coverage,good_tile_vertical_coverage,"
+           "map_points,map_voxels,projected_candidates,inside_image_candidates,good_tile_candidates,grid_candidates,"
+           "patch_quality_input,patch_quality_rejected,patch_valid,ncc_rejected,ncc_pass,"
+           "photometric_rejected,tracked_points,ref_input_mean_age,ref_input_max_age,"
+           "ncc_pass_mean_ref_age,ncc_pass_max_ref_age,tracked_mean_ref_age,tracked_max_ref_age,"
+           "converged_ref_candidate_ratio,reference_refreshes,occupied_good_tiles,occupied_tile_ratio,"
+           "horizontal_coverage,vertical_coverage,lidar_degenerated,tracked_gate_pass,relaxed_track_gate_pass,"
+           "degeneracy_relaxed_track_gate_pass,degeneracy_constrained_step_m,measurement_dof,ekf_attempted,"
+           "nis_rejected,observability_suppressed,final_guard_rejected,skip_reason,accepted,"
+           "map_points_after,map_voxels_after,evicted_points,evicted_voxels,mean_visual_point_age,max_visual_point_age\n";
+  }
+
+  double age_sum = 0.0;
+  int age_count = 0;
+  int max_age = 0;
+  for (const auto &entry : feat_map)
+  {
+    if (entry.second == nullptr) continue;
+    for (const VisualPoint *pt : entry.second->voxel_points)
+    {
+      if (pt == nullptr) continue;
+      const int oldest_frame_id = getVisualPointOldestFrameId(pt);
+      if (oldest_frame_id == std::numeric_limits<int>::max()) continue;
+      const int age = std::max(0, new_frame_->id_ - oldest_frame_id);
+      age_sum += age;
+      max_age = std::max(max_age, age);
+      ++age_count;
+    }
+  }
+  const double mean_age = age_count > 0 ? age_sum / age_count : 0.0;
+  const int patch_quality_input = last_visual_candidate_patches + last_visual_patch_quality_rejects;
+  const int ncc_pass = std::max(0, last_visual_candidate_patches - last_visual_ncc_rejects);
+  const size_t map_points_after = getVisualPointCount();
+  const double mean_ref_age = last_visual_ref_age_count > 0
+      ? static_cast<double>(last_visual_ref_age_sum) / last_visual_ref_age_count : 0.0;
+  const double mean_ncc_pass_ref_age = last_visual_ncc_pass_ref_age_count > 0
+      ? static_cast<double>(last_visual_ncc_pass_ref_age_sum) / last_visual_ncc_pass_ref_age_count : 0.0;
+  const double mean_tracked_ref_age = last_visual_tracked_ref_age_count > 0
+      ? static_cast<double>(last_visual_tracked_ref_age_sum) / last_visual_tracked_ref_age_count : 0.0;
+  const double converged_ref_candidate_ratio = last_visual_ref_age_count > 0
+      ? static_cast<double>(last_visual_converged_ref_candidates) / last_visual_ref_age_count : 0.0;
+
+  visual_funnel_file << std::setprecision(12)
+      << current_visual_time << ','
+      << static_cast<int>(last_image_quality_reject_reason == "none") << ','
+      << last_image_quality_reject_reason << ','
+      << last_image_saturated_fraction << ',' << last_image_max_tile_saturated_fraction << ','
+      << last_image_dark_fraction << ',' << last_image_contrast << ','
+      << static_cast<int>(last_image_global_saturation_fail) << ','
+      << static_cast<int>(last_image_global_dark_fail) << ','
+      << static_cast<int>(last_image_global_contrast_fail) << ','
+      << last_image_usable_tiles << ',' << last_image_unusable_tiles << ','
+      << last_image_overexposed_tiles << ',' << last_image_underexposed_tiles << ','
+      << last_image_low_contrast_tiles << ',' << last_image_usable_tile_ratio << ','
+      << last_image_usable_horizontal_coverage << ',' << last_image_usable_vertical_coverage << ','
+      << last_visual_map_points_at_retrieve << ',' << last_visual_map_voxels_at_retrieve << ','
+      << last_visual_projected_candidates << ',' << last_visual_inside_image_candidates << ','
+      << last_visual_good_tile_candidates << ',' << last_visual_grid_candidates << ','
+      << patch_quality_input << ',' << last_visual_patch_quality_rejects << ','
+      << last_visual_candidate_patches << ',' << last_visual_ncc_rejects << ',' << ncc_pass << ','
+      << last_visual_photometric_rejects << ',' << total_points << ','
+      << mean_ref_age << ',' << last_visual_ref_age_max << ','
+      << mean_ncc_pass_ref_age << ',' << last_visual_ncc_pass_ref_age_max << ','
+      << mean_tracked_ref_age << ',' << last_visual_tracked_ref_age_max << ','
+      << converged_ref_candidate_ratio << ',' << last_visual_reference_refreshes << ','
+      << last_visual_occupied_good_tiles << ',' << last_visual_occupied_tile_ratio << ','
+      << last_visual_horizontal_coverage << ',' << last_visual_vertical_coverage << ','
+      << static_cast<int>(lidar_degenerated) << ','
+      << static_cast<int>(last_visual_tracked_gate_pass) << ','
+      << static_cast<int>(last_visual_relaxed_track_gate_pass) << ','
+      << static_cast<int>(last_visual_degeneracy_relaxed_track_gate_pass) << ','
+      << last_visual_degeneracy_constrained_step_m << ',' << last_visual_measurement_dof << ','
+      << static_cast<int>(ekf_attempted) << ',' << static_cast<int>(last_visual_nis_rejected) << ','
+      << last_visual_observability_suppressed_directions << ',' << static_cast<int>(final_guard_rejected) << ','
+      << (skip_reason.empty() ? "none" : skip_reason) << ',' << static_cast<int>(accepted) << ','
+      << map_points_after << ',' << feat_map.size() << ',' << last_visual_map_evicted_points << ','
+      << last_visual_map_evicted_voxels << ',' << mean_age << ',' << max_age << '\n';
+  if (++visual_funnel_pending_rows >= 100)
+  {
+    visual_funnel_file.flush();
+    visual_funnel_pending_rows = 0;
+  }
+}
+
+void VIOManager::applyPatchRobustWeights(Eigen::VectorXd &residuals,
+                                         Eigen::MatrixXd &jacobian) const
+{
+  if (!visual_robust_kernel_en || patch_size_total <= 0) return;
+  const double delta = std::max(1e-6, visual_robust_delta);
+  for (Eigen::Index start = 0; start < residuals.rows(); start += patch_size_total)
+  {
+    const Eigen::Index count = std::min<Eigen::Index>(patch_size_total,
+                                                       residuals.rows() - start);
+    const double rms = std::sqrt(residuals.segment(start, count).squaredNorm() /
+                                 std::max<Eigen::Index>(1, count));
+    if (!std::isfinite(rms) || rms <= delta) continue;
+    // One Huber weight is shared by the correlated pixels in a patch, so a
+    // bad patch cannot contribute dozens of independently full-weight rows.
+    const double sqrt_weight = std::sqrt(delta / rms);
+    residuals.segment(start, count) *= sqrt_weight;
+    jacobian.middleRows(start, count) *= sqrt_weight;
+  }
+}
+
+bool VIOManager::applyPoseObservabilityGate(Eigen::MatrixXd &jacobian)
+{
+  if (!visual_observability_gate_en) return true;
+  if (jacobian.cols() < 6 || jacobian.rows() == 0) return false;
+
+  const Eigen::Matrix<double, 6, 6> pose_information =
+      jacobian.leftCols(6).transpose() * jacobian.leftCols(6);
+  const M3D Irr = pose_information.block<3, 3>(0, 0);
+  const M3D Irt = pose_information.block<3, 3>(0, 3);
+  const M3D Itt = pose_information.block<3, 3>(3, 3);
+  const double regularizer = 1e-9 * std::max(1.0, pose_information.diagonal().maxCoeff());
+  const M3D rotation_information =
+      (Irr - Irt * (Itt + regularizer * M3D::Identity()).ldlt().solve(Irt.transpose())).eval();
+  const M3D translation_information =
+      (Itt - Irt.transpose() * (Irr + regularizer * M3D::Identity()).ldlt().solve(Irt)).eval();
+
+  auto analyze = [&](const M3D &raw_information, M3D &projector,
+                     double &min_eigenvalue, double &max_eigenvalue,
+                     double &condition) -> bool
+  {
+    const M3D information = 0.5 * (raw_information + raw_information.transpose());
+    Eigen::SelfAdjointEigenSolver<M3D> solver(information);
+    if (solver.info() != Eigen::Success || !solver.eigenvalues().allFinite()) return false;
+
+    const V3D eigenvalues = solver.eigenvalues().cwiseMax(0.0);
+    min_eigenvalue = eigenvalues[0];
+    max_eigenvalue = eigenvalues[2];
+    condition = max_eigenvalue / std::max(1e-12, min_eigenvalue);
+    if (!(max_eigenvalue > 1e-12)) return false;
+
+    V3D direction_weights = V3D::Ones();
+    const double relative_threshold = visual_observability_relative_eigen_threshold;
+    const double absolute_threshold = visual_observability_absolute_eigen_threshold;
+    for (int i = 0; i < 3; ++i)
+    {
+      const double ratio = eigenvalues[i] / max_eigenvalue;
+      if ((absolute_threshold > 0.0 && eigenvalues[i] < absolute_threshold) ||
+          (relative_threshold > 0.0 && ratio < 0.25 * relative_threshold))
+      {
+        direction_weights[i] = 0.0;
+        ++last_visual_observability_suppressed_directions;
+      }
+      else if (relative_threshold > 0.0 && ratio < relative_threshold)
+      {
+        direction_weights[i] = std::sqrt(ratio / relative_threshold);
+        ++last_visual_observability_suppressed_directions;
+      }
+    }
+    projector = solver.eigenvectors() * direction_weights.asDiagonal() *
+                solver.eigenvectors().transpose();
+    return true;
+  };
+
+  M3D rotation_projector = M3D::Identity();
+  M3D translation_projector = M3D::Identity();
+  // ponytail: keep rotation and translation as separate 3D subspaces to avoid
+  // mixing radians and metres; use calibrated whitening before any coupled 6D gate.
+  if (!analyze(rotation_information, rotation_projector,
+               last_visual_rotation_min_eigenvalue,
+               last_visual_rotation_max_eigenvalue,
+               last_visual_rotation_condition) ||
+      !analyze(translation_information, translation_projector,
+               last_visual_translation_min_eigenvalue,
+               last_visual_translation_max_eigenvalue,
+               last_visual_translation_condition))
+    return false;
+
+  jacobian.block(0, 0, jacobian.rows(), 3) *= rotation_projector;
+  jacobian.block(0, 3, jacobian.rows(), 3) *= translation_projector;
+  return true;
+}
+
 void VIOManager::logVisualDelta(double timestamp, int tracked_point_count,
                                 double image_saturated_fraction,
                                 double image_tile_saturated_fraction,
@@ -506,6 +843,17 @@ void VIOManager::logVisualDelta(double timestamp, int tracked_point_count,
       << " delta_gyro_bias=(" << delta_gyro_bias.transpose() << ")"
       << " total_nis=" << visual_total_nis
       << " normalized_nis=" << last_visual_normalized_nis
+      << " candidate_patches=" << last_visual_candidate_patches
+      << " patch_quality_rejected=" << last_visual_patch_quality_rejects
+      << " ncc_rejected=" << last_visual_ncc_rejects
+      << " photometric_rejected=" << last_visual_photometric_rejects
+      << " rotation_min_eigenvalue=" << last_visual_rotation_min_eigenvalue
+      << " rotation_max_eigenvalue=" << last_visual_rotation_max_eigenvalue
+      << " rotation_condition=" << last_visual_rotation_condition
+      << " translation_min_eigenvalue=" << last_visual_translation_min_eigenvalue
+      << " translation_max_eigenvalue=" << last_visual_translation_max_eigenvalue
+      << " translation_condition=" << last_visual_translation_condition
+      << " observability_suppressed=" << last_visual_observability_suppressed_directions
       << " accepted=" << static_cast<int>(accepted);
   if ((frame_count % std::max(1, diagnostics_console_interval_frames)) == 0)
   {
@@ -1041,6 +1389,13 @@ double VIOManager::calculateNCC(float *ref_patch, float *cur_patch, int patch_si
 
 void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map)
 {
+  last_visual_map_points_at_retrieve = getVisualPointCount();
+  last_visual_map_voxels_at_retrieve = feat_map.size();
+  last_visual_projected_candidates = 0;
+  last_visual_inside_image_candidates = 0;
+  last_visual_good_tile_candidates = 0;
+  last_visual_grid_candidates = 0;
+  visual_submap->reset();
   if (feat_map.size() <= 0) return;
   double ts0 = omp_get_wtime();
 
@@ -1049,8 +1404,6 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
   // downSizeFilter.filter(*pg_down);
 
   // resetRvizDisplay();
-  visual_submap->reset();
-
   // Controls whether to include the visual submap from the previous frame.
   sub_feat_map.clear();
 
@@ -1156,12 +1509,16 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
         V3D norm_vec(new_frame_->T_f_w_.rotation_matrix() * pt->normal_);
         V3D dir(new_frame_->T_f_w_ * pt->pos_);
         if (dir[2] < 0) continue;
+        ++last_visual_projected_candidates;
         // dir.normalize();
         // if (dir.dot(norm_vec) <= 0.17) continue; // 0.34 70 degree  0.17 80 degree 0.08 85 degree
 
         V2D pc = snapPixelForDeterminism(new_frame_->w2c(pt->pos_));
         if (new_frame_->cam_->isInFrame(pc.cast<int>(), border))
         {
+          ++last_visual_inside_image_candidates;
+          if (!isPixelInUsableTile(pc)) continue;
+          ++last_visual_good_tile_candidates;
           // cv::circle(img_cp, cv::Point2f(pc[0], pc[1]), 3, cv::Scalar(0, 255, 255), -1, 8);
           voxel_in_fov = true;
           int index = static_cast<int>(pc[1] / grid_size) * grid_n_width + static_cast<int>(pc[0] / grid_size);
@@ -1235,6 +1592,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
             V3D norm_vec(new_frame_->T_f_w_.rotation_matrix() * pt->normal_);
             V3D dir(new_frame_->T_f_w_ * pt->pos_);
             if (dir[2] < 0) continue;
+            ++last_visual_projected_candidates;
             dir.normalize();
             // if (dir.dot(norm_vec) <= 0.17) continue; // 0.34 70 degree 0.17 80 degree 0.08 85 degree
 
@@ -1242,6 +1600,9 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 
             if (new_frame_->cam_->isInFrame(pc.cast<int>(), border))
             {
+              ++last_visual_inside_image_candidates;
+              if (!isPixelInUsableTile(pc)) continue;
+              ++last_visual_good_tile_candidates;
               // cv::circle(img_cp, cv::Point2f(pc[0], pc[1]), 3, cv::Scalar(255, 255, 0), -1, 8); 
               // sub_map_ray_fov.push_back(pt);
 
@@ -1304,6 +1665,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
   {
     if (grid_num[i] == TYPE_MAP)
     {
+      ++last_visual_grid_candidates;
       // double t_1 = omp_get_wtime();
 
       VisualPoint *pt = retrieve_voxel_points[i];
@@ -1451,6 +1813,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
             !isPatchPhotometricallyUsable(patch_wrap.data(), patch_size_total, sat_threshold,
                                           visual_patch_max_saturated_fraction, visual_patch_min_intensity_std))
         {
+          ++last_visual_patch_quality_rejects;
           continue;
         }
       }
@@ -1462,17 +1825,35 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
                  (ref_ftr->inv_expo_time_ * patch_wrap[ind] - state->inv_expo_time * patch_buffer[ind]);
       }
 
-      if (ncc_en)
+      ++last_visual_candidate_patches;
+      const int ref_age = std::max(0, new_frame_->id_ - ref_ftr->id_);
+      ++last_visual_ref_age_count;
+      last_visual_ref_age_sum += ref_age;
+      last_visual_ref_age_max = std::max(last_visual_ref_age_max, ref_age);
+      last_visual_converged_ref_candidates += pt->is_converged_;
+      const double photometric_mse = error / std::max(1, patch_size_total);
+      const double ncc = calculateNCC(patch_wrap.data(), patch_buffer.data(), patch_size_total);
+      if (ncc_en && ncc < ncc_thre)
       {
-        double ncc = calculateNCC(patch_wrap.data(), patch_buffer.data(), patch_size_total);
-        if (ncc < ncc_thre)
-        {
-          // grid_num[i] = TYPE_UNKNOWN;
-          continue;
-        }
+        ++last_visual_ncc_rejects;
+        logVisualPatchQuality(photometric_mse, ncc, "ncc_reject");
+        continue;
       }
 
-      if (error > outlier_threshold * patch_size_total) continue;
+      ++last_visual_ncc_pass_ref_age_count;
+      last_visual_ncc_pass_ref_age_sum += ref_age;
+      last_visual_ncc_pass_ref_age_max = std::max(last_visual_ncc_pass_ref_age_max, ref_age);
+
+      if (photometric_mse > outlier_threshold)
+      {
+        ++last_visual_photometric_rejects;
+        logVisualPatchQuality(photometric_mse, ncc, "photometric_reject");
+        continue;
+      }
+      ++last_visual_tracked_ref_age_count;
+      last_visual_tracked_ref_age_sum += ref_age;
+      last_visual_tracked_ref_age_max = std::max(last_visual_tracked_ref_age_max, ref_age);
+      logVisualPatchQuality(photometric_mse, ncc, "accepted_preliminary");
 
       visual_submap->voxel_points.push_back(pt);
       visual_submap->propa_errors.push_back(error);
@@ -1498,6 +1879,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 
 bool VIOManager::computeJacobianAndUpdateEKF(cv::Mat img)
 {
+  const StatesGroup state_before_ekf = *state;
   G.setZero();
   H_T_H.setZero();
   last_visual_measurement_dof = 0;
@@ -1519,6 +1901,15 @@ bool VIOManager::computeJacobianAndUpdateEKF(cv::Mat img)
     else
       level_updated = updateState(img, level);
     has_valid_update = has_valid_update || level_updated;
+    if (last_visual_nis_rejected) break;
+  }
+
+  if (last_visual_nis_rejected)
+  {
+    *state = state_before_ekf;
+    G.setZero();
+    updateFrameState(*state);
+    return false;
   }
 
   if (has_valid_update)
@@ -1575,6 +1966,7 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
 
     if (new_frame_->cam_->isInFrame(pc.cast<int>(), border)) // 20px is the patch size in the matcher
     {
+      if (!isPixelInUsableTile(pc)) continue;
       int index = static_cast<int>(pc[1] / grid_size) * grid_n_width + static_cast<int>(pc[0] / grid_size);
       if (index < 0 || index >= length) continue;
 
@@ -1607,6 +1999,7 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
 
     if (new_frame_->cam_->isInFrame(pc.cast<int>(), border)) // 20px is the patch size in the matcher
     {
+      if (!isPixelInUsableTile(pc)) continue;
       int index = static_cast<int>(pc[1] / grid_size) * grid_n_width + static_cast<int>(pc[0] / grid_size);
       if (index < 0 || index >= length) continue;
 
@@ -1658,6 +2051,7 @@ void VIOManager::generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg)
       V2D pc = snapPixelForDeterminism(new_frame_->w2c(pt));
       if (!std::isfinite(pc[0]) || !std::isfinite(pc[1])) continue;
       if (!new_frame_->cam_->isInFrame(pc.cast<int>(), border)) continue;
+      if (!isPixelInUsableTile(pc)) continue;
 
       float *patch = new float[patch_size_total];
       getImagePatch(img, pc, patch, 0);
@@ -1731,6 +2125,7 @@ void VIOManager::updateVisualMapPoints(cv::Mat img)
     }
 
     V2D pc = snapPixelForDeterminism(new_frame_->w2c(pt->pos_));
+    if (!isPixelInUsableTile(pc)) continue;
     bool add_flag = false;
 
     // TODO: condition: distance and view_angle
@@ -2340,6 +2735,13 @@ bool VIOManager::updateStateInverse(cv::Mat img, int level)
       old_state = (*state);
       last_error = error;
 
+      applyPatchRobustWeights(z, H_sub);
+      if (!applyPoseObservabilityGate(H_sub))
+      {
+        (*state) = old_state;
+        EKF_end = true;
+        break;
+      }
       auto &&H_sub_T = H_sub.transpose();
       H_T_H.setZero();
       G.setZero();
@@ -2352,6 +2754,16 @@ bool VIOManager::updateStateInverse(cv::Mat img, int level)
       last_visual_normalized_nis = last_visual_measurement_dof > 0
                                        ? last_visual_total_nis / last_visual_measurement_dof
                                        : std::numeric_limits<double>::quiet_NaN();
+      if (visual_update_normalized_nis_max > 0.0 &&
+          (!std::isfinite(last_visual_normalized_nis) ||
+           last_visual_normalized_nis > visual_update_normalized_nis_max))
+      {
+        last_visual_nis_rejected = true;
+        (*state) = old_state;
+        G.setZero();
+        EKF_end = true;
+        break;
+      }
       auto vec = (*state_propagat) - (*state);
       G.block<DIM_STATE, 6>(0, 0) = K_1.block<DIM_STATE, 6>(0, 0) * H_T_H.block<6, 6>(0, 0);
       MD(DIM_STATE, 1) solution =
@@ -2542,6 +2954,13 @@ bool VIOManager::updateState(cv::Mat img, int level)
       old_state = (*state);
       last_error = error;
 
+      applyPatchRobustWeights(z, H_sub);
+      if (!applyPoseObservabilityGate(H_sub))
+      {
+        (*state) = old_state;
+        EKF_end = true;
+        break;
+      }
       auto &&H_sub_T = H_sub.transpose();
       H_T_H.setZero();
       G.setZero();
@@ -2554,6 +2973,16 @@ bool VIOManager::updateState(cv::Mat img, int level)
       last_visual_normalized_nis = last_visual_measurement_dof > 0
                                        ? last_visual_total_nis / last_visual_measurement_dof
                                        : std::numeric_limits<double>::quiet_NaN();
+      if (visual_update_normalized_nis_max > 0.0 &&
+          (!std::isfinite(last_visual_normalized_nis) ||
+           last_visual_normalized_nis > visual_update_normalized_nis_max))
+      {
+        last_visual_nis_rejected = true;
+        (*state) = old_state;
+        G.setZero();
+        EKF_end = true;
+        break;
+      }
       auto vec = (*state_propagat) - (*state);
       G.block<DIM_STATE, 7>(0, 0) = K_1.block<DIM_STATE, 7>(0, 0) * H_T_H.block<7, 7>(0, 0);
       MD(DIM_STATE, 1)
@@ -3460,9 +3889,57 @@ void VIOManager::updateStateWithBoardObservation()
 void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time)
 {
   const StatesGroup state_before_frame = *state;
+  current_visual_time = img_time;
+  last_visual_nis_rejected = false;
   last_visual_measurement_dof = 0;
   last_visual_total_nis = std::numeric_limits<double>::quiet_NaN();
   last_visual_normalized_nis = std::numeric_limits<double>::quiet_NaN();
+  last_visual_rotation_min_eigenvalue = std::numeric_limits<double>::quiet_NaN();
+  last_visual_rotation_max_eigenvalue = std::numeric_limits<double>::quiet_NaN();
+  last_visual_rotation_condition = std::numeric_limits<double>::quiet_NaN();
+  last_visual_translation_min_eigenvalue = std::numeric_limits<double>::quiet_NaN();
+  last_visual_translation_max_eigenvalue = std::numeric_limits<double>::quiet_NaN();
+  last_visual_translation_condition = std::numeric_limits<double>::quiet_NaN();
+  last_visual_observability_suppressed_directions = 0;
+  last_visual_candidate_patches = 0;
+  last_visual_patch_quality_rejects = 0;
+  last_visual_ncc_rejects = 0;
+  last_visual_photometric_rejects = 0;
+  last_visual_ref_age_count = 0;
+  last_visual_ref_age_sum = 0;
+  last_visual_ref_age_max = 0;
+  last_visual_ncc_pass_ref_age_count = 0;
+  last_visual_ncc_pass_ref_age_sum = 0;
+  last_visual_ncc_pass_ref_age_max = 0;
+  last_visual_tracked_ref_age_count = 0;
+  last_visual_tracked_ref_age_sum = 0;
+  last_visual_tracked_ref_age_max = 0;
+  last_visual_converged_ref_candidates = 0;
+  last_visual_reference_refreshes = 0;
+  last_visual_map_pg_size = 0;
+  last_visual_map_candidate_slots = 0;
+  last_visual_map_patch_rejects = 0;
+  last_visual_map_added_points = 0;
+  last_visual_map_insert_reject_invalid = 0;
+  last_visual_map_insert_reject_voxel_full = 0;
+  last_visual_map_insert_reject_voxel_cap = 0;
+  last_visual_map_evicted_points = 0;
+  last_visual_map_evicted_voxels = 0;
+  last_visual_map_points_at_retrieve = getVisualPointCount();
+  last_visual_map_voxels_at_retrieve = this->feat_map.size();
+  last_visual_projected_candidates = 0;
+  last_visual_inside_image_candidates = 0;
+  last_visual_good_tile_candidates = 0;
+  last_visual_grid_candidates = 0;
+  last_visual_occupied_good_tiles = 0;
+  last_visual_occupied_tile_ratio = 0.0;
+  last_visual_horizontal_coverage = 0.0;
+  last_visual_vertical_coverage = 0.0;
+  last_visual_tracked_gate_pass = false;
+  last_visual_relaxed_track_gate_pass = false;
+  last_visual_degeneracy_relaxed_track_gate_pass = false;
+  last_visual_degeneracy_constrained_step_m = 0.0;
+  last_image_quality_reject_reason = "none";
   auto rememberVisualGuardPose = [&]()
   {
     last_visual_guard_time = img_time;
@@ -3506,6 +3983,18 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   double max_tile_saturated_fraction = 0.0;
   double dark_fraction = 0.0;
   double intensity_std = 0.0;
+  last_image_usable_tiles = 0;
+  last_image_unusable_tiles = 0;
+  last_image_overexposed_tiles = 0;
+  last_image_underexposed_tiles = 0;
+  last_image_low_contrast_tiles = 0;
+  last_image_usable_tile_ratio = 0.0;
+  last_image_usable_horizontal_coverage = 0.0;
+  last_image_usable_vertical_coverage = 0.0;
+  last_image_global_saturation_fail = false;
+  last_image_global_dark_fail = false;
+  last_image_global_contrast_fail = false;
+  image_quality_usable_tiles.clear();
   if (!img.empty())
   {
     cv::Mat mean, stddev;
@@ -3527,6 +4016,9 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 
     const int tile_rows = std::max(1, image_quality_tile_rows);
     const int tile_cols = std::max(1, image_quality_tile_cols);
+    image_quality_mask_width = img.cols;
+    image_quality_mask_height = img.rows;
+    image_quality_usable_tiles.assign(tile_rows * tile_cols, 0);
     for (int tile_r = 0; tile_r < tile_rows; ++tile_r)
     {
       const int y0 = tile_r * img.rows / tile_rows;
@@ -3542,16 +4034,80 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
         const double tile_pixel_count = static_cast<double>(tile_roi.width) * static_cast<double>(tile_roi.height);
         const double tile_saturated_fraction =
             tile_pixel_count > 0.0 ? static_cast<double>(cv::countNonZero(saturated_mask(tile_roi))) / tile_pixel_count : 0.0;
+        const double tile_dark_fraction =
+            tile_pixel_count > 0.0 ? static_cast<double>(cv::countNonZero(dark_mask(tile_roi))) / tile_pixel_count : 0.0;
+        cv::Mat tile_mean, tile_stddev;
+        cv::meanStdDev(img(tile_roi), tile_mean, tile_stddev);
+        const double tile_intensity_std = tile_stddev.at<double>(0, 0);
+        const bool overexposed = tile_saturated_fraction > image_quality_max_tile_saturated_fraction;
+        const bool underexposed = tile_dark_fraction > image_quality_max_dark_fraction;
+        const bool low_contrast = tile_intensity_std < image_quality_min_intensity_std;
+        const bool usable = !overexposed && !underexposed && !low_contrast;
+        image_quality_usable_tiles[tile_r * tile_cols + tile_c] = usable ? 1 : 0;
+        last_image_overexposed_tiles += overexposed;
+        last_image_underexposed_tiles += underexposed;
+        last_image_low_contrast_tiles += low_contrast;
+        last_image_usable_tiles += usable;
         max_tile_saturated_fraction = std::max(max_tile_saturated_fraction, tile_saturated_fraction);
       }
     }
+    const int tile_count = tile_rows * tile_cols;
+    last_image_unusable_tiles = tile_count - last_image_usable_tiles;
+    last_image_usable_tile_ratio =
+        tile_count > 0 ? static_cast<double>(last_image_usable_tiles) / tile_count : 0.0;
+    int usable_rows = 0;
+    int usable_cols = 0;
+    for (int tile_r = 0; tile_r < tile_rows; ++tile_r)
+      usable_rows += std::any_of(image_quality_usable_tiles.begin() + tile_r * tile_cols,
+                                image_quality_usable_tiles.begin() + (tile_r + 1) * tile_cols,
+                                [](uint8_t usable) { return usable != 0; });
+    for (int tile_c = 0; tile_c < tile_cols; ++tile_c)
+    {
+      bool col_usable = false;
+      for (int tile_r = 0; tile_r < tile_rows; ++tile_r)
+        col_usable = col_usable || image_quality_usable_tiles[tile_r * tile_cols + tile_c] != 0;
+      usable_cols += col_usable;
+    }
+    last_image_usable_horizontal_coverage = static_cast<double>(usable_cols) / tile_cols;
+    last_image_usable_vertical_coverage = static_cast<double>(usable_rows) / tile_rows;
+    assert(last_image_usable_tiles + last_image_unusable_tiles == tile_count);
 
-    image_quality_reject = image_quality_gate_en &&
-        ((saturated_fraction > image_quality_max_saturated_fraction) ||
-         (max_tile_saturated_fraction > image_quality_max_tile_saturated_fraction) ||
-         (dark_fraction > image_quality_max_dark_fraction) ||
-         (intensity_std < image_quality_min_intensity_std));
+    last_image_global_saturation_fail = saturated_fraction > image_quality_max_saturated_fraction;
+    last_image_global_dark_fail = dark_fraction > image_quality_max_dark_fraction;
+    last_image_global_contrast_fail = intensity_std < image_quality_min_intensity_std;
+    if (image_quality_gate_en && image_quality_tile_mask_en)
+    {
+      const bool too_few_tiles =
+          last_image_usable_tile_ratio < std::max(0.0, image_quality_min_usable_tile_ratio);
+      const bool insufficient_coverage =
+          last_image_usable_horizontal_coverage < std::max(0.0, image_quality_min_usable_horizontal_coverage) ||
+          last_image_usable_vertical_coverage < std::max(0.0, image_quality_min_usable_vertical_coverage);
+      image_quality_reject = too_few_tiles || insufficient_coverage;
+      if (too_few_tiles && insufficient_coverage)
+        last_image_quality_reject_reason = "insufficient_usable_tiles_and_coverage";
+      else if (too_few_tiles)
+        last_image_quality_reject_reason = "insufficient_usable_tiles";
+      else if (insufficient_coverage)
+        last_image_quality_reject_reason = "insufficient_usable_tile_coverage";
+    }
+    else if (image_quality_gate_en)
+    {
+      const bool tile_fail = max_tile_saturated_fraction > image_quality_max_tile_saturated_fraction;
+      const int failure_count = static_cast<int>(last_image_global_saturation_fail) +
+          static_cast<int>(tile_fail) + static_cast<int>(last_image_global_dark_fail) +
+          static_cast<int>(last_image_global_contrast_fail);
+      image_quality_reject = failure_count > 0;
+      if (failure_count > 1) last_image_quality_reject_reason = "multiple_image_quality";
+      else if (last_image_global_saturation_fail) last_image_quality_reject_reason = "global_saturation";
+      else if (tile_fail) last_image_quality_reject_reason = "tile_saturation";
+      else if (last_image_global_dark_fail) last_image_quality_reject_reason = "global_dark";
+      else if (last_image_global_contrast_fail) last_image_quality_reject_reason = "global_low_contrast";
+    }
   }
+  last_image_saturated_fraction = saturated_fraction;
+  last_image_max_tile_saturated_fraction = max_tile_saturated_fraction;
+  last_image_dark_fraction = dark_fraction;
+  last_image_contrast = intensity_std;
 
   if (image_quality_reject)
   {
@@ -3609,6 +4165,7 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
     logVisualDelta(img_time, 0, saturated_fraction, max_tile_saturated_fraction,
                    intensity_std, "bad_image_quality", state_before_frame,
                    *state, last_visual_total_nis, false);
+    logVisualFunnel("bad_image_quality", false, false, false);
     rememberVisualGuardPose();
     return;
   }
@@ -3618,6 +4175,7 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   double t1 = omp_get_wtime();
 
   retrieveFromVisualSparseMap(img, pg, feat_map);
+  updateTrackedSpatialCoverage();
   const double t_retrieve = omp_get_wtime() - t1;
 
   const bool run_aruco_this_frame = aruco_landmarks_en && (aruco_process_stride <= 1 || (frame_count % aruco_process_stride == 0));
@@ -3642,10 +4200,31 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
       low_track_force_update_stride > 0 &&
       total_points >= low_track_force_min_points &&
       (frame_count % low_track_force_update_stride == 0);
-  const bool skip_visual_ekf = (total_points < min_retrieve_points) && !low_track_force_update;
+  const bool normal_track_gate_pass = total_points >= min_retrieve_points;
+  const bool regular_relaxed_track_gate_pass =
+      visual_spatial_coverage_gate_en && !normal_track_gate_pass &&
+      total_points >= relaxed_min_retrieve_points &&
+      last_visual_occupied_good_tiles >= relaxed_min_occupied_good_tiles &&
+      last_image_usable_tile_ratio >= relaxed_min_good_tile_ratio &&
+      last_visual_horizontal_coverage >= relaxed_min_horizontal_coverage &&
+      last_visual_vertical_coverage >= relaxed_min_vertical_coverage;
+  last_visual_degeneracy_relaxed_track_gate_pass =
+      degeneracy_relaxed_track_gate_en && lidar_degenerated && !normal_track_gate_pass &&
+      total_points >= degeneracy_relaxed_min_retrieve_points &&
+      last_visual_occupied_good_tiles >= degeneracy_relaxed_min_occupied_good_tiles &&
+      last_image_usable_tile_ratio >= degeneracy_relaxed_min_good_tile_ratio &&
+      last_visual_horizontal_coverage >= degeneracy_relaxed_min_horizontal_coverage &&
+      last_visual_vertical_coverage >= degeneracy_relaxed_min_vertical_coverage;
+  last_visual_relaxed_track_gate_pass =
+      regular_relaxed_track_gate_pass || last_visual_degeneracy_relaxed_track_gate_pass;
+  last_visual_tracked_gate_pass = normal_track_gate_pass || last_visual_relaxed_track_gate_pass;
+  const bool skip_visual_ekf = !last_visual_tracked_gate_pass && !low_track_force_update;
   const bool print_console =
       console_timing_print_en &&
       ((frame_count % std::max(1, console_timing_print_stride)) == 0);
+  const std::string track_gate_skip_reason =
+      visual_spatial_coverage_gate_en && total_points >= relaxed_min_retrieve_points ?
+          "insufficient_tracked_spatial_coverage" : "low_tracked_points";
   double t2 = omp_get_wtime();
 
   const StatesGroup state_before_visual_update = *state;
@@ -3673,7 +4252,12 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
              total_points, min_retrieve_points, low_track_force_update_stride, low_track_force_min_points);
     }
 
+    const int configured_min_update_meas = min_update_meas;
+    if (last_visual_degeneracy_relaxed_track_gate_pass)
+      min_update_meas = std::min(min_update_meas,
+                                 degeneracy_relaxed_min_retrieve_points * patch_size_total);
     visual_ekf_updated = computeJacobianAndUpdateEKF(img);
+    min_update_meas = configured_min_update_meas;
 
     if (run_aruco_this_frame)
     {
@@ -3701,11 +4285,12 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
       aruco_time_update = 0.0;
     }
 
+    refreshTrackedReferencePatches(img);
     const double t_map_gen_begin = omp_get_wtime();
     generateVisualMapPoints(img, pg);
     pruneVisualMap();
     last_visual_map_total_points_after = getVisualPointCount();
-    last_visual_map_voxels_after = feat_map.size();
+    last_visual_map_voxels_after = this->feat_map.size();
     const double t_map_gen = omp_get_wtime() - t_map_gen_begin;
 
     const double t_low_exit = omp_get_wtime();
@@ -3867,12 +4452,37 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 
     logVisualDelta(img_time, total_points, saturated_fraction,
                    max_tile_saturated_fraction, intensity_std,
-                   aruco_update_ran ? "direct_low_tracks_aruco_only" : "low_tracked_points",
+                   aruco_update_ran ? "direct_low_tracks_aruco_only" : track_gate_skip_reason,
                    state_before_visual_update, *state, last_visual_total_nis,
                    aruco_update_ran);
+    logVisualFunnel(aruco_update_ran ? "direct_low_tracks_aruco_only" : track_gate_skip_reason,
+                    false, false, aruco_update_ran);
 
     rememberVisualGuardPose();
     return;
+  }
+
+  if (last_visual_degeneracy_relaxed_track_gate_pass && visual_ekf_updated)
+  {
+    const StatesGroup attempted_state = *state;
+    *state = state_before_visual_update;
+    state->cov = cov_before_visual_update;
+    G.setZero();
+
+    // ponytail: inject only a damped weak-axis position correction here; a full
+    // covariance update needs a joint LIO/VIO observability model.
+    if (lidar_weak_translation_direction_valid)
+    {
+      const V3D weak_direction = lidar_weak_translation_direction_world.normalized();
+      double constrained_step =
+          (attempted_state.pos_end - state_before_visual_update.pos_end).dot(weak_direction) *
+          std::max(0.0, degeneracy_visual_position_scale);
+      const double max_step = std::max(0.0, degeneracy_visual_max_position_step_m);
+      constrained_step = std::max(-max_step, std::min(max_step, constrained_step));
+      state->pos_end += constrained_step * weak_direction;
+      last_visual_degeneracy_constrained_step_m = std::fabs(constrained_step);
+    }
+    updateFrameState(*state);
   }
 
   if (visual_update_guard_en)
@@ -4027,6 +4637,7 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
         appendTimingLogLines(lines);
       }
 
+      logVisualFunnel(visual_update_reject_reason, true, true, false);
       rememberVisualGuardPose();
       return;
     }
@@ -4042,7 +4653,8 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 
   logVisualDelta(img_time, total_points, saturated_fraction,
                  max_tile_saturated_fraction, intensity_std,
-                 visual_ekf_updated ? "" : "ekf_no_valid_measurement",
+                 visual_ekf_updated ? "" :
+                     (last_visual_nis_rejected ? "normalized_nis" : "ekf_no_valid_measurement"),
                  state_before_visual_update, *state, last_visual_total_nis,
                  visual_ekf_updated);
 
@@ -4066,7 +4678,7 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 
   pruneVisualMap();
   last_visual_map_total_points_after = getVisualPointCount();
-  last_visual_map_voxels_after = feat_map.size();
+  last_visual_map_voxels_after = this->feat_map.size();
 
   double t7 = omp_get_wtime();
   
@@ -4217,5 +4829,8 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 
     appendTimingLogLines(lines);
   }
+  logVisualFunnel(visual_ekf_updated ? "none" :
+                      (last_visual_nis_rejected ? "normalized_nis" : "ekf_no_valid_measurement"),
+                  true, false, visual_ekf_updated);
   rememberVisualGuardPose();
 }

@@ -1,0 +1,15 @@
+<launch>
+  <arg name="rviz" default="true"/>
+  <arg name="cmd_name" default=""/>
+
+  <!-- Mapping registers all required subscribers and publishes a latched ready
+       state before either required sensor publisher is allowed to start. -->
+  <include file="$(find fast_livo)/launch/mapping_mid360.launch">
+    <arg name="rviz" value="$(arg rviz)"/>
+    <arg name="cmd_name" value="$(arg cmd_name)"/>
+  </include>
+  <include file="$(find fast_livo)/launch/sensors.launch">
+    <arg name="rviz_enable" value="false"/>
+    <arg name="wait_for_fast_livo" value="true"/>
+  </include>
+</launch>
