@@ -8,6 +8,8 @@
 #include <gtsam/nonlinear/Values.h>
 #include <gtsam/slam/BetweenFactor.h>
 #include <gtsam/slam/PriorFactor.h>
+#include <Eigen/Eigenvalues>
+#include <XmlRpcValue.h>
 
 #include <algorithm>
 #include <chrono>
@@ -42,6 +44,15 @@ constexpr char kNoActiveGraphState[] = "NO_ACTIVE_GRAPH_STATE";
 constexpr char kAlignmentTransitionTooOld[] =
     "GNSS_ALIGNMENT_TRANSITION_TOO_OLD";
 constexpr char kAlignmentReset[] = "GNSS_ALIGNMENT_RESET";
+constexpr char kUwbInvalid[] = "INVALID";
+constexpr char kUwbUnknownAnchor[] = "UNKNOWN_ANCHOR";
+constexpr char kUwbAnchorFiltered[] = "ANCHOR_FILTERED";
+constexpr char kUwbDuplicate[] = "DUPLICATE";
+constexpr char kUwbStale[] = "STALE";
+constexpr char kUwbAssociationTooFar[] = "TIME_ASSOC_TOO_FAR";
+constexpr char kUwbRangeGate[] = "RANGE_GATE";
+constexpr char kUwbResidualGate[] = "PREFIT_RESIDUAL_GATE";
+constexpr char kUwbNisGate[] = "NIS_GATE";
 
 double clamp(double value, double minimum, double maximum) {
   return std::max(minimum, std::min(value, maximum));
@@ -70,6 +81,40 @@ std::string csvField(std::string value) {
   return escaped;
 }
 
+bool xmlRpcNumber(const XmlRpc::XmlRpcValue &value, double *number) {
+  if (value.getType() == XmlRpc::XmlRpcValue::TypeDouble) {
+    *number = static_cast<double>(value);
+    return true;
+  }
+  if (value.getType() == XmlRpc::XmlRpcValue::TypeInt) {
+    *number = static_cast<int>(value);
+    return true;
+  }
+  return false;
+}
+
+bool xmlRpcInteger(const XmlRpc::XmlRpcValue &value, int *number) {
+  double parsed = 0.0;
+  if (!xmlRpcNumber(value, &parsed) || !std::isfinite(parsed) ||
+      std::abs(parsed - std::round(parsed)) > 1e-9) {
+    return false;
+  }
+  *number = static_cast<int>(std::llround(parsed));
+  return true;
+}
+
+bool xmlRpcPoint3(const XmlRpc::XmlRpcValue &value, gtsam::Point3 *point) {
+  if (value.getType() != XmlRpc::XmlRpcValue::TypeArray || value.size() != 3)
+    return false;
+  double xyz[3] = {};
+  for (int index = 0; index < 3; ++index)
+    if (!xmlRpcNumber(value[index], &xyz[index]) ||
+        !std::isfinite(xyz[index]))
+      return false;
+  *point = gtsam::Point3(xyz[0], xyz[1], xyz[2]);
+  return true;
+}
+
 }  // namespace
 
 GnssPositionArmFactor::GnssPositionArmFactor(
@@ -94,15 +139,48 @@ gtsam::Vector GnssPositionArmFactor::evaluateError(
   return predicted - measurement_;
 }
 
+UwbRangeFactor::UwbRangeFactor(
+    gtsam::Key key, const gtsam::Point3 &anchor_position,
+    double corrected_range_m, const gtsam::Point3 &tag_lever_arm,
+    const gtsam::SharedNoiseModel &noise_model)
+    : Base(noise_model, key),
+      anchor_position_(anchor_position),
+      corrected_range_m_(corrected_range_m),
+      tag_lever_arm_(tag_lever_arm) {}
+
+gtsam::NonlinearFactor::shared_ptr UwbRangeFactor::clone() const {
+  return boost::static_pointer_cast<gtsam::NonlinearFactor>(
+      boost::make_shared<UwbRangeFactor>(*this));
+}
+
+gtsam::Vector UwbRangeFactor::evaluateError(
+    const gtsam::Pose3 &pose,
+    boost::optional<gtsam::Matrix &> jacobian) const {
+  gtsam::Matrix36 tag_jacobian;
+  const gtsam::Point3 tag_position =
+      pose.transformFrom(tag_lever_arm_, tag_jacobian);
+  const gtsam::Vector3 difference = tag_position - anchor_position_;
+  const double predicted_range_m = difference.norm();
+  if (jacobian) {
+    if (predicted_range_m > 1e-12)
+      *jacobian = difference.transpose() / predicted_range_m * tag_jacobian;
+    else
+      *jacobian = gtsam::Matrix16::Zero();
+  }
+  return gtsam::Vector1(predicted_range_m - corrected_range_m_);
+}
+
 RtkFixedLagBackend::RtkFixedLagBackend(ros::NodeHandle &nh) {
   loadParameters(nh);
   GnssFusionPolicy fusion_policy;
   if (!loadGnssFusionPolicy(nh, fusion_policy)) {
     throw std::invalid_argument("missing GNSS fusion unified enable parameter");
   }
-  config_.enable = fusion_policy.componentEnabled(config_.enable);
+  gnss_factor_enabled_ = !fusion_policy.managed || fusion_policy.enabled;
+  config_.enable = config_.enable &&
+                   (gnss_factor_enabled_ || config_.uwb_factor_backend_en);
   if (!config_.enable) {
-    ROS_INFO("[RTK_BACKEND] Disabled by effective GNSS fusion configuration.");
+    ROS_INFO("[RTK_BACKEND] Disabled: neither GNSS nor UWB factors are enabled.");
     return;
   }
   validateParameters();
@@ -119,19 +197,28 @@ RtkFixedLagBackend::RtkFixedLagBackend(ros::NodeHandle &nh) {
   bool uwb_update_enabled = false;
   nh.param("gps/update_en", legacy_gnss_update_enabled, false);
   nh.param("uwb/update_en", uwb_update_enabled, false);
-  legacy_gnss_update_enabled =
-      fusion_policy.absoluteUpdateEnabled(legacy_gnss_update_enabled);
-  uwb_update_enabled =
-      fusion_policy.absoluteUpdateEnabled(uwb_update_enabled);
-  if (legacy_gnss_update_enabled || uwb_update_enabled) {
+  if (gnss_factor_enabled_ && legacy_gnss_update_enabled) {
     throw std::invalid_argument(
-        "rtk_fixed_lag_backend requires gps/update_en=false and "
-        "uwb/update_en=false so /backend/livo_odom_raw stays independent");
+        "GNSS fixed-lag factors require gps/update_en=false so raw LIVO "
+        "odometry stays independent");
+  }
+  if (config_.uwb_factor_backend_en && uwb_update_enabled) {
+    ROS_WARN("[UWB_FACTOR_BACKEND] uwb/update_en is configured true; the "
+             "UwbManager bridge forcibly suppresses the legacy update.");
+  }
+
+  if (!gnss_factor_enabled_) {
+    alignment_.valid = true;
+    initial_map_to_odom_ = gtsam::Pose3();
+    queueTextEvent("GLOBAL_FRAME_READY", "source=livo_identity_no_gnss");
   }
 
   initializeResultFiles();
   setupRos(nh);
-  queueTextEvent("BACKEND_INIT", "waiting_for_rtk_fixed_alignment");
+  queueTextEvent(
+      "BACKEND_INIT",
+      gnss_factor_enabled_ ? "waiting_for_rtk_fixed_alignment"
+                           : "livo_identity_frame_ready");
   ROS_INFO_STREAM(
       "[RTK_BACKEND] lag=" << config_.lag_seconds
       << "s raw_buffer=" << config_.raw_odom_buffer_seconds
@@ -140,15 +227,42 @@ RtkFixedLagBackend::RtkFixedLagBackend(ros::NodeHandle &nh) {
       << "s reuse_node_dt=" << config_.reuse_existing_node_time_diff_s
       << "s gnss_node_min_interval=" << config_.gnss_node_min_interval_s
       << "s max_active_states=" << config_.max_active_states
+      << " gnss_factors=" << gnss_factor_enabled_
+      << " uwb_factors=" << config_.uwb_factor_backend_en
       << " output_directory=" << config_.output_directory);
   ROS_INFO_STREAM(
       "[RTK_BACKEND] LIVO Pose3 sigmas [rotation xyz, translation xyz]=["
-      << config_.livo_rotation_sigma_rad << " "
-      << config_.livo_rotation_sigma_rad << " "
-      << config_.livo_rotation_sigma_rad << " "
+      << (config_.uwb_factor_backend_en
+              ? config_.livo_uwb_rotation_sigma_rad
+              : config_.livo_rotation_sigma_rad)
+      << " "
+      << (config_.uwb_factor_backend_en
+              ? config_.livo_uwb_rotation_sigma_rad
+              : config_.livo_rotation_sigma_rad)
+      << " "
+      << (config_.uwb_factor_backend_en
+              ? config_.livo_uwb_rotation_sigma_rad
+              : config_.livo_rotation_sigma_rad)
+      << " "
       << config_.livo_translation_sigma_m << " "
-      << config_.livo_translation_sigma_m << " "
-      << config_.livo_translation_sigma_m << "]");
+      << (config_.uwb_factor_backend_en
+              ? config_.livo_lateral_vertical_sigma_m
+              : config_.livo_translation_sigma_m)
+      << " "
+      << (config_.uwb_factor_backend_en
+              ? config_.livo_lateral_vertical_sigma_m
+              : config_.livo_translation_sigma_m)
+      << "]");
+  if (config_.uwb_factor_backend_en) {
+    ROS_INFO_STREAM(
+        "[UWB_FACTOR_BACKEND] topic=" << config_.uwb_range_topic
+        << " positive_time_offset_semantics=aligned_time=measurement_time+offset"
+        << " time_offset_s=" << config_.uwb_time_offset_s
+        << " sigma_m=" << config_.uwb_range_sigma_m
+        << " tag_lever_arm_body_m=["
+        << config_.uwb_tag_lever_arm_body_m.transpose() << "] anchors="
+        << config_.uwb_anchors.size() << " legacy_frontend_update=0");
+  }
 }
 
 RtkFixedLagBackend::~RtkFixedLagBackend() {
@@ -161,13 +275,16 @@ RtkFixedLagBackend::~RtkFixedLagBackend() {
     const std::size_t waiting_alignment = pending_alignment_gnss_.size();
     const std::size_t waiting_status = pending_status_.size();
     const std::size_t waiting_odom = pending_gnss_odom_.size();
-    if (waiting_graph + waiting_alignment + waiting_status + waiting_odom !=
+    const std::size_t waiting_uwb = pending_uwb_.size();
+    if (waiting_graph + waiting_alignment + waiting_status + waiting_odom +
+            waiting_uwb !=
         0) {
       std::ostringstream waiting_detail;
       waiting_detail << "graph=" << waiting_graph
                      << " alignment=" << waiting_alignment
                      << " status=" << waiting_status
-                     << " odom_unpaired=" << waiting_odom;
+                     << " odom_unpaired=" << waiting_odom
+                     << " uwb=" << waiting_uwb;
       if (!pending_factor_gnss_.empty()) {
         waiting_detail
             << " graph_first_stamp_ns="
@@ -195,6 +312,10 @@ RtkFixedLagBackend::~RtkFixedLagBackend() {
            << " marginalized_nodes=" << marginalized_nodes_
            << " total_livo_factors=" << livo_factor_count_
            << " total_gnss_factors=" << gnss_factor_count_
+           << " total_uwb_factors=" << uwb_factor_count_
+           << " total_uwb_received=" << uwb_received_
+           << " total_uwb_rejected=" << uwb_rejected_
+           << " uwb_waiting=" << waiting_uwb
            << " total_gnss_received=" << gnss_received_
            << " total_gnss_rejected=" << gnss_rejected_
            << " gnss_odom_only_rejected=" << gnss_odom_only_rejected_
@@ -220,6 +341,26 @@ RtkFixedLagBackend::~RtkFixedLagBackend() {
            << " gnss_silent_drop_count=" << silent_drop_count
            << " gnss_conservation_delta=" << conservation_delta;
     queueTextEvent("BACKEND_SUMMARY", detail.str());
+    for (const auto &entry : uwb_anchor_statistics_) {
+      std::vector<double> residuals(entry.second.accepted_abs_residuals.begin(),
+                                    entry.second.accepted_abs_residuals.end());
+      std::sort(residuals.begin(), residuals.end());
+      const auto percentile = [&](double fraction) {
+        if (residuals.empty()) return 0.0;
+        const std::size_t index = static_cast<std::size_t>(std::llround(
+            fraction * static_cast<double>(residuals.size() - 1)));
+        return residuals[index];
+      };
+      std::ostringstream anchor_detail;
+      anchor_detail << "anchor=" << entry.first
+                    << " received=" << entry.second.received
+                    << " accepted=" << entry.second.accepted
+                    << " rejected=" << entry.second.rejected
+                    << " abs_residual_median=" << percentile(0.5)
+                    << " abs_residual_p95=" << percentile(0.95)
+                    << " retained_samples=" << residuals.size();
+      queueTextEvent("UWB_ANCHOR_SUMMARY", anchor_detail.str());
+    }
     queueStatusCsv();
     batch = takePendingFileBatch();
   }
@@ -290,8 +431,14 @@ void RtkFixedLagBackend::loadParameters(ros::NodeHandle &nh) {
   params.param("livo_translation_sigma_m",
                config_.livo_translation_sigma_m,
                config_.livo_translation_sigma_m);
+  params.param("livo_lateral_vertical_sigma_m",
+               config_.livo_lateral_vertical_sigma_m,
+               config_.livo_lateral_vertical_sigma_m);
   params.param("livo_rotation_sigma_rad", config_.livo_rotation_sigma_rad,
                config_.livo_rotation_sigma_rad);
+  params.param("livo_uwb_rotation_sigma_rad",
+               config_.livo_uwb_rotation_sigma_rad,
+               config_.livo_uwb_rotation_sigma_rad);
   params.param("prior_translation_sigma_m",
                config_.prior_translation_sigma_m,
                config_.prior_translation_sigma_m);
@@ -300,6 +447,23 @@ void RtkFixedLagBackend::loadParameters(ros::NodeHandle &nh) {
                config_.prior_roll_pitch_sigma_rad);
   params.param("prior_yaw_sigma_rad", config_.prior_yaw_sigma_rad,
                config_.prior_yaw_sigma_rad);
+  params.param("uwb_initial_prior_translation_sigma_m",
+               config_.uwb_initial_prior_translation_sigma_m,
+               config_.uwb_initial_prior_translation_sigma_m);
+  params.param("uwb_initial_prior_rotation_sigma_rad",
+               config_.uwb_initial_prior_rotation_sigma_rad,
+               config_.uwb_initial_prior_rotation_sigma_rad);
+  params.param("uwb_factor_backend_en", config_.uwb_factor_backend_en,
+               config_.uwb_factor_backend_en);
+  params.param("uwb_range_topic", config_.uwb_range_topic,
+               config_.uwb_range_topic);
+  params.param("uwb_association_max_dt_s",
+               config_.uwb_association_max_dt_s,
+               config_.uwb_association_max_dt_s);
+  params.param("uwb_max_nis", config_.uwb_max_nis,
+               config_.uwb_max_nis);
+  params.param("uwb_huber_delta", config_.uwb_huber_delta,
+               config_.uwb_huber_delta);
   params.param("frame_id", config_.frame_id, config_.frame_id);
   params.param("odom_frame_id", config_.odom_frame_id,
                config_.odom_frame_id);
@@ -317,6 +481,8 @@ void RtkFixedLagBackend::loadParameters(ros::NodeHandle &nh) {
   params.param("optimized_final_file", config_.optimized_final_file,
                config_.optimized_final_file);
   params.param("gnss_file", config_.gnss_file, config_.gnss_file);
+  params.param("uwb_status_csv_file", config_.uwb_status_csv_file,
+               config_.uwb_status_csv_file);
   params.param("status_csv_file", config_.status_csv_file,
                config_.status_csv_file);
   params.param("flush_interval_s", config_.flush_interval_s,
@@ -342,6 +508,75 @@ void RtkFixedLagBackend::loadParameters(ros::NodeHandle &nh) {
   }
   config_.antenna_lever_arm_body_m =
       gtsam::Point3(lever_arm[0], lever_arm[1], lever_arm[2]);
+
+  nh.param("uwb/time_offset_s", config_.uwb_time_offset_s,
+           config_.uwb_time_offset_s);
+  nh.param("uwb/range_noise_m", config_.uwb_range_sigma_m,
+           config_.uwb_range_sigma_m);
+  nh.param("uwb/min_range_m", config_.uwb_min_range_m,
+           config_.uwb_min_range_m);
+  nh.param("uwb/max_range_m", config_.uwb_max_range_m,
+           config_.uwb_max_range_m);
+  nh.param("uwb/max_residual_m", config_.uwb_max_prefit_residual_m,
+           config_.uwb_max_prefit_residual_m);
+
+  std::vector<double> uwb_lever_arm;
+  nh.param<std::vector<double>>("uwb/tag_offset_body", uwb_lever_arm,
+                                std::vector<double>{0.0, 0.0, 0.0});
+  if (uwb_lever_arm.size() != 3 ||
+      !std::all_of(uwb_lever_arm.begin(), uwb_lever_arm.end(),
+                   [](double value) { return std::isfinite(value); })) {
+    throw std::invalid_argument(
+        "/uwb/tag_offset_body must contain exactly 3 finite values");
+  }
+  config_.uwb_tag_lever_arm_body_m = gtsam::Point3(
+      uwb_lever_arm[0], uwb_lever_arm[1], uwb_lever_arm[2]);
+
+  std::vector<int> allowlist;
+  params.param<std::vector<int>>("uwb_anchor_allowlist", allowlist,
+                                 std::vector<int>());
+  config_.uwb_anchor_allowlist.insert(allowlist.begin(), allowlist.end());
+
+  XmlRpc::XmlRpcValue anchors;
+  if (nh.getParam("uwb/anchors", anchors)) {
+    if (anchors.getType() != XmlRpc::XmlRpcValue::TypeArray)
+      throw std::invalid_argument("/uwb/anchors must be an array");
+    for (int index = 0; index < anchors.size(); ++index) {
+      const XmlRpc::XmlRpcValue &entry = anchors[index];
+      if (entry.getType() != XmlRpc::XmlRpcValue::TypeStruct ||
+          !entry.hasMember("id") || !entry.hasMember("position")) {
+        throw std::invalid_argument(
+            "each /uwb/anchors entry requires id and position");
+      }
+      UwbAnchorConfig anchor;
+      if (!xmlRpcInteger(entry["id"], &anchor.id) ||
+          !xmlRpcPoint3(entry["position"], &anchor.position)) {
+        throw std::invalid_argument("invalid /uwb/anchors id or position");
+      }
+      int enabled = 1;
+      if (entry.hasMember("flag") &&
+          !xmlRpcInteger(entry["flag"], &enabled)) {
+        throw std::invalid_argument("invalid /uwb/anchors flag");
+      }
+      anchor.enabled = enabled != 0;
+      if (entry.hasMember("range_bias_m") &&
+          (!xmlRpcNumber(entry["range_bias_m"], &anchor.range_bias_m) ||
+           !std::isfinite(anchor.range_bias_m))) {
+        throw std::invalid_argument("invalid /uwb/anchors range_bias_m");
+      }
+      if (!config_.uwb_anchors.emplace(anchor.id, anchor).second)
+        throw std::invalid_argument("duplicate /uwb/anchors id");
+    }
+  }
+
+  bool anchor_frame_align_en = false;
+  nh.param("uwb/anchor_frame_align_en", anchor_frame_align_en, false);
+  if (config_.uwb_factor_backend_en && anchor_frame_align_en) {
+    throw std::invalid_argument(
+        "UWB factor backend requires anchors already expressed in the "
+        "backend map frame; disable uwb/anchor_frame_align_en after offline "
+        "alignment (1-2 anchors cannot define a free 6DoF transform)");
+  }
 }
 
 void RtkFixedLagBackend::validateParameters() const {
@@ -367,10 +602,14 @@ void RtkFixedLagBackend::validateParameters() const {
       config_.max_gnss_sigma_z_m < config_.min_gnss_sigma_z_m ||
       config_.max_gnss_residual_m <= 0.0 || config_.max_gnss_nis <= 0.0 ||
       config_.livo_translation_sigma_m <= 0.0 ||
+      config_.livo_lateral_vertical_sigma_m <= 0.0 ||
       config_.livo_rotation_sigma_rad <= 0.0 ||
+      config_.livo_uwb_rotation_sigma_rad <= 0.0 ||
       config_.prior_translation_sigma_m <= 0.0 ||
       config_.prior_roll_pitch_sigma_rad <= 0.0 ||
       config_.prior_yaw_sigma_rad <= 0.0 || config_.log_interval_s <= 0.0 ||
+      config_.uwb_initial_prior_translation_sigma_m <= 0.0 ||
+      config_.uwb_initial_prior_rotation_sigma_rad <= 0.0 ||
       config_.flush_interval_s <= 0.0) {
     throw std::invalid_argument("invalid non-positive rtk_backend parameter");
   }
@@ -393,6 +632,22 @@ void RtkFixedLagBackend::validateParameters() const {
   if (config_.robust_kernel == "huber" && config_.huber_delta <= 0.0) {
     throw std::invalid_argument("rtk_backend/huber_delta must be positive");
   }
+  if (config_.uwb_factor_backend_en &&
+      (!std::isfinite(config_.uwb_time_offset_s) ||
+       config_.uwb_range_sigma_m <= 0.0 || config_.uwb_min_range_m < 0.0 ||
+       config_.uwb_max_range_m <= config_.uwb_min_range_m ||
+       config_.uwb_association_max_dt_s < 0.0 ||
+       config_.uwb_max_prefit_residual_m <= 0.0 ||
+       config_.uwb_max_nis <= 0.0 || config_.uwb_huber_delta <= 0.0 ||
+       !config_.uwb_tag_lever_arm_body_m.allFinite() ||
+       config_.uwb_anchors.empty())) {
+    throw std::invalid_argument("invalid UWB factor backend parameter");
+  }
+  for (const int anchor_id : config_.uwb_anchor_allowlist) {
+    if (config_.uwb_anchors.count(anchor_id) == 0)
+      throw std::invalid_argument(
+          "rtk_backend/uwb_anchor_allowlist contains an unknown anchor");
+  }
   if ((config_.save_results || config_.save_text_log) &&
       config_.output_directory.empty()) {
     throw std::invalid_argument(
@@ -403,12 +658,19 @@ void RtkFixedLagBackend::validateParameters() const {
 void RtkFixedLagBackend::setupRos(ros::NodeHandle &nh) {
   raw_odom_subscriber_ = nh.subscribe(config_.raw_odom_topic, 500,
                                       &RtkFixedLagBackend::rawOdomCallback, this);
-  gnss_odom_subscriber_ = nh.subscribe(config_.gnss_odom_topic, 200,
-                                       &RtkFixedLagBackend::gnssOdomCallback,
-                                       this);
-  gnss_status_subscriber_ = nh.subscribe(
-      config_.gnss_status_topic, 200,
-      &RtkFixedLagBackend::gnssStatusCallback, this);
+  if (gnss_factor_enabled_) {
+    gnss_odom_subscriber_ = nh.subscribe(config_.gnss_odom_topic, 200,
+                                         &RtkFixedLagBackend::gnssOdomCallback,
+                                         this);
+    gnss_status_subscriber_ = nh.subscribe(
+        config_.gnss_status_topic, 200,
+        &RtkFixedLagBackend::gnssStatusCallback, this);
+  }
+  if (config_.uwb_factor_backend_en) {
+    uwb_range_subscriber_ = nh.subscribe(
+        config_.uwb_range_topic, 500,
+        &RtkFixedLagBackend::uwbRangeCallback, this);
+  }
   optimized_odom_publisher_ =
       nh.advertise<nav_msgs::Odometry>(config_.optimized_odom_topic, 20);
   optimized_path_publisher_ =
@@ -448,6 +710,8 @@ void RtkFixedLagBackend::initializeResultFiles() {
                                  std::ios::out | std::ios::trunc);
     gnss_stream_.open(directory / config_.gnss_file,
                       std::ios::out | std::ios::trunc);
+    uwb_stream_.open(directory / config_.uwb_status_csv_file,
+                     std::ios::out | std::ios::trunc);
     status_csv_stream_.open(directory / config_.status_csv_file,
                             std::ios::out | std::ios::trunc);
   }
@@ -459,7 +723,8 @@ void RtkFixedLagBackend::initializeResultFiles() {
   const bool result_streams_ok =
       !config_.save_results ||
       (raw_online_stream_ && optimized_online_stream_ &&
-       optimized_final_stream_ && gnss_stream_ && status_csv_stream_);
+       optimized_final_stream_ && gnss_stream_ && uwb_stream_ &&
+       status_csv_stream_);
   const bool text_stream_ok = !config_.save_text_log || text_log_stream_;
   if (!result_streams_ok || !text_stream_ok) {
     backend_error_ = "RESULT_FILE_OPEN_FAILED";
@@ -485,10 +750,19 @@ void RtkFixedLagBackend::initializeResultFiles() {
         << "# frame_id=map/ENU columns=timestamp x_m y_m z_m 0 0 0 1; "
            "unit quaternion is a placeholder because GNSS supplies no "
            "attitude\n";
+    uwb_stream_
+        << "timestamp_raw,timestamp_aligned,anchor_id,raw_range_m,"
+           "range_bias_m,corrected_range_m,predicted_range_prefit_m,"
+           "residual_prefit_m,normalized_range_residual,nis,sigma_m,"
+           "robust_weight,associated_key,association_dt_s,decision,reason,"
+           "active_anchor_count,geometry_eigenvalue_0,"
+           "geometry_eigenvalue_1,geometry_eigenvalue_2,geometry_rank,"
+           "geometry_condition,source_format,measurement_uid\n";
     status_csv_stream_
         << "wall_time,ros_time,latest_sensor_stamp,initialized,"
            "alignment_ready,active_states,active_factors,active_livo_factors,"
-           "active_gnss_factors,total_nodes,marginalized_nodes,"
+           "active_gnss_factors,active_uwb_factors,active_uwb_anchors,"
+           "total_nodes,marginalized_nodes,"
            "total_livo_factors,total_gnss_received,total_gnss_factors,"
            "gnss_waiting,gnss_time_rejected,gnss_quality_rejected,"
            "gnss_too_old,gnss_interpolation_gap,gnss_interpolation_invalid,"
@@ -505,7 +779,14 @@ void RtkFixedLagBackend::initializeResultFiles() {
            "alignment_transition_rejected,alignment_transition_waiting,"
            "gnss_waiting_alignment,gnss_waiting_status,"
            "gnss_duplicate_factor_count,gnss_silent_drop_count,"
-           "gnss_conservation_delta\n";
+           "gnss_conservation_delta,uwb_received,uwb_parsed,uwb_accepted,"
+           "uwb_rejected,uwb_factors,uwb_waiting,uwb_invalid_rejected,"
+           "uwb_stale_rejected,uwb_duplicate_rejected,"
+           "uwb_association_rejected,uwb_range_rejected,"
+           "uwb_residual_rejected,last_uwb_dt,last_uwb_residual,"
+           "last_uwb_nis,uwb_geometry_eigenvalue_0,"
+           "uwb_geometry_eigenvalue_1,uwb_geometry_eigenvalue_2,"
+           "uwb_geometry_rank,uwb_geometry_condition\n";
   }
 }
 
@@ -520,6 +801,7 @@ void RtkFixedLagBackend::closeResultFiles() {
   close(optimized_online_stream_);
   close(optimized_final_stream_);
   close(gnss_stream_);
+  close(uwb_stream_);
   close(status_csv_stream_);
   close(text_log_stream_);
   result_files_ready_ = false;
@@ -733,6 +1015,7 @@ void RtkFixedLagBackend::rawOdomCallback(
     if (alignment_.valid && !initialized_) initializeGraph(sample);
     if (initialized_ && !backend_halted_) {
       processPendingGnss();
+      processPendingUwb();
       maybeAddKeyframe(sample);
     }
     pruneRawOdomBuffer();
@@ -800,6 +1083,80 @@ void RtkFixedLagBackend::gnssOdomCallback(
   tryPairGnssMessages(stamp_ns);
   while (pending_gnss_odom_.size() > kMaximumUnpairedGnssMessages)
     pending_gnss_odom_.erase(pending_gnss_odom_.begin());
+  publishStatus();
+}
+
+void RtkFixedLagBackend::uwbRangeCallback(
+    const uwb_serial_driver::UwbRangeArrayConstPtr &message) {
+  if (!config_.uwb_factor_backend_en) return;
+  std::lock_guard<std::mutex> lock(state_mutex_);
+
+  for (const auto &range : message->ranges) {
+    UwbMeasurement measurement;
+    measurement.raw_stamp = message->header.stamp;
+    measurement.aligned_stamp = message->header.stamp;
+    if (!measurement.aligned_stamp.isZero() &&
+        std::isfinite(config_.uwb_time_offset_s)) {
+      measurement.aligned_stamp += ros::Duration(config_.uwb_time_offset_s);
+    }
+    measurement.anchor_id = static_cast<int>(range.anchor_id);
+    measurement.raw_range_m = range.raw_range_m;
+    measurement.measurement_uid =
+        (message->round_sequence << 16) |
+        static_cast<std::uint64_t>(range.anchor_id);
+    measurement.source_format = range.source_format;
+    ++uwb_received_;
+    ++uwb_anchor_statistics_[measurement.anchor_id].received;
+
+    if (message->header.stamp.isZero() ||
+        !std::isfinite(message->header.stamp.toSec()) ||
+        !std::isfinite(measurement.aligned_stamp.toSec()) ||
+        measurement.aligned_stamp.toSec() <= 0.0 ||
+        !std::isfinite(measurement.raw_range_m) || !range.valid) {
+      rejectUwb(kUwbInvalid, &measurement);
+      continue;
+    }
+
+    const auto anchor = config_.uwb_anchors.find(measurement.anchor_id);
+    if (anchor == config_.uwb_anchors.end() || !anchor->second.enabled) {
+      rejectUwb(kUwbUnknownAnchor, &measurement);
+      continue;
+    }
+    if (!config_.uwb_anchor_allowlist.empty() &&
+        config_.uwb_anchor_allowlist.count(measurement.anchor_id) == 0) {
+      rejectUwb(kUwbAnchorFiltered, &measurement);
+      continue;
+    }
+
+    measurement.range_bias_m = anchor->second.range_bias_m;
+    measurement.corrected_range_m =
+        measurement.raw_range_m - measurement.range_bias_m;
+    if (measurement.raw_range_m < config_.uwb_min_range_m ||
+        measurement.raw_range_m > config_.uwb_max_range_m ||
+        !std::isfinite(measurement.corrected_range_m) ||
+        measurement.corrected_range_m < config_.uwb_min_range_m ||
+        measurement.corrected_range_m > config_.uwb_max_range_m) {
+      rejectUwb(kUwbRangeGate, &measurement);
+      continue;
+    }
+
+    const std::int64_t stamp_ns =
+        stampNanoseconds(measurement.aligned_stamp);
+    const auto previous = last_enqueued_uwb_stamp_ns_.find(
+        measurement.anchor_id);
+    if (previous != last_enqueued_uwb_stamp_ns_.end() &&
+        stamp_ns <= previous->second) {
+      rejectUwb(stamp_ns == previous->second ? kUwbDuplicate : kUwbStale,
+                &measurement);
+      continue;
+    }
+    last_enqueued_uwb_stamp_ns_[measurement.anchor_id] = stamp_ns;
+    ++uwb_parsed_;
+    newest_sensor_stamp_ =
+        std::max(newest_sensor_stamp_, measurement.aligned_stamp);
+    insertPendingUwb(measurement);
+  }
+  processPendingUwb();
   publishStatus();
 }
 
@@ -1129,10 +1486,19 @@ bool RtkFixedLagBackend::initializeGraph(const RawOdomSample &sample) {
   const gtsam::Key key = gtsam::Symbol('x', next_keyframe_id_);
   const gtsam::Pose3 map_pose = initial_map_to_odom_.compose(sample.pose);
   gtsam::Vector6 sigmas;
-  sigmas << config_.prior_roll_pitch_sigma_rad,
-      config_.prior_roll_pitch_sigma_rad, config_.prior_yaw_sigma_rad,
-      config_.prior_translation_sigma_m, config_.prior_translation_sigma_m,
-      config_.prior_translation_sigma_m;
+  if (config_.uwb_factor_backend_en) {
+    sigmas << config_.uwb_initial_prior_rotation_sigma_rad,
+        config_.uwb_initial_prior_rotation_sigma_rad,
+        config_.uwb_initial_prior_rotation_sigma_rad,
+        config_.uwb_initial_prior_translation_sigma_m,
+        config_.uwb_initial_prior_translation_sigma_m,
+        config_.uwb_initial_prior_translation_sigma_m;
+  } else {
+    sigmas << config_.prior_roll_pitch_sigma_rad,
+        config_.prior_roll_pitch_sigma_rad, config_.prior_yaw_sigma_rad,
+        config_.prior_translation_sigma_m, config_.prior_translation_sigma_m,
+        config_.prior_translation_sigma_m;
+  }
   const auto noise = gtsam::noiseModel::Diagonal::Sigmas(sigmas);
 
   gtsam::NonlinearFactorGraph factors;
@@ -1152,6 +1518,13 @@ bool RtkFixedLagBackend::initializeGraph(const RawOdomSample &sample) {
   ++total_nodes_created_;
   initialized_ = true;
   queueTextEvent("NODE_CREATED", "id=0 type=prior");
+  if (config_.uwb_factor_backend_en)
+    queueTextEvent(
+        "UWB_INITIAL_PRIOR",
+        "key=x0 source=existing_backend_initial_prior sigma_translation=" +
+            std::to_string(config_.uwb_initial_prior_translation_sigma_m) +
+            " sigma_rotation=" +
+            std::to_string(config_.uwb_initial_prior_rotation_sigma_rad));
   refreshEstimateAndPublish();
   ROS_INFO_STREAM("[RTK_BACKEND] initialized at sensor_stamp="
                   << sample.stamp.toSec());
@@ -1159,7 +1532,7 @@ bool RtkFixedLagBackend::initializeGraph(const RawOdomSample &sample) {
 }
 
 bool RtkFixedLagBackend::createGraphNode(const RawOdomSample &sample,
-                                         bool gnss_triggered,
+                                         const std::string &trigger,
                                          gtsam::Key *created_key) {
   if (!initialized_ || backend_halted_ || keyframes_.empty()) return false;
   const Keyframe previous = keyframes_.back();
@@ -1170,10 +1543,16 @@ bool RtkFixedLagBackend::createGraphNode(const RawOdomSample &sample,
   const gtsam::Key key = gtsam::Symbol('x', next_keyframe_id_);
   gtsam::Vector6 sigmas;
   // GTSAM Pose3 tangent order: rotation xyz followed by translation xyz.
-  sigmas << config_.livo_rotation_sigma_rad,
-      config_.livo_rotation_sigma_rad, config_.livo_rotation_sigma_rad,
-      config_.livo_translation_sigma_m, config_.livo_translation_sigma_m,
-      config_.livo_translation_sigma_m;
+  const double rotation_sigma = config_.uwb_factor_backend_en
+                                    ? config_.livo_uwb_rotation_sigma_rad
+                                    : config_.livo_rotation_sigma_rad;
+  const double lateral_vertical_sigma =
+      config_.uwb_factor_backend_en
+          ? config_.livo_lateral_vertical_sigma_m
+          : config_.livo_translation_sigma_m;
+  sigmas << rotation_sigma, rotation_sigma, rotation_sigma,
+      config_.livo_translation_sigma_m, lateral_vertical_sigma,
+      lateral_vertical_sigma;
   const auto noise = gtsam::noiseModel::Diagonal::Sigmas(sigmas);
 
   gtsam::NonlinearFactorGraph factors;
@@ -1186,7 +1565,7 @@ bool RtkFixedLagBackend::createGraphNode(const RawOdomSample &sample,
   if (!updateSmoother(factors, values, timestamps)) return false;
 
   keyframes_.push_back(Keyframe{next_keyframe_id_, key, sample.stamp,
-                                sample.pose, initial, gnss_triggered});
+                                sample.pose, initial, trigger != "motion"});
   ++next_keyframe_id_;
   ++total_nodes_created_;
   ++livo_factor_count_;
@@ -1194,7 +1573,7 @@ bool RtkFixedLagBackend::createGraphNode(const RawOdomSample &sample,
   std::ostringstream detail;
   detail << "id=" << (next_keyframe_id_ - 1)
          << " stamp=" << std::setprecision(15) << sample.stamp.toSec()
-         << " type=" << (gnss_triggered ? "gnss_triggered" : "motion");
+         << " type=" << trigger << "_triggered";
   queueTextEvent("NODE_CREATED", detail.str());
   queueTextEvent("LIVO_FACTOR_ADDED", detail.str());
   refreshEstimateAndPublish(false);
@@ -1210,7 +1589,7 @@ void RtkFixedLagBackend::maybeAddKeyframe(const RawOdomSample &sample) {
                             config_)) {
     return;
   }
-  if (createGraphNode(sample, false, nullptr)) refreshEstimateAndPublish();
+  if (createGraphNode(sample, "motion", nullptr)) refreshEstimateAndPublish();
 }
 
 RtkFixedLagBackend::Keyframe *RtkFixedLagBackend::findReusableKeyframe(
@@ -1226,6 +1605,21 @@ RtkFixedLagBackend::Keyframe *RtkFixedLagBackend::findReusableKeyframe(
   return *time_difference_s <= config_.reuse_existing_node_time_diff_s
              ? &(*nearest)
              : nullptr;
+}
+
+RtkFixedLagBackend::Keyframe *RtkFixedLagBackend::findNearestKeyframe(
+    const ros::Time &stamp, double maximum_time_difference_s,
+    double *time_difference_s) {
+  if (keyframes_.empty()) return nullptr;
+  const auto nearest = std::min_element(
+      keyframes_.begin(), keyframes_.end(),
+      [&](const Keyframe &left, const Keyframe &right) {
+        return stampDifference(left.stamp, stamp) <
+               stampDifference(right.stamp, stamp);
+      });
+  *time_difference_s = stampDifference(nearest->stamp, stamp);
+  return *time_difference_s <= maximum_time_difference_s ? &(*nearest)
+                                                          : nullptr;
 }
 
 RtkFixedLagBackend::Keyframe *RtkFixedLagBackend::findKeyframe(
@@ -1305,7 +1699,7 @@ void RtkFixedLagBackend::processPendingGnss() {
 
       gtsam::Key created_key = 0;
       if (!createGraphNode(
-              RawOdomSample{measurement->stamp, interpolated_raw_pose}, true,
+              RawOdomSample{measurement->stamp, interpolated_raw_pose}, "gnss",
               &created_key)) {
         rejectGnss(kNoActiveGraphState, 0.0, 0.0,
                    &measurement->stamp);
@@ -1435,6 +1829,234 @@ bool RtkFixedLagBackend::addGnssFactor(
   return true;
 }
 
+void RtkFixedLagBackend::insertPendingUwb(
+    const UwbMeasurement &measurement) {
+  const auto insertion = std::upper_bound(
+      pending_uwb_.begin(), pending_uwb_.end(), measurement.aligned_stamp,
+      [](const ros::Time &stamp, const UwbMeasurement &pending) {
+        return stamp < pending.aligned_stamp;
+      });
+  pending_uwb_.insert(insertion, measurement);
+}
+
+void RtkFixedLagBackend::processPendingUwb() {
+  if (!config_.uwb_factor_backend_en || !alignment_.valid ||
+      backend_halted_)
+    return;
+
+  for (auto measurement = pending_uwb_.begin();
+       measurement != pending_uwb_.end();) {
+    if (raw_odom_buffer_.empty() ||
+        measurement->aligned_stamp > raw_odom_buffer_.back().stamp)
+      break;
+    if (measurement->aligned_stamp < raw_odom_buffer_.front().stamp) {
+      rejectUwb(kUwbStale, &(*measurement));
+      measurement = pending_uwb_.erase(measurement);
+      continue;
+    }
+
+    gtsam::Pose3 interpolated_raw_pose;
+    double interpolation_gap_s = 0.0;
+    std::string interpolation_reason;
+    if (!interpolateRawPose(measurement->aligned_stamp,
+                            &interpolated_raw_pose, &interpolation_gap_s,
+                            &interpolation_reason)) {
+      if (interpolation_reason == kWaitingForRawOdom) break;
+      rejectUwb(interpolation_reason == kGnssTooOldForBuffer
+                    ? kUwbStale
+                    : kUwbAssociationTooFar,
+                &(*measurement));
+      measurement = pending_uwb_.erase(measurement);
+      continue;
+    }
+
+    if (!initialized_ || keyframes_.empty() || !smoother_) {
+      rejectUwb(kNoActiveGraphState, &(*measurement));
+      measurement = pending_uwb_.erase(measurement);
+      continue;
+    }
+
+    double association_dt_s = std::numeric_limits<double>::infinity();
+    Keyframe *keyframe = findNearestKeyframe(
+        measurement->aligned_stamp, config_.uwb_association_max_dt_s,
+        &association_dt_s);
+    bool node_created = false;
+    if (!keyframe) {
+      if (measurement->aligned_stamp <= keyframes_.back().stamp) {
+        rejectUwb(kUwbAssociationTooFar, &(*measurement), 0.0, 0.0, 0.0,
+                  association_dt_s);
+        measurement = pending_uwb_.erase(measurement);
+        continue;
+      }
+      gtsam::Key created_key = 0;
+      if (!createGraphNode(
+              RawOdomSample{measurement->aligned_stamp,
+                            interpolated_raw_pose},
+              "uwb", &created_key)) {
+        rejectUwb(kNoActiveGraphState, &(*measurement));
+        measurement = pending_uwb_.erase(measurement);
+        continue;
+      }
+      node_created = true;
+      keyframe = findKeyframe(created_key);
+      association_dt_s = 0.0;
+      if (!keyframe) {
+        rejectUwb(kNoActiveGraphState, &(*measurement));
+        refreshEstimateAndPublish();
+        measurement = pending_uwb_.erase(measurement);
+        continue;
+      }
+    }
+
+    last_uwb_association_dt_s_ = association_dt_s;
+    const bool factor_added = addUwbFactor(*measurement, *keyframe);
+    if (factor_added || node_created) refreshEstimateAndPublish();
+    measurement = pending_uwb_.erase(measurement);
+  }
+
+  const std::size_t maximum_pending =
+      static_cast<std::size_t>(config_.max_active_states) * 20;
+  while (pending_uwb_.size() > maximum_pending) {
+    rejectUwb(kUwbStale, &pending_uwb_.front());
+    pending_uwb_.pop_front();
+  }
+}
+
+bool RtkFixedLagBackend::addUwbFactor(
+    const UwbMeasurement &measurement, const Keyframe &keyframe) {
+  const std::int64_t measurement_stamp_ns =
+      stampNanoseconds(measurement.aligned_stamp);
+  const auto previous = last_added_uwb_stamp_ns_.find(measurement.anchor_id);
+  if (previous != last_added_uwb_stamp_ns_.end() &&
+      measurement_stamp_ns <= previous->second) {
+    rejectUwb(measurement_stamp_ns == previous->second ? kUwbDuplicate
+                                                       : kUwbStale,
+              &measurement, 0.0, 0.0, 0.0,
+              last_uwb_association_dt_s_, keyframe.id);
+    return false;
+  }
+
+  const auto anchor = config_.uwb_anchors.find(measurement.anchor_id);
+  if (anchor == config_.uwb_anchors.end()) {
+    rejectUwb(kUwbUnknownAnchor, &measurement, 0.0, 0.0, 0.0,
+              last_uwb_association_dt_s_, keyframe.id);
+    return false;
+  }
+
+  gtsam::Pose3 pose;
+  try {
+    pose = smoother_->calculateEstimate<gtsam::Pose3>(keyframe.key);
+  } catch (const std::exception &) {
+    rejectUwb(kNoActiveGraphState, &measurement, 0.0, 0.0, 0.0,
+              last_uwb_association_dt_s_, keyframe.id);
+    return false;
+  }
+
+  const auto unit_noise = gtsam::noiseModel::Isotropic::Sigma(1, 1.0);
+  UwbRangeFactor prefit_factor(
+      keyframe.key, anchor->second.position, measurement.corrected_range_m,
+      config_.uwb_tag_lever_arm_body_m, unit_noise);
+  gtsam::Matrix jacobian;
+  const double residual_m = prefit_factor.evaluateError(pose, jacobian)(0);
+  const double predicted_range_m = residual_m + measurement.corrected_range_m;
+  if (!std::isfinite(predicted_range_m) || predicted_range_m <= 1e-9 ||
+      !std::isfinite(residual_m) || jacobian.rows() != 1 ||
+      jacobian.cols() != 6 || !jacobian.allFinite()) {
+    rejectUwb(kUwbInvalid, &measurement, predicted_range_m, residual_m, 0.0,
+              last_uwb_association_dt_s_, keyframe.id);
+    return false;
+  }
+
+  double innovation_variance = 0.0;
+  try {
+    const gtsam::Matrix covariance =
+        smoother_->marginalCovariance(keyframe.key);
+    innovation_variance =
+        (jacobian * covariance * jacobian.transpose())(0, 0) +
+        config_.uwb_range_sigma_m * config_.uwb_range_sigma_m;
+  } catch (const std::exception &) {
+    rejectUwb("INVALID_INNOVATION_COVARIANCE", &measurement,
+              predicted_range_m, residual_m, 0.0,
+              last_uwb_association_dt_s_, keyframe.id);
+    return false;
+  }
+  if (!std::isfinite(innovation_variance) || innovation_variance <= 0.0) {
+    rejectUwb("INVALID_INNOVATION_COVARIANCE", &measurement,
+              predicted_range_m, residual_m, 0.0,
+              last_uwb_association_dt_s_, keyframe.id);
+    return false;
+  }
+  const double nis = residual_m * residual_m / innovation_variance;
+  last_uwb_residual_m_ = residual_m;
+  last_uwb_nis_ = nis;
+  if (std::abs(residual_m) > config_.uwb_max_prefit_residual_m) {
+    rejectUwb(kUwbResidualGate, &measurement, predicted_range_m, residual_m,
+              nis, last_uwb_association_dt_s_, keyframe.id);
+    return false;
+  }
+  if (!std::isfinite(nis) || nis > config_.uwb_max_nis) {
+    rejectUwb(kUwbNisGate, &measurement, predicted_range_m, residual_m, nis,
+              last_uwb_association_dt_s_, keyframe.id);
+    return false;
+  }
+
+  gtsam::SharedNoiseModel noise = gtsam::noiseModel::Isotropic::Sigma(
+      1, config_.uwb_range_sigma_m);
+  noise = gtsam::noiseModel::Robust::Create(
+      gtsam::noiseModel::mEstimator::Huber::Create(
+          config_.uwb_huber_delta),
+      noise);
+  gtsam::NonlinearFactorGraph factors;
+  factors.add(boost::make_shared<UwbRangeFactor>(
+      keyframe.key, anchor->second.position, measurement.corrected_range_m,
+      config_.uwb_tag_lever_arm_body_m, noise));
+  if (!updateSmoother(factors, gtsam::Values(),
+                      gtsam::FixedLagSmoother::KeyTimestampMap())) {
+    rejectUwb("OPTIMIZATION_FAILED", &measurement, predicted_range_m,
+              residual_m, nis, last_uwb_association_dt_s_, keyframe.id);
+    return false;
+  }
+
+  ++uwb_accepted_;
+  ++uwb_factor_count_;
+  last_added_uwb_stamp_ns_[measurement.anchor_id] = measurement_stamp_ns;
+  UwbAnchorStatistics &statistics =
+      uwb_anchor_statistics_[measurement.anchor_id];
+  ++statistics.accepted;
+  statistics.accepted_abs_residuals.push_back(std::abs(residual_m));
+  // ponytail: bounded diagnostics protect long Jetson runs; replace with a
+  // streaming quantile estimator only if lifetime percentiles become needed.
+  constexpr std::size_t kMaximumResidualHistoryPerAnchor = 4096;
+  if (statistics.accepted_abs_residuals.size() >
+      kMaximumResidualHistoryPerAnchor)
+    statistics.accepted_abs_residuals.pop_front();
+
+  const double normalized_residual =
+      std::abs(residual_m) / config_.uwb_range_sigma_m;
+  const double robust_weight =
+      normalized_residual <= config_.uwb_huber_delta
+          ? 1.0
+          : config_.uwb_huber_delta / normalized_residual;
+  queueUwbMeasurement(measurement, "ACCEPTED", "NONE", predicted_range_m,
+                      residual_m, nis, robust_weight,
+                      last_uwb_association_dt_s_, keyframe.id);
+  std::ostringstream detail;
+  detail << "key=" << keyframe.id << " raw_stamp=" << std::setprecision(15)
+         << measurement.raw_stamp.toSec()
+         << " aligned_stamp=" << measurement.aligned_stamp.toSec()
+         << " anchor=" << measurement.anchor_id
+         << " raw_range=" << measurement.raw_range_m
+         << " range_bias=" << measurement.range_bias_m
+         << " corrected_range=" << measurement.corrected_range_m
+         << " predicted_range=" << predicted_range_m
+         << " residual=" << residual_m << " nis=" << nis
+         << " association_dt=" << last_uwb_association_dt_s_;
+  queueTextEvent("UWB_FACTOR_ADDED", detail.str());
+  ROS_INFO_STREAM_THROTTLE(config_.log_interval_s,
+                           "[UWB_FACTOR_ADDED] " << detail.str());
+  return true;
+}
+
 std::vector<RtkFixedLagBackend::ArchiveRecord>
 RtkFixedLagBackend::collectMarginalizationCandidates(
     const gtsam::FixedLagSmoother::KeyTimestampMap &timestamps) const {
@@ -1551,6 +2173,7 @@ void RtkFixedLagBackend::refreshEstimateAndPublish(bool publish_current) {
   active_factors_ = 0;
   active_livo_factors_ = 0;
   active_gnss_factors_ = 0;
+  active_uwb_factors_ = 0;
   for (const auto &factor : smoother_->getFactors()) {
     if (!factor) continue;
     ++active_factors_;
@@ -1559,8 +2182,11 @@ void RtkFixedLagBackend::refreshEstimateAndPublish(bool publish_current) {
       ++active_livo_factors_;
     } else if (boost::dynamic_pointer_cast<GnssPositionArmFactor>(factor)) {
       ++active_gnss_factors_;
+    } else if (boost::dynamic_pointer_cast<UwbRangeFactor>(factor)) {
+      ++active_uwb_factors_;
     }
   }
+  updateUwbGeometryDiagnostics(estimate);
   max_active_states_observed_ =
       std::max(max_active_states_observed_, keyframes_.size());
   if (keyframes_.size() > static_cast<std::size_t>(config_.max_active_states)) {
@@ -1626,6 +2252,55 @@ void RtkFixedLagBackend::refreshEstimateAndPublish(bool publish_current) {
   publishStatus();
 }
 
+void RtkFixedLagBackend::updateUwbGeometryDiagnostics(
+    const gtsam::Values &estimate) {
+  gtsam::Matrix3 geometry = gtsam::Matrix3::Zero();
+  std::set<int> active_anchor_ids;
+  if (smoother_) {
+    for (const auto &factor : smoother_->getFactors()) {
+      const auto range_factor =
+          boost::dynamic_pointer_cast<UwbRangeFactor>(factor);
+      if (!range_factor || range_factor->keys().empty()) continue;
+      const gtsam::Key key = range_factor->keys().front();
+      if (!estimate.exists(key)) continue;
+      const gtsam::Pose3 pose = estimate.at<gtsam::Pose3>(key);
+      const gtsam::Point3 tag_position =
+          pose.transformFrom(range_factor->tagLeverArm());
+      const gtsam::Vector3 difference =
+          tag_position - range_factor->anchorPosition();
+      const double norm = difference.norm();
+      if (!std::isfinite(norm) || norm <= 1e-9) continue;
+      const gtsam::Vector3 line_of_sight = difference / norm;
+      geometry += line_of_sight * line_of_sight.transpose();
+      for (const auto &anchor : config_.uwb_anchors) {
+        if ((anchor.second.position - range_factor->anchorPosition()).norm() <
+            1e-9) {
+          active_anchor_ids.insert(anchor.first);
+          break;
+        }
+      }
+    }
+  }
+  active_uwb_anchor_count_ = active_anchor_ids.size();
+  const Eigen::SelfAdjointEigenSolver<gtsam::Matrix3> solver(geometry);
+  if (solver.info() != Eigen::Success) {
+    uwb_geometry_eigenvalues_.setZero();
+    uwb_geometry_rank_ = 0;
+    uwb_geometry_condition_ = 0.0;
+    return;
+  }
+  uwb_geometry_eigenvalues_ = solver.eigenvalues();
+  const double maximum = uwb_geometry_eigenvalues_(2);
+  const double threshold = std::max(1e-6, maximum * 1e-3);
+  uwb_geometry_rank_ = 0;
+  for (int index = 0; index < 3; ++index)
+    if (uwb_geometry_eigenvalues_(index) > threshold) ++uwb_geometry_rank_;
+  uwb_geometry_condition_ =
+      uwb_geometry_eigenvalues_(0) > threshold
+          ? maximum / uwb_geometry_eigenvalues_(0)
+          : std::numeric_limits<double>::infinity();
+}
+
 void RtkFixedLagBackend::pruneRawOdomBuffer() {
   if (raw_odom_buffer_.empty()) return;
   const ros::Time newest = raw_odom_buffer_.back().stamp;
@@ -1684,6 +2359,56 @@ void RtkFixedLagBackend::rejectGnss(const std::string &reason,
                            << " total=" << gnss_rejected_);
 }
 
+void RtkFixedLagBackend::rejectUwb(
+    const std::string &reason, const UwbMeasurement *measurement,
+    double predicted_range_m, double residual_m, double nis,
+    double association_dt_s, std::int64_t associated_key) {
+  ++uwb_rejected_;
+  if (measurement) ++uwb_anchor_statistics_[measurement->anchor_id].rejected;
+  if (reason == kUwbInvalid || reason == kUwbUnknownAnchor ||
+      reason == "INVALID_INNOVATION_COVARIANCE")
+    ++uwb_invalid_rejected_;
+  else if (reason == kUwbStale)
+    ++uwb_stale_rejected_;
+  else if (reason == kUwbDuplicate)
+    ++uwb_duplicate_rejected_;
+  else if (reason == kUwbAssociationTooFar ||
+           reason == kInterpolationGapTooLarge ||
+           reason == kInterpolationInvalid)
+    ++uwb_association_rejected_;
+  else if (reason == kUwbRangeGate)
+    ++uwb_range_rejected_;
+  else if (reason == kUwbResidualGate || reason == kUwbNisGate)
+    ++uwb_residual_rejected_;
+
+  last_reject_reason_ = "UWB_" + reason;
+  if (std::isfinite(residual_m)) last_uwb_residual_m_ = residual_m;
+  if (std::isfinite(nis)) last_uwb_nis_ = nis;
+  if (measurement) {
+    queueUwbMeasurement(*measurement, "REJECTED", reason,
+                        predicted_range_m, residual_m, nis, 0.0,
+                        association_dt_s, associated_key);
+  }
+  std::ostringstream detail;
+  detail << "reason=" << reason;
+  if (measurement) {
+    detail << " raw_stamp=" << std::setprecision(15)
+           << measurement->raw_stamp.toSec()
+           << " aligned_stamp=" << measurement->aligned_stamp.toSec()
+           << " anchor=" << measurement->anchor_id
+           << " raw_range=" << measurement->raw_range_m
+           << " range_bias=" << measurement->range_bias_m
+           << " corrected_range=" << measurement->corrected_range_m;
+  }
+  detail << " predicted_range=" << predicted_range_m
+         << " residual=" << residual_m << " nis=" << nis
+         << " association_dt=" << association_dt_s;
+  queueTextEvent("UWB_REJECTED", detail.str());
+  ROS_WARN_STREAM_THROTTLE(config_.log_interval_s,
+                           "[UWB_FACTOR_REJECT] " << detail.str()
+                           << " total=" << uwb_rejected_);
+}
+
 std::int64_t RtkFixedLagBackend::gnssConservationDelta() const {
   const std::uint64_t accounted =
       (gnss_rejected_ - gnss_odom_only_rejected_) +
@@ -1713,9 +2438,14 @@ void RtkFixedLagBackend::statusTimerCallback(const ros::TimerEvent &) {
           << " active_factors=" << active_factors_
           << " active_livo=" << active_livo_factors_
           << " active_gnss=" << active_gnss_factors_
+          << " active_uwb=" << active_uwb_factors_
+          << " active_uwb_anchors=" << active_uwb_anchor_count_
           << " total_nodes=" << total_nodes_created_
           << " gnss_waiting=" << pending_factor_gnss_.size()
           << " gnss_factors=" << gnss_factor_count_
+          << " uwb_waiting=" << pending_uwb_.size()
+          << " uwb_factors=" << uwb_factor_count_
+          << " uwb_rejected=" << uwb_rejected_
           << " alignment_gnss_used=" << alignment_gnss_used_
           << " alignment_transition_to_graph_pending="
           << alignment_transition_to_graph_pending_
@@ -1756,6 +2486,10 @@ void RtkFixedLagBackend::publishStatus() {
       static_cast<std::uint32_t>(active_livo_factors_);
   status.active_gnss_factors =
       static_cast<std::uint32_t>(active_gnss_factors_);
+  status.active_uwb_factors =
+      static_cast<std::uint32_t>(active_uwb_factors_);
+  status.active_uwb_anchors =
+      static_cast<std::uint32_t>(active_uwb_anchor_count_);
   status.max_active_states_observed =
       static_cast<std::uint32_t>(max_active_states_observed_);
   status.total_nodes_created = total_nodes_created_;
@@ -1774,6 +2508,17 @@ void RtkFixedLagBackend::publishStatus() {
   status.gnss_rejected = gnss_rejected_;
   status.gnss_factors = gnss_factor_count_;
   status.livo_factors = livo_factor_count_;
+  status.uwb_received = uwb_received_;
+  status.uwb_accepted = uwb_accepted_;
+  status.uwb_rejected = uwb_rejected_;
+  status.uwb_factors = uwb_factor_count_;
+  status.uwb_waiting = pending_uwb_.size();
+  status.uwb_invalid_rejected = uwb_invalid_rejected_;
+  status.uwb_stale_rejected = uwb_stale_rejected_;
+  status.uwb_duplicate_rejected = uwb_duplicate_rejected_;
+  status.uwb_association_rejected = uwb_association_rejected_;
+  status.uwb_range_rejected = uwb_range_rejected_;
+  status.uwb_residual_rejected = uwb_residual_rejected_;
   status.gnss_waiting = pending_factor_gnss_.size();
   status.gnss_time_rejected = gnss_time_rejected_;
   status.gnss_quality_rejected = gnss_quality_rejected_;
@@ -1787,6 +2532,14 @@ void RtkFixedLagBackend::publishStatus() {
   status.last_gnss_dt = last_gnss_dt_s_;
   status.last_gnss_residual = last_gnss_residual_m_;
   status.last_gnss_nis = last_gnss_nis_;
+  status.last_uwb_dt = last_uwb_association_dt_s_;
+  status.last_uwb_residual = last_uwb_residual_m_;
+  status.last_uwb_nis = last_uwb_nis_;
+  status.uwb_geometry_eigenvalues.x = uwb_geometry_eigenvalues_(0);
+  status.uwb_geometry_eigenvalues.y = uwb_geometry_eigenvalues_(1);
+  status.uwb_geometry_eigenvalues.z = uwb_geometry_eigenvalues_(2);
+  status.uwb_geometry_rank = static_cast<std::uint8_t>(uwb_geometry_rank_);
+  status.uwb_geometry_condition = uwb_geometry_condition_;
   status.optimization_time_ms = optimization_time_ms_;
   status.optimization_average_ms =
       optimization_count_ == 0
@@ -1868,6 +2621,37 @@ void RtkFixedLagBackend::queueGnssPosition(
     pending_file_batch_.gnss_lines.push_back(gnssTumLine(measurement));
 }
 
+void RtkFixedLagBackend::queueUwbMeasurement(
+    const UwbMeasurement &measurement, const std::string &decision,
+    const std::string &reason, double predicted_range_m, double residual_m,
+    double nis, double robust_weight, double association_dt_s,
+    std::int64_t associated_key) {
+  if (!config_.save_results) return;
+  const double normalized_residual =
+      std::isfinite(residual_m)
+          ? residual_m / config_.uwb_range_sigma_m
+          : std::numeric_limits<double>::quiet_NaN();
+  std::ostringstream line;
+  line << std::fixed << std::setprecision(9)
+       << measurement.raw_stamp.toSec() << ","
+       << measurement.aligned_stamp.toSec() << ","
+       << measurement.anchor_id << "," << measurement.raw_range_m << ","
+       << measurement.range_bias_m << "," << measurement.corrected_range_m
+       << "," << predicted_range_m << "," << residual_m << ","
+       << normalized_residual << "," << nis << ","
+       << config_.uwb_range_sigma_m << "," << robust_weight << ","
+       << associated_key << "," << association_dt_s << ","
+       << csvField(decision) << "," << csvField(reason) << ","
+       << active_uwb_anchor_count_ << ","
+       << uwb_geometry_eigenvalues_(0) << ","
+       << uwb_geometry_eigenvalues_(1) << ","
+       << uwb_geometry_eigenvalues_(2) << "," << uwb_geometry_rank_ << ","
+       << uwb_geometry_condition_ << ","
+       << csvField(measurement.source_format) << ","
+       << measurement.measurement_uid;
+  pending_file_batch_.uwb_lines.push_back(line.str());
+}
+
 void RtkFixedLagBackend::queueStatusCsv() {
   if (!config_.save_results) return;
   const double optimization_average =
@@ -1887,7 +2671,8 @@ void RtkFixedLagBackend::queueStatusCsv() {
        << newest_sensor_stamp_.toSec() << "," << initialized_ << ","
        << alignment_.valid << "," << keyframes_.size() << ","
        << active_factors_ << "," << active_livo_factors_ << ","
-       << active_gnss_factors_ << "," << total_nodes_created_ << ","
+       << active_gnss_factors_ << "," << active_uwb_factors_ << ","
+       << active_uwb_anchor_count_ << "," << total_nodes_created_ << ","
        << marginalized_nodes_ << "," << livo_factor_count_ << ","
        << gnss_received_ << "," << gnss_factor_count_ << ","
        << pending_factor_gnss_.size() << "," << gnss_time_rejected_ << ","
@@ -1912,6 +2697,17 @@ void RtkFixedLagBackend::queueStatusCsv() {
        << pending_alignment_gnss_.size() << "," << pending_status_.size()
        << "," << gnss_duplicate_factor_count_ << ","
        << gnssSilentDropCount() << "," << conservation_delta;
+  line << "," << uwb_received_ << "," << uwb_parsed_ << ","
+       << uwb_accepted_ << "," << uwb_rejected_ << ","
+       << uwb_factor_count_ << "," << pending_uwb_.size() << ","
+       << uwb_invalid_rejected_ << "," << uwb_stale_rejected_ << ","
+       << uwb_duplicate_rejected_ << "," << uwb_association_rejected_ << ","
+       << uwb_range_rejected_ << "," << uwb_residual_rejected_ << ","
+       << last_uwb_association_dt_s_ << "," << last_uwb_residual_m_ << ","
+       << last_uwb_nis_ << "," << uwb_geometry_eigenvalues_(0) << ","
+       << uwb_geometry_eigenvalues_(1) << ","
+       << uwb_geometry_eigenvalues_(2) << "," << uwb_geometry_rank_ << ","
+       << uwb_geometry_condition_;
   pending_file_batch_.status_lines.push_back(line.str());
 }
 
@@ -1943,6 +2739,7 @@ void RtkFixedLagBackend::writeFileBatch(const FileBatch &batch, bool flush) {
   write_lines(optimized_online_stream_, batch.optimized_online_lines);
   write_lines(optimized_final_stream_, batch.optimized_final_lines);
   write_lines(gnss_stream_, batch.gnss_lines);
+  write_lines(uwb_stream_, batch.uwb_lines);
   write_lines(status_csv_stream_, batch.status_lines);
   write_lines(text_log_stream_, batch.text_lines);
   if (!flush) return;
@@ -1950,6 +2747,7 @@ void RtkFixedLagBackend::writeFileBatch(const FileBatch &batch, bool flush) {
   if (optimized_online_stream_) optimized_online_stream_.flush();
   if (optimized_final_stream_) optimized_final_stream_.flush();
   if (gnss_stream_) gnss_stream_.flush();
+  if (uwb_stream_) uwb_stream_.flush();
   if (status_csv_stream_) status_csv_stream_.flush();
   if (text_log_stream_) text_log_stream_.flush();
 }

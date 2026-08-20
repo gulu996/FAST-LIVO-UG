@@ -319,6 +319,7 @@ if(OpenMP_CXX_FOUND)
   target_link_libraries(gnss ${OpenMP_CXX_FLAGS})
   target_link_libraries(gnss_manager_self_test ${OpenMP_CXX_FLAGS})
   target_link_libraries(uwb_manager_self_test ${OpenMP_CXX_FLAGS})
+  target_link_libraries(rtk_fixed_lag_backend ${OpenMP_CXX_FLAGS})
 endif()
 
 # Link mimalloc if found

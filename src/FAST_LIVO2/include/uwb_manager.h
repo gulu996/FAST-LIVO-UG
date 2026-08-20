@@ -182,15 +182,6 @@ struct UwbAnchorDistanceConstraint
   double distance_m = 0.0;
 };
 
-struct UwbRepeatedRangeState
-{
-  bool valid = false;
-  double last_range_m = 0.0;
-  double first_stamp = 0.0;
-  double last_stamp = 0.0;
-  int repeat_count = 0;
-};
-
 struct UwbAnchorFrameAlignSample
 {
   V3D tag_position_w = V3D::Zero();
@@ -247,6 +238,7 @@ public:
   void shutdown();
   bool isRunning() const { return running_.load(); }
   bool updateEnabled() const { return en_; }
+  bool legacyFrontendUpdateEnabled() const { return update_en_; }
   const std::string &inputMode() const { return input_mode_; }
   void setInputMode(const std::string &mode) { input_mode_ = mode; }
   void ingestExternalRanges(const uwb_serial_driver::UwbRangeArray &message);
@@ -268,10 +260,11 @@ private:
   void externalRangeCallback(const uwb_serial_driver::UwbRangeArrayConstPtr &message);
   bool loadReplayFile();
   std::vector<UwbRangeMeasurement> takeReplayMeasurements(double current_lidar_stamp, double lidar_start_stamp);
+  void publishBackendMeasurements(
+      const std::vector<UwbRangeMeasurement> &measurements,
+      double lidar_start_stamp);
   void handleLine(const std::string &line, double stamp);
   std::vector<UwbRangeMeasurement> parseLine(const std::string &line, double stamp) const;
-  std::vector<UwbRangeMeasurement> filterRepeatedRanges(const std::vector<UwbRangeMeasurement> &measurements,
-                                                        const std::string &source);
   std::vector<UwbRangeMeasurement> takeRecentMeasurements(double now);
   void logRawLine(double stamp, const std::string &line, const std::vector<UwbRangeMeasurement> &measurements);
   void logEvent(double stamp, const std::string &level, const std::string &message);
@@ -325,6 +318,8 @@ private:
   std::string input_mode_ = "legacy_internal";
   std::string input_source_ = "serial";
   std::string external_topic_ = "/uwb/ranges";
+  bool factor_backend_output_en_ = false;
+  std::string factor_backend_topic_ = "/uwb/backend_ranges";
   std::string serial_port_ = "/dev/ttyUSB0";
   int baudrate_ = 115200;
   bool dtr_high_ = true;
@@ -462,10 +457,6 @@ private:
   bool position_cov_floor_degraded_only_ = true;
   bool degraded_mode_ = false;
   double max_residual_m_ = 6.0;
-  bool stale_repeat_filter_en_ = true;
-  double stale_repeat_epsilon_m_ = 0.001;
-  int stale_repeat_max_count_ = 3;
-  double stale_repeat_max_duration_s_ = 2.0;
   double update_max_rot_step_deg_ = 1.0;
   double update_max_trans_step_m_ = 0.10;
   V3D tag_offset_body_ = V3D::Zero();
@@ -537,6 +528,8 @@ private:
   std::atomic<bool> running_{false};
   std::thread read_thread_;
   ros::Subscriber external_subscriber_;
+  ros::Publisher factor_backend_publisher_;
+  uint64_t factor_backend_sequence_ = 0;
   mutable std::mutex measurement_mutex_;
   std::deque<UwbRangeMeasurement> measurement_queue_;
   std::mutex log_mutex_;
@@ -557,7 +550,6 @@ private:
   std::vector<int> anchor_order_;
   std::map<int, std::deque<UwbAnchorSample>> anchor_samples_;
   std::vector<UwbAnchorDistanceConstraint> anchor_distance_constraints_;
-  std::map<int, UwbRepeatedRangeState> repeated_range_states_;
   std::vector<UwbRangeMeasurement> replay_measurements_;
   size_t replay_index_ = 0;
   bool replay_started_ = false;

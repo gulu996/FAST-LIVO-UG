@@ -10,6 +10,7 @@
 #include <nav_msgs/Path.h>
 #include <ros/ros.h>
 #include <tf/transform_broadcaster.h>
+#include <uwb_serial_driver/UwbRangeArray.h>
 
 #include <cstdint>
 #include <deque>
@@ -44,6 +45,29 @@ class GnssPositionArmFactor final
   gtsam::Point3 lever_arm_;
 };
 
+class UwbRangeFactor final : public gtsam::NoiseModelFactorN<gtsam::Pose3> {
+ public:
+  using Base = gtsam::NoiseModelFactorN<gtsam::Pose3>;
+
+  UwbRangeFactor(gtsam::Key key, const gtsam::Point3 &anchor_position,
+                 double corrected_range_m, const gtsam::Point3 &tag_lever_arm,
+                 const gtsam::SharedNoiseModel &noise_model);
+
+  gtsam::NonlinearFactor::shared_ptr clone() const override;
+  gtsam::Vector evaluateError(
+      const gtsam::Pose3 &pose,
+      boost::optional<gtsam::Matrix &> jacobian = boost::none) const override;
+
+  const gtsam::Point3 &anchorPosition() const { return anchor_position_; }
+  const gtsam::Point3 &tagLeverArm() const { return tag_lever_arm_; }
+  double correctedRange() const { return corrected_range_m_; }
+
+ private:
+  gtsam::Point3 anchor_position_;
+  double corrected_range_m_ = 0.0;
+  gtsam::Point3 tag_lever_arm_;
+};
+
 struct AlignmentPair {
   gtsam::Point3 odom_position;
   gtsam::Point3 enu_position;
@@ -57,6 +81,13 @@ struct AlignmentResult {
   double rmse_m = 0.0;
   double baseline_m = 0.0;
   std::size_t pair_count = 0;
+};
+
+struct UwbAnchorConfig {
+  int id = -1;
+  bool enabled = false;
+  gtsam::Point3 position{0.0, 0.0, 0.0};
+  double range_bias_m = 0.0;
 };
 
 struct BackendConfig {
@@ -91,10 +122,27 @@ struct BackendConfig {
   std::string robust_kernel = "huber";
   double huber_delta = 2.5;
   double livo_translation_sigma_m = 0.05;
+  double livo_lateral_vertical_sigma_m = 0.001;
   double livo_rotation_sigma_rad = 0.01;
+  double livo_uwb_rotation_sigma_rad = 0.0003;
   double prior_translation_sigma_m = 0.10;
   double prior_roll_pitch_sigma_rad = 0.05;
   double prior_yaw_sigma_rad = 0.20;
+  double uwb_initial_prior_translation_sigma_m = 0.001;
+  double uwb_initial_prior_rotation_sigma_rad = 0.001;
+  bool uwb_factor_backend_en = false;
+  std::string uwb_range_topic = "/uwb/backend_ranges";
+  double uwb_time_offset_s = 0.0;
+  double uwb_range_sigma_m = 0.10;
+  double uwb_min_range_m = 0.05;
+  double uwb_max_range_m = 250.0;
+  double uwb_association_max_dt_s = 0.05;
+  double uwb_max_prefit_residual_m = 6.0;
+  double uwb_max_nis = 9.0;
+  double uwb_huber_delta = 2.5;
+  gtsam::Point3 uwb_tag_lever_arm_body_m{0.0, 0.0, 0.0};
+  std::map<int, UwbAnchorConfig> uwb_anchors;
+  std::set<int> uwb_anchor_allowlist;
   std::string frame_id = "map";
   std::string odom_frame_id = "odom";
   std::string body_frame_id = "body";
@@ -105,6 +153,7 @@ struct BackendConfig {
   std::string optimized_online_file = "rtk_optimized_online.tum";
   std::string optimized_final_file = "rtk_optimized_final.tum";
   std::string gnss_file = "gnss_enu.tum";
+  std::string uwb_status_csv_file = "uwb_backend_measurements.csv";
   std::string status_csv_file = "rtk_backend_status.csv";
   double flush_interval_s = 1.0;
   bool save_text_log = true;
@@ -149,13 +198,24 @@ class RtkFixedLagBackend {
     gtsam::Vector3 sigmas;
   };
 
+  struct UwbMeasurement {
+    ros::Time raw_stamp;
+    ros::Time aligned_stamp;
+    int anchor_id = -1;
+    double raw_range_m = 0.0;
+    double range_bias_m = 0.0;
+    double corrected_range_m = 0.0;
+    std::uint64_t measurement_uid = 0;
+    std::string source_format;
+  };
+
   struct Keyframe {
     std::uint64_t id = 0;
     gtsam::Key key = 0;
     ros::Time stamp;
     gtsam::Pose3 raw_pose;
     gtsam::Pose3 optimized_pose;
-    bool gnss_triggered = false;
+    bool measurement_triggered = false;
   };
 
   struct ArchiveRecord {
@@ -169,6 +229,7 @@ class RtkFixedLagBackend {
     std::vector<std::string> optimized_online_lines;
     std::vector<std::string> optimized_final_lines;
     std::vector<std::string> gnss_lines;
+    std::vector<std::string> uwb_lines;
     std::vector<std::string> status_lines;
     std::vector<std::string> text_lines;
   };
@@ -181,6 +242,8 @@ class RtkFixedLagBackend {
   void rawOdomCallback(const nav_msgs::OdometryConstPtr &message);
   void gnssOdomCallback(const nav_msgs::OdometryConstPtr &message);
   void gnssStatusCallback(const fast_livo::GnssStatusConstPtr &message);
+  void uwbRangeCallback(
+      const uwb_serial_driver::UwbRangeArrayConstPtr &message);
   void statusTimerCallback(const ros::TimerEvent &);
   void flushTimerCallback(const ros::TimerEvent &);
 
@@ -193,7 +256,8 @@ class RtkFixedLagBackend {
   void resetAlignmentCollection(const std::string &reason);
   bool tryFinishAlignment();
   bool initializeGraph(const RawOdomSample &sample);
-  bool createGraphNode(const RawOdomSample &sample, bool gnss_triggered,
+  bool createGraphNode(const RawOdomSample &sample,
+                       const std::string &trigger,
                        gtsam::Key *created_key);
   void maybeAddKeyframe(const RawOdomSample &sample);
   void processPendingGnss();
@@ -201,9 +265,16 @@ class RtkFixedLagBackend {
                           double *interval_s, std::string *reason) const;
   Keyframe *findReusableKeyframe(const ros::Time &stamp,
                                  double *time_difference_s);
+  Keyframe *findNearestKeyframe(const ros::Time &stamp,
+                                double maximum_time_difference_s,
+                                double *time_difference_s);
   Keyframe *findKeyframe(gtsam::Key key);
   bool addGnssFactor(const GnssMeasurement &measurement,
                      const Keyframe &keyframe);
+  void insertPendingUwb(const UwbMeasurement &measurement);
+  void processPendingUwb();
+  bool addUwbFactor(const UwbMeasurement &measurement,
+                    const Keyframe &keyframe);
   bool updateSmoother(const gtsam::NonlinearFactorGraph &factors,
                       const gtsam::Values &values,
                       const gtsam::FixedLagSmoother::KeyTimestampMap &timestamps);
@@ -213,10 +284,17 @@ class RtkFixedLagBackend {
       const std::vector<ArchiveRecord> &candidates);
   void archiveActiveStates();
   void refreshEstimateAndPublish(bool publish_current = true);
+  void updateUwbGeometryDiagnostics(const gtsam::Values &estimate);
   void pruneRawOdomBuffer();
   void rejectGnss(const std::string &reason, double residual_m = 0.0,
                   double nis = 0.0,
                   const ros::Time *measurement_stamp = nullptr);
+  void rejectUwb(const std::string &reason,
+                 const UwbMeasurement *measurement = nullptr,
+                 double predicted_range_m = 0.0,
+                 double residual_m = 0.0, double nis = 0.0,
+                 double association_dt_s = 0.0,
+                 std::int64_t associated_key = -1);
   std::int64_t gnssConservationDelta() const;
   std::uint64_t gnssSilentDropCount() const;
   void publishStatus();
@@ -225,6 +303,13 @@ class RtkFixedLagBackend {
   void queueOptimizedOnlinePose(const Keyframe &keyframe);
   void queueFinalPose(const ArchiveRecord &record);
   void queueGnssPosition(const GnssMeasurement &measurement);
+  void queueUwbMeasurement(const UwbMeasurement &measurement,
+                           const std::string &decision,
+                           const std::string &reason,
+                           double predicted_range_m, double residual_m,
+                           double nis, double robust_weight,
+                           double association_dt_s,
+                           std::int64_t associated_key);
   void queueStatusCsv();
   void queueTextEvent(const std::string &event,
                       const std::string &detail = std::string());
@@ -242,6 +327,7 @@ class RtkFixedLagBackend {
   ros::Subscriber raw_odom_subscriber_;
   ros::Subscriber gnss_odom_subscriber_;
   ros::Subscriber gnss_status_subscriber_;
+  ros::Subscriber uwb_range_subscriber_;
   ros::Publisher optimized_odom_publisher_;
   ros::Publisher optimized_path_publisher_;
   ros::Publisher map_to_odom_publisher_;
@@ -255,6 +341,7 @@ class RtkFixedLagBackend {
   std::deque<RawOdomSample> raw_odom_buffer_;
   std::deque<GnssMeasurement> pending_alignment_gnss_;
   std::deque<GnssMeasurement> pending_factor_gnss_;
+  std::deque<UwbMeasurement> pending_uwb_;
   std::vector<AlignmentPair> alignment_pairs_;
   std::deque<Keyframe> keyframes_;
 
@@ -268,6 +355,8 @@ class RtkFixedLagBackend {
   std::size_t active_factors_ = 0;
   std::size_t active_livo_factors_ = 0;
   std::size_t active_gnss_factors_ = 0;
+  std::size_t active_uwb_factors_ = 0;
+  std::size_t active_uwb_anchor_count_ = 0;
   std::size_t max_active_states_observed_ = 0;
 
   std::uint64_t raw_odom_received_ = 0;
@@ -308,6 +397,34 @@ class RtkFixedLagBackend {
   double last_gnss_residual_m_ = 0.0;
   double last_gnss_nis_ = 0.0;
 
+  struct UwbAnchorStatistics {
+    std::uint64_t received = 0;
+    std::uint64_t accepted = 0;
+    std::uint64_t rejected = 0;
+    std::deque<double> accepted_abs_residuals;
+  };
+  bool gnss_factor_enabled_ = true;
+  std::uint64_t uwb_received_ = 0;
+  std::uint64_t uwb_parsed_ = 0;
+  std::uint64_t uwb_accepted_ = 0;
+  std::uint64_t uwb_rejected_ = 0;
+  std::uint64_t uwb_factor_count_ = 0;
+  std::uint64_t uwb_invalid_rejected_ = 0;
+  std::uint64_t uwb_stale_rejected_ = 0;
+  std::uint64_t uwb_duplicate_rejected_ = 0;
+  std::uint64_t uwb_association_rejected_ = 0;
+  std::uint64_t uwb_range_rejected_ = 0;
+  std::uint64_t uwb_residual_rejected_ = 0;
+  std::map<int, std::int64_t> last_enqueued_uwb_stamp_ns_;
+  std::map<int, std::int64_t> last_added_uwb_stamp_ns_;
+  std::map<int, UwbAnchorStatistics> uwb_anchor_statistics_;
+  double last_uwb_association_dt_s_ = 0.0;
+  double last_uwb_residual_m_ = 0.0;
+  double last_uwb_nis_ = 0.0;
+  gtsam::Vector3 uwb_geometry_eigenvalues_ = gtsam::Vector3::Zero();
+  double uwb_geometry_condition_ = 0.0;
+  int uwb_geometry_rank_ = 0;
+
   std::uint64_t interpolation_count_ = 0;
   double interpolation_gap_sum_s_ = 0.0;
   double interpolation_gap_max_s_ = 0.0;
@@ -329,6 +446,7 @@ class RtkFixedLagBackend {
   std::ofstream optimized_online_stream_;
   std::ofstream optimized_final_stream_;
   std::ofstream gnss_stream_;
+  std::ofstream uwb_stream_;
   std::ofstream status_csv_stream_;
   std::ofstream text_log_stream_;
   FileBatch pending_file_batch_;

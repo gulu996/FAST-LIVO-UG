@@ -523,6 +523,14 @@ bool UwbManager::initialize(ros::NodeHandle &nh, const std::string &save_path)
 {
   if (!loadParameters(nh) || !en_) return false;
 
+  if (factor_backend_output_en_)
+  {
+    factor_backend_publisher_ =
+        nh.advertise<uwb_serial_driver::UwbRangeArray>(factor_backend_topic_, 100);
+    ROS_INFO("[UWB_FACTOR_BRIDGE] enabled topic=%s legacy_frontend_update=0",
+             factor_backend_topic_.c_str());
+  }
+
   if (input_mode_ == "disabled")
   {
     en_ = false;
@@ -745,9 +753,19 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
   nh.param<bool>("uwb/enable", en_, en_);
   nh.param<bool>("uwb/update_en", update_en_, true);
   nh.param<bool>("uwb/update_enable", update_en_, update_en_);
+  nh.param<bool>("rtk_backend/uwb_factor_backend_en",
+                 factor_backend_output_en_, false);
+  nh.param<std::string>("rtk_backend/uwb_range_topic",
+                        factor_backend_topic_, factor_backend_topic_);
   GnssFusionPolicy fusion_policy;
   if (!loadGnssFusionPolicy(nh, fusion_policy)) return false;
   update_en_ = fusion_policy.absoluteUpdateEnabled(update_en_);
+  if (factor_backend_output_en_ && update_en_)
+  {
+    update_en_ = false;
+    ROS_WARN("[UWB_FACTOR_BRIDGE] uwb/update_en was true; legacy front-end "
+             "state update is forcibly disabled to prevent double fusion.");
+  }
   nh.param<bool>("uwb/residual_debug_only", residual_debug_only_, false);
   nh.param<bool>("uwb/update_xy_only", update_xy_only_, true);
   nh.param<bool>("uwb/use_3d_range_model", use_3d_range_model_, true);
@@ -788,19 +806,28 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
   double replay_start_offset_primary = 0.0;
   double replay_start_offset_alias = 0.0;
   double replay_start_offset_short_alias = 0.0;
+  double time_offset_primary = 0.0;
+  const bool has_time_offset_s =
+      nh.getParam("uwb/time_offset_s", time_offset_primary);
   const bool has_replay_start_offset_s =
       nh.getParam("uwb/replay_start_offset_s", replay_start_offset_primary);
   const bool has_replay_start_offset =
       nh.getParam("uwb/replay_start_offset", replay_start_offset_alias);
   const bool has_start_offset =
       nh.getParam("uwb/start_offset", replay_start_offset_short_alias);
-  if (has_replay_start_offset_s)
+  if (has_time_offset_s)
+  {
+    replay_start_offset_param = time_offset_primary;
+    replay_start_offset_param_path = "uwb/time_offset_s";
+    replay_start_offset_param_found = true;
+  }
+  if (has_replay_start_offset_s && !replay_start_offset_param_found)
   {
     replay_start_offset_param = replay_start_offset_primary;
     replay_start_offset_param_path = "uwb/replay_start_offset_s";
     replay_start_offset_param_found = true;
   }
-  if (has_replay_start_offset &&
+  if (!has_time_offset_s && has_replay_start_offset &&
       (!replay_start_offset_param_found ||
        (std::fabs(replay_start_offset_param) < 1e-12 && std::fabs(replay_start_offset_alias) > 1e-12)))
   {
@@ -808,7 +835,7 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
     replay_start_offset_param_path = "uwb/replay_start_offset";
     replay_start_offset_param_found = true;
   }
-  if (has_start_offset &&
+  if (!has_time_offset_s && has_start_offset &&
       (!replay_start_offset_param_found ||
        (std::fabs(replay_start_offset_param) < 1e-12 && std::fabs(replay_start_offset_short_alias) > 1e-12)))
   {
@@ -830,6 +857,16 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
              replay_start_offset_param_path.c_str(), replay_start_offset_param);
   }
   replay_start_offset_s_ = replay_start_offset_param_found ? replay_start_offset_param : 0.0;
+  if (has_time_offset_s &&
+      ((has_replay_start_offset_s &&
+        std::fabs(time_offset_primary - replay_start_offset_primary) > 1e-9) ||
+       (has_replay_start_offset &&
+        std::fabs(time_offset_primary - replay_start_offset_alias) > 1e-9) ||
+       (has_start_offset &&
+        std::fabs(time_offset_primary - replay_start_offset_short_alias) > 1e-9)))
+  {
+    ROS_WARN("[UWB] uwb/time_offset_s overrides conflicting deprecated replay offset aliases.");
+  }
   nh.param<double>("uwb/range_scale", range_scale_, 1.0);
   nh.param<double>("uwb/min_range_m", min_range_m_, 0.05);
   nh.param<double>("uwb/max_range_m", max_range_m_, 250.0);
@@ -952,10 +989,6 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
   nh.param<std::string>("uwb/anchor_file", anchor_file_, "");
   nh.param<double>("uwb/position_cov_floor_degraded_m", position_cov_floor_degraded_m_, 0.0);
   nh.param<bool>("uwb/position_cov_floor_degraded_only", position_cov_floor_degraded_only_, true);
-  nh.param<bool>("uwb/stale_repeat_filter_en", stale_repeat_filter_en_, true);
-  nh.param<double>("uwb/stale_repeat_epsilon_m", stale_repeat_epsilon_m_, 0.001);
-  nh.param<int>("uwb/stale_repeat_max_count", stale_repeat_max_count_, 3);
-  nh.param<double>("uwb/stale_repeat_max_duration_s", stale_repeat_max_duration_s_, 2.0);
   nh.param<double>("uwb/update_max_rot_step_deg", update_max_rot_step_deg_, 1.0);
   nh.param<double>("uwb/update_max_trans_step_m", update_max_trans_step_m_, 0.10);
   nh.param<bool>("uwb/tag_offset_estimate_en", tag_offset_estimate_en_, false);
@@ -1182,9 +1215,6 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
   position_cov_floor_m_ = std::max(0.0, position_cov_floor_m_);
   position_cov_floor_degraded_m_ = std::max(0.0, position_cov_floor_degraded_m_);
   max_residual_m_ = std::max(0.0, max_residual_m_);
-  stale_repeat_epsilon_m_ = std::max(0.0, stale_repeat_epsilon_m_);
-  stale_repeat_max_count_ = std::max(1, stale_repeat_max_count_);
-  stale_repeat_max_duration_s_ = std::max(0.0, stale_repeat_max_duration_s_);
   update_max_rot_step_deg_ = std::max(0.0, update_max_rot_step_deg_);
   update_max_trans_step_m_ = std::max(0.0, update_max_trans_step_m_);
   tag_offset_estimate_min_anchors_ = std::max(1, tag_offset_estimate_min_anchors_);
@@ -1407,11 +1437,6 @@ bool UwbManager::loadParameters(ros::NodeHandle &nh)
   if (update_z_ || update_orientation_)
   {
     ROS_WARN("[UWB] UWB z/orientation update is enabled. Default project policy is xy-only; use only after calibration.");
-  }
-  if (stale_repeat_filter_en_)
-  {
-    ROS_INFO("[UWB] Stale repeat filter enabled: epsilon=%.4f m max_count=%d max_duration=%.3f s",
-             stale_repeat_epsilon_m_, stale_repeat_max_count_, stale_repeat_max_duration_s_);
   }
   if (position_cov_floor_m_ > 0.0)
   {
@@ -1650,7 +1675,6 @@ bool UwbManager::loadReplayFile()
   replay_file_start_stamp_ready_ = false;
   replay_consumed_measurement_count_ = 0;
   replay_stale_measurement_count_ = 0;
-  repeated_range_states_.clear();
 
   uint64_t total_parsed = 0;
   uint64_t invalid_zero_filtered = 0;
@@ -1966,9 +1990,64 @@ std::vector<UwbRangeMeasurement> UwbManager::takeReplayMeasurements(double curre
   return measurements;
 }
 
+void UwbManager::publishBackendMeasurements(
+    const std::vector<UwbRangeMeasurement> &measurements,
+    double lidar_start_stamp)
+{
+  if (!factor_backend_output_en_ || !factor_backend_publisher_ ||
+      measurements.empty())
+    return;
+
+  const std::string source = toLower(input_source_);
+  const bool replay_source =
+      source == "file" || source == "txt" || source == "replay";
+  for (const UwbRangeMeasurement &measurement : measurements)
+  {
+    double measurement_stamp = measurement.stamp;
+    if (replay_source)
+    {
+      if (!replay_file_start_stamp_ready_ || !std::isfinite(lidar_start_stamp))
+        continue;
+      // The fixed offset is deliberately applied by the backend. This header
+      // preserves the rebased txt measurement time before that correction.
+      measurement_stamp =
+          lidar_start_stamp + measurement.stamp - replay_file_start_stamp_;
+    }
+    if (!std::isfinite(measurement_stamp) || measurement_stamp <= 0.0) continue;
+
+    uwb_serial_driver::UwbRangeArray message;
+    message.header.stamp.fromSec(measurement_stamp);
+    message.header.frame_id = "uwb_measurement_time";
+    message.session_id = 0;
+    message.round_sequence =
+        measurement.measurement_uid != 0 ? measurement.measurement_uid
+                                         : ++factor_backend_sequence_;
+    message.tag_id = 0;
+    message.timestamp_source =
+        replay_source ? uwb_serial_driver::UwbRangeArray::REPLAY_REBASED
+                      : uwb_serial_driver::UwbRangeArray::HOST_RECEIVE_LOCAL;
+    message.timestamp_uncertainty_ns = 1;
+    message.host_receive_stamp = ros::Time::now();
+
+    uwb_serial_driver::UwbRange range;
+    range.anchor_id = static_cast<std::uint16_t>(measurement.anchor_id);
+    range.raw_range_m = measurement.raw_range_m;
+    range.range_bias_m = measurement.range_bias_m;
+    range.corrected_range_m = measurement.range_m;
+    range.diag = measurement.diag;
+    range.valid = measurement.range_valid;
+    range.reject_reason = range.valid
+                              ? uwb_serial_driver::UwbRange::ACCEPTED
+                              : uwb_serial_driver::UwbRange::INVALID_STATUS;
+    range.source_format = measurement.source_format;
+    message.ranges.push_back(range);
+    factor_backend_publisher_.publish(message);
+  }
+}
+
 void UwbManager::handleLine(const std::string &line, double stamp)
 {
-  const auto measurements = filterRepeatedRanges(parseLine(line, stamp), "serial");
+  const auto measurements = parseLine(line, stamp);
   logRawLine(stamp, line, measurements);
   if (measurements.empty()) return;
 
@@ -2099,64 +2178,6 @@ std::vector<UwbRangeMeasurement> UwbManager::parseLine(const std::string &line, 
     appendMeasurement(anchor_id, values[i], "values", -1);
   }
   return measurements;
-}
-
-std::vector<UwbRangeMeasurement> UwbManager::filterRepeatedRanges(const std::vector<UwbRangeMeasurement> &measurements,
-                                                                  const std::string &source)
-{
-  if (!stale_repeat_filter_en_ || measurements.empty()) return measurements;
-
-  std::vector<UwbRangeMeasurement> filtered;
-  filtered.reserve(measurements.size());
-
-  for (const auto &measurement : measurements)
-  {
-    if (!measurement.range_valid)
-    {
-      filtered.push_back(measurement);
-      continue;
-    }
-    auto &state = repeated_range_states_[measurement.anchor_id];
-    const bool same_range = state.valid &&
-                            std::fabs(measurement.range_m - state.last_range_m) <= stale_repeat_epsilon_m_;
-
-    if (!same_range)
-    {
-      state.valid = true;
-      state.last_range_m = measurement.range_m;
-      state.first_stamp = measurement.stamp;
-      state.last_stamp = measurement.stamp;
-      state.repeat_count = 1;
-      filtered.push_back(measurement);
-      continue;
-    }
-
-    state.repeat_count++;
-    state.last_stamp = measurement.stamp;
-    const double repeated_duration = std::max(0.0, state.last_stamp - state.first_stamp);
-    const bool repeated_too_many = state.repeat_count > stale_repeat_max_count_;
-    const bool repeated_too_long = repeated_duration >= stale_repeat_max_duration_s_;
-    if (repeated_too_many && repeated_too_long)
-    {
-      std::ostringstream oss;
-      oss << "DROP_STALE_REPEAT source=" << source
-          << " anchor=" << measurement.anchor_id
-          << " raw_range=" << measurement.raw_range_m
-          << " range_bias=" << measurement.range_bias_m
-          << " corrected_range=" << measurement.range_m
-          << " repeat_count=" << state.repeat_count
-          << " duration=" << repeated_duration
-          << " epsilon=" << stale_repeat_epsilon_m_;
-      logEventThrottled(measurement.stamp,
-                        "drop_stale_repeat_" + std::to_string(measurement.anchor_id),
-                        3.0, "WARN", oss.str());
-      continue;
-    }
-
-    filtered.push_back(measurement);
-  }
-
-  return filtered;
 }
 
 std::vector<UwbRangeMeasurement> UwbManager::takeRecentMeasurements(double now)
@@ -3464,6 +3485,14 @@ UwbUpdateResult UwbManager::applyRangeUpdateAt(StatesGroup &state, double curren
   if (received_measurements.empty())
   {
     result.action = "no_measurements";
+    return result;
+  }
+
+  if (factor_backend_output_en_)
+  {
+    publishBackendMeasurements(received_measurements, lidar_start_stamp);
+    result.used_count = static_cast<int>(received_measurements.size());
+    result.action = "forward_to_factor_backend";
     return result;
   }
 

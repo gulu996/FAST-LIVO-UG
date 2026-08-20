@@ -1,0 +1,17 @@
+# Same frozen offset, range biases, and noise as 0709. Anchor coordinates are
+# rigidly aligned to this bag's independently initialized FAST-LIVO local frame.
+uwb:
+  time_offset_s: 1.13 # aligned_time = txt_rebased_measurement_time + offset
+  range_noise_m: 0.40
+  anchor_frame_align_en: false
+  anchors:
+    - id: 1
+      role: entry
+      flag: 1
+      position: [-0.159856, 1.504768, 0.0]
+      range_bias_m: 0.58
+    - id: 0
+      role: exit
+      flag: 1
+      position: [68.042555, -2.984507, 0.0]
+      range_bias_m: 0.53

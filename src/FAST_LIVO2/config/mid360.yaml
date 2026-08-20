@@ -173,7 +173,7 @@ imu:
 
 uwb:
   enable: true # UWB总开关；true才启动串口/文件读取。
-  update_en: true # UWB融合开关；true会用测距修正FAST-LIVO状态，调参/看日志时可先关。
+  update_en: false # 旧前端ESIKF融合开关；新UWB因子后端启用时会强制保持false，避免双计数。
   summary_log_en: true # 每次处理先输出一条UWB_RESULT结论。
   debug_log_en: true # 保留门限、更新量和协方差等分类调试日志。
   range_debug_log_en: true # 输出每个基站的UWB_RANGE明细。
@@ -187,10 +187,10 @@ uwb:
   serial_port: "/dev/ttyUSB0" # UWB串口设备名；source=file时不使用。
   baudrate: 115200 # UWB串口波特率；source=file时不使用。
   replay_file: "/home/gulu/Downloads/uwb/0709.txt" # 离线UWB测距文件。
-  replay_start_offset_s: 1.14 # 回放时间整体平移；正数=延后，负数=跳过前段。
+  time_offset_s: 1.14 # 对齐定义：aligned_time=txt重建测量时间+offset；正数表示UWB延后。
   replay_match_threshold_s: 0.05 # 回放量测与LiDAR帧的最大匹配时间差。
   mode: "external_anchors" # external_anchors=使用anchors坐标；entry_exit_distance=只用出入口基线距离。
-  anchor_frame_align_en: true # anchors不在FAST-LIVO世界系时打开，系统会估计UWB锚点坐标系到LIVO系的对齐。
+  anchor_frame_align_en: true # 仅旧前端使用；因子后端要求先离线对齐并改为false，不能用1~2锚在线估计完整6DoF。
   min_anchors_for_update: 2 # 每次融合至少需要的有效锚点数；2锚只能约束基线方向，3+锚更稳。
   prefer_anchors: 2 # 每次优先选用的锚点数；两锚场景填2，多锚场景可调到3或4。
   range_noise_m: 0.10 # UWB单次测距标准差；测距抖动大就调大，系统会更少相信UWB。
@@ -271,7 +271,7 @@ local_map:
   map_sliding_en: true
   # Root-voxel half extent, not metres. Current 50 at 0.8 m retains about
   # +/-40 m along each world axis (101 root voxels per axis).
-  half_map_size: 50
+  half_map_size: 100
   sliding_thresh: 4
   long_term_visual_map_en: false # 关闭长期视觉地图，降低长期运行计算开销
   long_term_visual_max_voxels: 5000 # 长期视觉地图最大体素数，超过后会逐步裁剪以限制内存

@@ -1,0 +1,18 @@
+# Offline calibration against the half_map_size=100 raw LIVO trajectory.
+# Frozen sensor parameters are shared with 0709b; only anchor coordinates differ
+# because each bag initializes a different FAST-LIVO local frame.
+uwb:
+  time_offset_s: 1.13 # aligned_time = txt_rebased_measurement_time + offset
+  range_noise_m: 0.40
+  anchor_frame_align_en: false
+  anchors:
+    - id: 1
+      role: entry
+      flag: 1
+      position: [-0.328621, 0.027608, 0.0]
+      range_bias_m: 0.58
+    - id: 0
+      role: exit
+      flag: 1
+      position: [67.812661, 5.365047, 0.0]
+      range_bias_m: 0.53

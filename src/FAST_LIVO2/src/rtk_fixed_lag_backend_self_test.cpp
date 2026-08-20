@@ -1,10 +1,12 @@
 #include "rtk_fixed_lag_backend.h"
 
 #include <gtsam/inference/Symbol.h>
+#include <gtsam/base/numericalDerivative.h>
 #include <gtsam/slam/BetweenFactor.h>
 #include <gtsam/slam/PriorFactor.h>
 
 #include <cmath>
+#include <functional>
 #include <iostream>
 #include <set>
 #include <stdexcept>
@@ -210,6 +212,44 @@ struct RtkFixedLagBackendSelfTestAccess {
                                  backend.pending_alignment_gnss_.empty();
     return {quality_gate_preserved, true_loss_reset};
   }
+
+  static bool runStandardFixedLagCheck() {
+    RtkFixedLagBackend backend;
+    backend.config_.enable = false;
+    backend.config_.save_results = false;
+    backend.config_.save_text_log = false;
+    backend.config_.lag_seconds = 2.0;
+    backend.config_.uwb_factor_backend_en = true;
+    initializeTestGraph(
+        backend, RtkFixedLagBackend::RawOdomSample{ros::Time(1, 0),
+                                                   gtsam::Pose3()});
+    gtsam::Vector6 sigmas;
+    sigmas.setConstant(0.1);
+    const auto noise = gtsam::noiseModel::Diagonal::Sigmas(sigmas);
+    for (int index = 1; index <= 10; ++index) {
+      const gtsam::Key previous = gtsam::Symbol('x', index - 1);
+      const gtsam::Key current = gtsam::Symbol('x', index);
+      const gtsam::Pose3 pose(
+          gtsam::Rot3(), gtsam::Point3(static_cast<double>(index), 0.0, 0.0));
+      gtsam::NonlinearFactorGraph factors;
+      factors.add(gtsam::BetweenFactor<gtsam::Pose3>(
+          previous, current,
+          gtsam::Pose3(gtsam::Rot3(), gtsam::Point3(1.0, 0.0, 0.0)), noise));
+      gtsam::Values values;
+      values.insert(current, pose);
+      gtsam::FixedLagSmoother::KeyTimestampMap timestamps;
+      timestamps[current] = index + 1;
+      if (!backend.updateSmoother(factors, values, timestamps)) return false;
+    }
+
+    const auto &timestamps = backend.smoother_->timestamps();
+    const gtsam::Values estimate = backend.smoother_->calculateEstimate();
+    return timestamps.count(gtsam::Symbol('x', 0)) == 0 &&
+           timestamps.size() <= 3 &&
+           estimate.exists(gtsam::Symbol('x', 10)) &&
+           (estimate.at<gtsam::Pose3>(gtsam::Symbol('x', 10)).translation() -
+            gtsam::Point3(10.0, 0.0, 0.0)).norm() < 1e-8;
+  }
 };
 
 }  // namespace fast_livo_backend
@@ -280,6 +320,47 @@ void testLeverArmFactor() {
   require(fast_livo_backend::RtkFixedLagBackendSelfTestAccess::
               rejectsNonFiniteLeverArm(),
           "non-finite antenna lever arm was not rejected");
+}
+
+void testUwbRangeFactorJacobian() {
+  const auto noise = gtsam::noiseModel::Isotropic::Sigma(1, 0.2);
+  const std::vector<gtsam::Pose3> poses{
+      gtsam::Pose3(gtsam::Rot3::RzRyRx(0.2, -0.1, 0.4),
+                   gtsam::Point3(1.0, 2.0, 0.5)),
+      gtsam::Pose3(gtsam::Rot3::RzRyRx(-0.4, 0.3, -0.2),
+                   gtsam::Point3(-3.0, 0.7, 2.1)),
+      gtsam::Pose3(gtsam::Rot3::RzRyRx(0.8, 0.1, -0.5),
+                   gtsam::Point3(8.0, -4.0, 1.2))};
+  const std::vector<gtsam::Point3> anchors{
+      gtsam::Point3(4.0, -1.0, 0.2), gtsam::Point3(-2.0, 5.0, 1.4),
+      gtsam::Point3(0.5, 0.3, -2.0)};
+  const std::vector<gtsam::Point3> lever_arms{
+      gtsam::Point3(0.15, -0.08, 0.11),
+      gtsam::Point3(-0.12, 0.04, 0.20),
+      gtsam::Point3(0.05, 0.18, -0.09)};
+
+  for (std::size_t index = 0; index < poses.size(); ++index) {
+    const double measured =
+        (poses[index].transformFrom(lever_arms[index]) - anchors[index])
+            .norm() -
+        0.25;
+    fast_livo_backend::UwbRangeFactor factor(
+        gtsam::Symbol('x', index), anchors[index], measured,
+        lever_arms[index], noise);
+    gtsam::Matrix analytical;
+    const gtsam::Vector1 error = factor.evaluateError(poses[index], analytical);
+    const std::function<gtsam::Vector1(const gtsam::Pose3 &)> evaluate =
+        [&](const gtsam::Pose3 &pose) {
+          return factor.evaluateError(pose);
+        };
+    const gtsam::Matrix16 numerical =
+        gtsam::numericalDerivative11<gtsam::Vector1, gtsam::Pose3>(
+            evaluate, poses[index], 1e-6);
+    require(std::abs(error(0) - 0.25) < 1e-10,
+            "UWB range residual sign is wrong");
+    require((analytical - numerical).cwiseAbs().maxCoeff() < 1e-6,
+            "UWB range analytical Jacobian disagrees with numerical derivative");
+  }
 }
 
 void testRawPoseInterpolation() {
@@ -402,6 +483,12 @@ void testTrueFixedLagMarginalization() {
             "fixed-lag smoother retained an expired variable");
 }
 
+void testStandardFixedLagMarginalization() {
+  require(fast_livo_backend::RtkFixedLagBackendSelfTestAccess::
+              runStandardFixedLagCheck(),
+          "fixed-lag graph did not marginalize the initial key correctly");
+}
+
 }  // namespace
 
 int main() {
@@ -410,10 +497,12 @@ int main() {
     testAlignment();
     testKeyframeSelection();
     testLeverArmFactor();
+    testUwbRangeFactorJacobian();
     testRawPoseInterpolation();
     testAlignmentBoundaryTransition();
     testFilteredFixedDoesNotResetAlignment();
     testTrueFixedLagMarginalization();
+    testStandardFixedLagMarginalization();
   } catch (const std::exception &error) {
     std::cerr << "rtk_fixed_lag_backend_self_test: FAIL: " << error.what()
               << std::endl;

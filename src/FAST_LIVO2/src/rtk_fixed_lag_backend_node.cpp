@@ -8,13 +8,16 @@ namespace {
 bool configureRunLogDirectory(ros::NodeHandle &node) {
   ros::NodeHandle params(node, "rtk_backend");
   bool enabled = true;
+  bool uwb_enabled = false;
   bool save_results = true;
   bool save_text_log = true;
   std::string output_directory;
   params.param("enable", enabled, enabled);
+  params.param("uwb_factor_backend_en", uwb_enabled, uwb_enabled);
   GnssFusionPolicy fusion_policy;
   if (!loadGnssFusionPolicy(node, fusion_policy)) return false;
-  enabled = fusion_policy.componentEnabled(enabled);
+  enabled = enabled &&
+            ((!fusion_policy.managed || fusion_policy.enabled) || uwb_enabled);
   params.param("save_results", save_results, save_results);
   params.param("save_text_log", save_text_log, save_text_log);
   params.param("output_directory", output_directory, output_directory);
