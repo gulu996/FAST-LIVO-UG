@@ -1,0 +1,16 @@
+# Derived only from sensor_extrinsics.yaml.
+# Source convention: p_target = R_target_source * p_source + t_target_source.
+
+extrin_calib:
+  # T_imu0_lidar0 = T_imu0_cam0 * T_cam0_lidar0
+  # FAST-LIVO2 consumes p_imu = R * p_lidar + t.
+  extrinsic_R: [-0.080498700015,  0.996743977392, -0.004626319136,
+                -0.996537670878, -0.080577158500, -0.020493707546,
+                -0.020799755221,  0.002960584480,  0.999779278202]
+  extrinsic_T: [0.441592586771, 0.133017277684, -0.121285678587]
+
+  # T_cam0_lidar0 from the source file; p_cam0 = Rcl * p_lidar0 + Pcl.
+  Rcl: [ 0.995429406668,  0.091562378704, -0.027140875948,
+        -0.025190247686, -0.022392847707, -0.999431844496,
+        -0.092118118536,  0.995547533359, -0.019984020109]
+  Pcl: [-0.106970625873, -0.028142180794, -0.056135304969]

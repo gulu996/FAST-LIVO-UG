@@ -495,6 +495,19 @@ void testFirstFixedModeUnchanged()
         !result.origin_average_reset,
         "first_fixed must retain its single confirmed-Fixed initialization behavior");
 }
+
+void testStatusOnlyModeDoesNotCreateLocalEnu()
+{
+  GnssAdapterConfig config = manualConfig();
+  config.origin_mode = "first_fixed";
+  config.fixed_confirm_count = 1;
+  config.publish_local_enu_odometry = false;
+  GnssAdapter adapter(config);
+  const GnssAdapterResult result = adapter.process(fixedMessage(), ros::Time(1));
+  check(result.status.accepted && result.status.origin_initialized &&
+        !result.publish_odometry && !result.origin_initialized_now,
+        "status-only mode must preserve quality acceptance without creating local ENU odometry");
+}
 } // namespace
 
 int main()
@@ -515,6 +528,7 @@ int main()
     testAverageOriginDuplicateEpochSkipped();
     testAverageOriginSourceEpochReset();
     testFirstFixedModeUnchanged();
+    testStatusOnlyModeDoesNotCreateLocalEnu();
   }
   catch (const std::exception &error)
   {

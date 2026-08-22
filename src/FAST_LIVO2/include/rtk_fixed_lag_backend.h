@@ -92,6 +92,10 @@ struct UwbAnchorConfig {
 
 struct BackendConfig {
   bool enable = true;
+  bool accept_rtk_fixed = true;
+  bool accept_rtk_float = false;
+  bool accept_differential = false;
+  bool accept_single = false;
   std::string raw_odom_topic = "/backend/livo_odom_raw";
   std::string gnss_odom_topic = "/gnss/enu_odom";
   std::string gnss_status_topic = "/gnss/status";
@@ -242,6 +246,7 @@ class RtkFixedLagBackend {
   void rawOdomCallback(const nav_msgs::OdometryConstPtr &message);
   void gnssOdomCallback(const nav_msgs::OdometryConstPtr &message);
   void gnssStatusCallback(const fast_livo::GnssStatusConstPtr &message);
+  bool gnssQualityAccepted(std::uint8_t quality) const;
   void uwbRangeCallback(
       const uwb_serial_driver::UwbRangeArrayConstPtr &message);
   void statusTimerCallback(const ros::TimerEvent &);

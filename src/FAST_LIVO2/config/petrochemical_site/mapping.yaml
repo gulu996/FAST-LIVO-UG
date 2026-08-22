@@ -1,0 +1,176 @@
+common:
+  img_topic: "/petrochemical/camera/left/image_raw"
+  lid_topic: "/petrochemical/lidar"
+  imu_topic: "/petrochemical/imu"
+  img_en: 1
+  lidar_en: 1
+  ros_driver_bug_fix: false
+  sub_lidar_queue_size: 64
+  sub_imu_queue_size: 3000
+  sub_img_queue_size: 64
+  max_lidar_buffer_size: 32
+  max_imu_buffer_size: 3000
+  max_img_buffer_size: 32
+  max_prop_imu_buffer_size: 3000
+  sync_img_buffer_min_size: 5
+  sync_img_lookahead_time: 0.12
+
+startup:
+  wait_for_sensor_publishers: true
+  imu_warmup_min_samples: 30
+  imu_warmup_min_duration_s: 0.15
+  require_lidar_frame: true
+  require_image_buffer: true
+
+deterministic_debug:
+  force_single_thread: false
+  imu_accept_out_of_order_en: false
+  imu_buffer_sort_en: true
+  prop_imu_buffer_sort_en: true
+  sync_wait_for_image_lookahead_en: true
+  pending_vio_image_en: true
+  image_buffer_sort_en: true
+
+time_offset:
+  # All four recorded streams already share the inspected Unix-nanosecond domain.
+  imu_time_offset: 0.0
+  lidar_time_offset: 0.0
+  img_time_offset: 0.0
+  exposure_time_init: 0.0
+
+preprocess:
+  point_filter_num: 2
+  filter_size_surf: 0.25
+  lidar_type: 8  # Generic XYZIRT; this does not assert a manufacturer/model.
+  scan_line: 16
+  blind: 0.5
+  feature_extract_enabled: false
+
+voxel_safety:
+  # Full scan observed coordinates within about +/-120 m; retain margin.
+  lidar_max_range_m: 200.0
+
+vio:
+  # First-pass values retain the current stable profile; no dataset tuning yet.
+  max_iterations: 5
+  outlier_threshold: 1000
+  ncc_en: true
+  ncc_threshold: 0.40
+  patch_size: 8
+  patch_pyrimid_level: 3
+  normal_en: true
+  raycast_en: false
+  inverse_composition_en: false
+  exposure_estimate_en: true
+  inv_expo_cov: 0.1
+  min_retrieve_points: 30
+  min_update_meas: 500
+  visual_map_prune_en: true
+  visual_map_max_voxels: 1800
+  visual_map_max_points_per_voxel: 10
+  visual_map_max_total_points: 20000
+  visual_map_max_add_per_frame: 300
+  visual_map_min_shi_tomasi_score: 8.0
+  visual_update_guard_en: true
+  visual_update_normalized_nis_max: 2.0
+  image_quality_gate_en: true
+  image_quality_tile_mask_en: true
+  image_quality_max_saturated_fraction: 0.10
+  image_quality_max_tile_saturated_fraction: 0.25
+  image_quality_max_dark_fraction: 0.95
+  image_quality_min_intensity_std: 10.0
+  image_quality_min_usable_tile_ratio: 0.25
+  image_quality_min_usable_horizontal_coverage: 0.50
+  image_quality_min_usable_vertical_coverage: 0.50
+  visual_patch_quality_gate_en: true
+  visual_patch_max_saturated_fraction: 0.10
+  visual_patch_min_intensity_std: 4.0
+  image_quality_saturated_pixel_value: 245
+  image_quality_dark_pixel_value: 8
+  image_quality_tile_rows: 6
+  image_quality_tile_cols: 6
+
+imu:
+  imu_en: true
+  imu_int_frame: 30
+  gravity_est_en: true
+  ba_bg_est_en: true
+  # Current FAST-LIVO2 accepts scalar tuned process values, while imu.yaml gives
+  # per-axis noise densities. Keep the existing conservative baseline rather
+  # than silently changing the calibration's meaning.
+  acc_cov: 0.05
+  gyr_cov: 0.03
+
+lio:
+  max_iterations: 3
+  map_update_stride: 2
+  icp_min_iterations: 1
+  icp_early_stop_residual_ratio: 0.03
+  icp_max_rot_step_deg: 1.2
+  icp_max_trans_step_m: 0.20
+  dept_err: 0.02
+  beam_err: 0.15
+  min_eigen_value: 0.005
+  voxel_size: 0.8
+  max_layer: 2
+  max_points_num: 50
+  layer_init_num: [5, 5, 5, 5, 5]
+
+local_map:
+  map_sliding_en: true
+  half_map_size: 100
+  sliding_thresh: 4
+  long_term_visual_map_en: false
+  long_term_visual_max_voxels: 5000
+
+adaptive_selector:
+  en: false
+
+runtime_guard:
+  enable: false
+
+uav:
+  imu_rate_odom: false
+  gravity_align_en: false
+
+uwb:
+  enable: false
+  update_en: false
+
+gps:
+  enable: false
+  update_en: false
+
+gnss_fusion:
+  enable: true
+
+publish:
+  dense_map_en: true
+  pub_effect_point_en: true  # 已启用特征点可视化
+  pub_plane_en: false
+  pub_scan_num: 1
+  publish_img_stride: 1 # 图像可视化降频
+  blind_rgb_points: 0.0
+
+pcd_save:
+  pcd_save_en: false
+  save_log_en: true # 日志写盘
+  save_path: "/home/gulu/data"
+  global_map_pub: true   #need to set pcd_save_en true, x86上请设为false
+  colmap_output_en: false # need to set interval = -1
+  filter_size_pcd: 0.05
+  max_cache_points: 40000 # 缓存点云硬上限（RGB或强度）
+  interval: 100
+  # how many LiDAR frames saved in each pcd file;
+  # -1 : all frames will be saved in ONE pcd file, may lead to memory crash when having too much frames.
+
+
+udp_report:
+  en: false
+
+aruco_landmarks:
+  aruco_landmarks_en: false
+
+pos_output:
+  enable_timestamp: true
+  format: "timestamp_xyz_quat"

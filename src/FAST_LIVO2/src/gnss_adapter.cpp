@@ -120,7 +120,8 @@ bool GnssAdapter::initialize(ros::NodeHandle &nh)
     return true;
   }
 
-  odom_publisher_ = nh.advertise<nav_msgs::Odometry>(config_.output_odom_topic, 10);
+  if (config_.publish_local_enu_odometry)
+    odom_publisher_ = nh.advertise<nav_msgs::Odometry>(config_.output_odom_topic, 10);
   status_publisher_ = nh.advertise<fast_livo::GnssStatus>(config_.output_status_topic, 10);
   if (config_.input_mode == "stamped_local")
   {
@@ -133,11 +134,12 @@ bool GnssAdapter::initialize(ros::NodeHandle &nh)
                                    &GnssAdapter::legacyPvtCallback, this);
   }
 
-  ROS_INFO("[GNSS_ADAPTER] mode=%s input=%s odom=%s status=%s origin_mode=%s",
+  ROS_INFO("[GNSS_ADAPTER] mode=%s input=%s odom=%s status=%s origin_mode=%s local_enu=%s",
            config_.input_mode.c_str(), config_.input_topic.c_str(),
            config_.output_odom_topic.c_str(),
-           config_.output_status_topic.c_str(), config_.origin_mode.c_str());
-  if (origin_initialized_)
+           config_.output_status_topic.c_str(), config_.origin_mode.c_str(),
+           config_.publish_local_enu_odometry ? "enabled" : "disabled");
+  if (config_.publish_local_enu_odometry && origin_initialized_)
   {
     ROS_INFO_STREAM("[GNSS_ADAPTER_ORIGIN] mode=manual lla=["
                     << std::setprecision(12) << origin_lla_.transpose()
@@ -154,6 +156,8 @@ bool GnssAdapter::loadConfig(ros::NodeHandle &nh, GnssAdapterConfig &config) con
   params.param<std::string>("input_topic", config.input_topic, config.input_topic);
   params.param<std::string>("output_odom_topic", config.output_odom_topic, config.output_odom_topic);
   params.param<std::string>("output_status_topic", config.output_status_topic, config.output_status_topic);
+  params.param<bool>("publish_local_enu_odometry", config.publish_local_enu_odometry,
+                     config.publish_local_enu_odometry);
 
   params.param<std::string>("origin_mode", config.origin_mode, config.origin_mode);
   if (!loadVector3(params, "origin_lla", config.origin_lla)) return false;
@@ -244,7 +248,8 @@ bool GnssAdapter::validateConfig(const GnssAdapterConfig &config) const
     ROS_ERROR("[GNSS_ADAPTER] Accuracy, sigma, origin-average gap, time-gap, and log parameters must be positive and ordered.");
     return false;
   }
-  if (config.input_topic.empty() || config.output_odom_topic.empty() ||
+  if (config.input_topic.empty() ||
+      (config.publish_local_enu_odometry && config.output_odom_topic.empty()) ||
       config.output_status_topic.empty() || config.frame_id.empty() ||
       config.child_frame_id.empty())
   {
@@ -824,7 +829,7 @@ GnssAdapterResult GnssAdapter::processPvt(
 
   Eigen::Vector3d lla = Eigen::Vector3d::Zero();
   Eigen::Vector3d current_ecef = Eigen::Vector3d::Zero();
-  if (raw_quality != GnssQuality::INVALID)
+  if (config_.publish_local_enu_odometry && raw_quality != GnssQuality::INVALID)
   {
     lla << message.latitude, message.longitude, message.altitude; // Ellipsoid height only.
     current_ecef = gnss_serial_driver::geodeticToEcef(lla);
@@ -838,10 +843,15 @@ GnssAdapterResult GnssAdapter::processPvt(
     }
   }
 
-  result.origin_initialized_now = fixed_measurement_usable &&
-                                  updateOrigin(fixed_state_quality, lla, current_ecef,
-                                               measurement_time_ns, result);
-  status.origin_initialized = origin_initialized_;
+  if (config_.publish_local_enu_odometry)
+  {
+    result.origin_initialized_now = fixed_measurement_usable &&
+                                    updateOrigin(fixed_state_quality, lla, current_ecef,
+                                                 measurement_time_ns, result);
+  }
+  // ponytail: in status-only mode the paired Odometry already owns the absolute
+  // coordinate basis, so this adapter must not establish or convert another ENU.
+  status.origin_initialized = !config_.publish_local_enu_odometry || origin_initialized_;
 
   bool current_quality_enabled = false;
   if (raw_quality == GnssQuality::RTK_FIXED)
@@ -855,11 +865,11 @@ GnssAdapterResult GnssAdapter::processPvt(
     current_quality_enabled = gates_passed && qualityAccepted(raw_quality) &&
                               fixed_state_quality != GnssQuality::RECOVERING;
   }
-  status.accepted = current_quality_enabled && origin_initialized_ && !time_gap;
+  status.accepted = current_quality_enabled && status.origin_initialized && !time_gap;
   status.consecutive_fixed_count = consecutive_fixed_count_;
   status.consecutive_lost_count = consecutive_lost_count_;
 
-  if (status.accepted)
+  if (status.accepted && config_.publish_local_enu_odometry)
   {
     const Eigen::Vector3d enu = gnss_serial_driver::ecefDeltaToEnu(
         origin_lla_, current_ecef - origin_ecef_);
@@ -1032,6 +1042,17 @@ void GnssAdapter::logResult(const gnss_comm::GnssPVTSolnMsg &message,
 
   const geometry_msgs::Point &position = result.odometry.pose.pose.position;
   const geometry_msgs::Vector3 &velocity = result.odometry.twist.twist.linear;
+  std::ostringstream position_detail;
+  if (result.publish_odometry)
+  {
+    position_detail << " local_enu=[" << position.x << " " << position.y
+                    << " " << position.z << "] vel_enu=[" << velocity.x
+                    << " " << velocity.y << " " << velocity.z << "]";
+  }
+  else
+  {
+    position_detail << " position_source=external_enu local_enu=disabled";
+  }
   ROS_INFO_STREAM_THROTTLE(
       config_.log_interval_s,
       "[GNSS_ADAPTER] quality="
@@ -1039,8 +1060,7 @@ void GnssAdapter::logResult(const gnss_comm::GnssPVTSolnMsg &message,
       << " active=1 sv=" << static_cast<int>(message.num_sv)
       << " h_acc=" << message.h_acc << " v_acc=" << message.v_acc
       << " pdop=" << message.p_dop
-      << " enu=[" << position.x << " " << position.y << " " << position.z << "]"
-      << " vel_enu=[" << velocity.x << " " << velocity.y << " " << velocity.z << "]"
+      << position_detail.str()
       << " week=" << message.time.week << " tow=" << std::fixed
       << std::setprecision(3) << message.time.tow
       << " stamp=" << result.status.header.stamp.toSec()

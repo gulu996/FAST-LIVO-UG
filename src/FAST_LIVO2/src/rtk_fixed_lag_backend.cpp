@@ -371,6 +371,14 @@ RtkFixedLagBackend::~RtkFixedLagBackend() {
 void RtkFixedLagBackend::loadParameters(ros::NodeHandle &nh) {
   ros::NodeHandle params(nh, "rtk_backend");
   params.param("enable", config_.enable, config_.enable);
+  params.param("accept_rtk_fixed", config_.accept_rtk_fixed,
+               config_.accept_rtk_fixed);
+  params.param("accept_rtk_float", config_.accept_rtk_float,
+               config_.accept_rtk_float);
+  params.param("accept_differential", config_.accept_differential,
+               config_.accept_differential);
+  params.param("accept_single", config_.accept_single,
+               config_.accept_single);
   params.param("raw_odom_topic", config_.raw_odom_topic,
                config_.raw_odom_topic);
   params.param("gnss_odom_topic", config_.gnss_odom_topic,
@@ -1033,17 +1041,16 @@ void RtkFixedLagBackend::gnssStatusCallback(
   std::lock_guard<std::mutex> lock(state_mutex_);
   newest_sensor_stamp_ = std::max(newest_sensor_stamp_, message->header.stamp);
   ++gnss_received_;
-  const bool filtered_fixed =
-      message->filtered_quality == fast_livo::GnssStatus::RTK_FIXED;
-  const bool usable_fixed = message->accepted && filtered_fixed;
-  if (!usable_fixed) {
-    if (!alignment_.valid && !filtered_fixed) {
+  const bool quality_enabled = gnssQualityAccepted(message->filtered_quality);
+  const bool usable = message->accepted && quality_enabled;
+  if (!usable) {
+    if (!alignment_.valid && !quality_enabled) {
       resetAlignmentCollection(message->reject_reason.empty()
-                                   ? "NOT_RTK_FIXED"
+                                   ? "GNSS_QUALITY_NOT_ENABLED"
                                    : message->reject_reason);
     }
     ++gnss_quality_rejected_;
-    rejectGnss(message->reject_reason.empty() ? "NOT_RTK_FIXED"
+    rejectGnss(message->reject_reason.empty() ? "GNSS_QUALITY_NOT_ENABLED"
                                               : message->reject_reason,
                0.0, 0.0, &message->header.stamp);
     publishStatus();
@@ -1065,6 +1072,21 @@ void RtkFixedLagBackend::gnssStatusCallback(
     pending_status_.erase(pending_status_.begin());
   }
   publishStatus();
+}
+
+bool RtkFixedLagBackend::gnssQualityAccepted(std::uint8_t quality) const {
+  switch (quality) {
+    case fast_livo::GnssStatus::RTK_FIXED:
+      return config_.accept_rtk_fixed;
+    case fast_livo::GnssStatus::RTK_FLOAT:
+      return config_.accept_rtk_float;
+    case fast_livo::GnssStatus::DIFFERENTIAL:
+      return config_.accept_differential;
+    case fast_livo::GnssStatus::SINGLE:
+      return config_.accept_single;
+    default:
+      return false;
+  }
 }
 
 void RtkFixedLagBackend::gnssOdomCallback(

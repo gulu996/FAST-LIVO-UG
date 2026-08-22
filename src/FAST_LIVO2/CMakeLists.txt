@@ -215,10 +215,12 @@ add_executable(rtk_fixed_lag_backend_node src/rtk_fixed_lag_backend_node.cpp)
 add_executable(rtk_fixed_lag_backend_self_test src/rtk_fixed_lag_backend_self_test.cpp)
 add_executable(voxel_filter_self_test src/voxel_filter_self_test.cpp)
 add_executable(lio_degeneracy_self_test src/lio_degeneracy_self_test.cpp)
+add_executable(preprocess_xyzirt_self_test src/preprocess_xyzirt_self_test.cpp)
 
 add_dependencies(fastlivo_mapping ${catkin_EXPORTED_TARGETS})
 add_dependencies(gnss_manager_self_test ${catkin_EXPORTED_TARGETS})
 add_dependencies(uwb_manager_self_test ${catkin_EXPORTED_TARGETS})
+add_dependencies(preprocess_xyzirt_self_test ${catkin_EXPORTED_TARGETS})
 
 add_dependencies(gnss_adapter ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 add_dependencies(gnss_adapter_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
@@ -311,6 +313,12 @@ target_link_libraries(rtk_fixed_lag_backend_self_test
 )
 
 target_link_libraries(voxel_filter_self_test
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+)
+
+target_link_libraries(preprocess_xyzirt_self_test
+  pre
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
 )

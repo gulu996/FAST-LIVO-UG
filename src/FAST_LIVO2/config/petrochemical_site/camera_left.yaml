@@ -1,0 +1,13 @@
+cam_model: Pinhole
+cam_width: 1280
+cam_height: 720
+scale: 1.0
+cam_fx: 529.938228576
+cam_fy: 532.081773898
+cam_cx: 634.696805930
+cam_cy: 357.311987738
+# stereo.yaml uses radtan [k1, k2, p1, p2, k3]; k3 is exactly zero.
+cam_d0: -0.091446989773
+cam_d1: 0.071009135497
+cam_d2: 0.0
+cam_d3: 0.0

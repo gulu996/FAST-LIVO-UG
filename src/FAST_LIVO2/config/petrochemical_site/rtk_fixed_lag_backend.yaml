@@ -1,0 +1,71 @@
+rtk_backend:
+  enable: true
+  accept_rtk_fixed: true
+  accept_rtk_float: true
+  accept_differential: false
+  accept_single: false
+
+  raw_odom_topic: "/backend/livo_odom_raw"
+  # PPK east_m,north_m,up_m are already relative to the competition BASE.
+  gnss_odom_topic: "/gnss/enu_odom"
+  gnss_status_topic: "/gnss_fusion/status"
+  optimized_odom_topic: "/rtk_backend/optimized_odom"
+  optimized_path_topic: "/rtk_backend/optimized_path"
+  map_to_odom_topic: "/rtk_backend/map_to_odom"
+  status_topic: "/rtk_backend/status"
+
+  lag_seconds: 20.0
+  keyframe_translation_m: 0.8
+  keyframe_rotation_deg: 8.0
+  keyframe_max_interval_s: 1.0
+  raw_odom_buffer_seconds: 5.0
+  # Stone-site LIVO odometry sensor stamps showed gaps up to ~0.200 s.
+  max_raw_odom_interpolation_gap_s: 0.25
+  reuse_existing_node_time_diff_s: 0.02
+  gnss_node_min_interval_s: 0.20
+  max_active_states: 300
+
+  alignment_min_pairs: 20
+  alignment_min_baseline_m: 8.0
+  alignment_max_pair_time_diff_s: 0.05
+  alignment_max_rmse_m: 0.5
+
+  # sensor_extrinsics.yaml: body/IMU origin -> GNSS antenna phase center, FLU.
+  antenna_lever_arm_body_m: [-0.094, -0.076, 0.136]
+
+  min_gnss_sigma_xy_m: 0.03
+  min_gnss_sigma_z_m: 0.05
+  max_gnss_sigma_xy_m: 2.0
+  max_gnss_sigma_z_m: 3.0
+  max_gnss_residual_m: 3.0
+  max_gnss_nis: 11.34
+  robust_kernel: "huber"
+  huber_delta: 2.5
+
+  livo_translation_sigma_m: 0.05
+  livo_lateral_vertical_sigma_m: 0.001
+  livo_rotation_sigma_rad: 0.01
+  livo_uwb_rotation_sigma_rad: 0.0003
+  prior_translation_sigma_m: 0.10
+  prior_roll_pitch_sigma_rad: 0.05
+  prior_yaw_sigma_rad: 0.20
+  uwb_initial_prior_translation_sigma_m: 0.001
+  uwb_initial_prior_rotation_sigma_rad: 0.001
+
+  frame_id: "map"
+  odom_frame_id: "odom"
+  body_frame_id: "body"
+  log_interval_s: 1.0
+
+  save_results: true
+  # Empty means: use save_path/YYYY-MM-DD-HHMMSS from the main node.
+  output_directory: ""
+  raw_online_file: "livo_raw_online.tum"
+  optimized_online_file: "rtk_optimized_online.tum"
+  optimized_final_file: "rtk_optimized_final.tum"
+  gnss_file: "gnss_enu.tum"
+  uwb_status_csv_file: "uwb_backend_measurements.csv"
+  status_csv_file: "rtk_backend_status.csv"
+  flush_interval_s: 1.0
+  save_text_log: true
+  text_log_file: "rtk_backend.log"

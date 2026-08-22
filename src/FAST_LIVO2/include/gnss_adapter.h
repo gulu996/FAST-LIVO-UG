@@ -34,6 +34,7 @@ struct GnssAdapterConfig
   std::string input_topic = "/ublox_driver/receiver_pvt";
   std::string output_odom_topic = "/gnss/enu_odom";
   std::string output_status_topic = "/gnss/status";
+  bool publish_local_enu_odometry = true;
 
   std::string origin_mode = "first_fixed";
   Eigen::Vector3d origin_lla = Eigen::Vector3d::Zero();

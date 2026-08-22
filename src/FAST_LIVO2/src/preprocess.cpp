@@ -85,6 +85,10 @@ void Preprocess::process(const sensor_msgs::PointCloud2::ConstPtr &msg, PointClo
     robosense_handler(msg);
     break;
 
+  case XYZIRT:
+    xyzirt_handler(msg);
+    break;
+
   default:
     printf("Error LiDAR Type: %d \n", lidar_type);
     break;
@@ -738,6 +742,49 @@ void Preprocess::robosense_handler(const sensor_msgs::PointCloud2::ConstPtr &msg
     added_pt.curvature = (pt.timestamp - time_head) * 1000.0;
     pl_surf.points.push_back(added_pt);
   }
+  std::sort(pl_surf.points.begin(), pl_surf.points.end(), [](const PointType &a, const PointType &b) {
+    return a.curvature < b.curvature;
+  });
+}
+
+void Preprocess::xyzirt_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
+{
+  pl_surf.clear();
+  pl_corn.clear();
+  pl_full.clear();
+
+  pcl::PointCloud<xyzirt_ros::Point> pl_orig;
+  pcl::fromROSMsg(*msg, pl_orig);
+  pl_surf.reserve(pl_orig.size());
+
+  // ponytail: this dataset path only needs timestamp-preserving surface points;
+  // add ring-wise feature extraction here if XYZIRT feature mode is ever needed.
+  if (feature_enabled) ROS_WARN_ONCE("XYZIRT feature extraction is not implemented; using all filtered points.");
+
+  for (size_t i = 0; i < pl_orig.size(); ++i)
+  {
+    if (i % point_filter_num != 0) continue;
+
+    const auto &pt = pl_orig.points[i];
+    const double dist_sqr = static_cast<double>(pt.x) * pt.x +
+                            static_cast<double>(pt.y) * pt.y +
+                            static_cast<double>(pt.z) * pt.z;
+    if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z) ||
+        !std::isfinite(pt.offset_time) || pt.offset_time < 0.0 || dist_sqr < blind_sqr)
+      continue;
+
+    PointType added_pt;
+    added_pt.x = pt.x;
+    added_pt.y = pt.y;
+    added_pt.z = pt.z;
+    added_pt.intensity = pt.intensity;
+    added_pt.normal_x = 0;
+    added_pt.normal_y = 0;
+    added_pt.normal_z = 0;
+    added_pt.curvature = pt.offset_time * 1000.0; // FAST-LIVO2 stores point time in ms.
+    pl_surf.push_back(added_pt);
+  }
+
   std::sort(pl_surf.points.begin(), pl_surf.points.end(), [](const PointType &a, const PointType &b) {
     return a.curvature < b.curvature;
   });

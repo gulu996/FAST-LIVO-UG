@@ -1,0 +1,48 @@
+gnss_adapter:
+  enable: true
+  input_mode: "stamped_local"
+  input_topic: "/gnss/pvt_local"
+  output_odom_topic: "/gnss_fusion/enu_odom"
+  output_status_topic: "/gnss_fusion/status"
+  # The bag already carries official BASE-ENU on /gnss/enu_odom. Keep this
+  # adapter only for the existing Fixed/Float state machine and quality gates.
+  publish_local_enu_odometry: false
+
+  # Unused in status-only mode; retained as valid defaults for the shared adapter.
+  origin_mode: "first_fixed"
+  origin_lla: [0.0, 0.0, 0.0]
+  origin_average_count: 10
+  origin_average_max_gap_s: 2.0
+
+  # DATA_FORMAT.md: PPK uses 4-9 BDS satellites and provides position SDs,
+  # but no PDOP or velocity accuracy. The converter marks those as 999.
+  min_num_sv: 4
+  max_num_sv: 100
+  max_pdop: 1000.0
+  max_h_acc_m: 2.0
+  max_v_acc_m: 3.0
+  max_vel_acc_mps: 1000.0
+  reject_nonpositive_pdop: true
+  reject_nonpositive_vel_acc: true
+
+  # Never claim more precision than the PPK standard-deviation fields.
+  min_sigma_xy_m: 0.03
+  min_sigma_z_m: 0.05
+  max_sigma_xy_m: 2.0
+  max_sigma_z_m: 3.0
+  min_sigma_vel_mps: 0.05
+
+  fixed_confirm_count: 5
+  fixed_lost_count: 3
+  recovery_confirm_count: 10
+  max_time_gap_s: 0.5
+  require_monotonic_time: true
+
+  accept_rtk_fixed: true
+  accept_rtk_float: true
+  accept_differential: false
+  accept_single: false
+
+  frame_id: "map"
+  child_frame_id: "gnss_antenna"
+  log_interval_s: 1.0

@@ -213,6 +213,19 @@ struct RtkFixedLagBackendSelfTestAccess {
     return {quality_gate_preserved, true_loss_reset};
   }
 
+  static bool runGnssQualityPolicyCheck() {
+    RtkFixedLagBackend backend;
+    backend.config_.accept_rtk_fixed = true;
+    backend.config_.accept_rtk_float = true;
+    backend.config_.accept_differential = false;
+    backend.config_.accept_single = false;
+    return backend.gnssQualityAccepted(fast_livo::GnssStatus::RTK_FIXED) &&
+           backend.gnssQualityAccepted(fast_livo::GnssStatus::RTK_FLOAT) &&
+           !backend.gnssQualityAccepted(fast_livo::GnssStatus::DIFFERENTIAL) &&
+           !backend.gnssQualityAccepted(fast_livo::GnssStatus::SINGLE) &&
+           !backend.gnssQualityAccepted(fast_livo::GnssStatus::INVALID);
+  }
+
   static bool runStandardFixedLagCheck() {
     RtkFixedLagBackend backend;
     backend.config_.enable = false;
@@ -451,6 +464,12 @@ void testFilteredFixedDoesNotResetAlignment() {
           "a confirmed RTK fixed loss must reset collected alignment");
 }
 
+void testGnssQualityPolicy() {
+  require(fast_livo_backend::RtkFixedLagBackendSelfTestAccess::
+              runGnssQualityPolicyCheck(),
+          "backend GNSS quality policy did not honor configured classes");
+}
+
 void testTrueFixedLagMarginalization() {
   gtsam::IncrementalFixedLagSmoother smoother(2.0);
   gtsam::Vector6 sigmas;
@@ -501,6 +520,7 @@ int main() {
     testRawPoseInterpolation();
     testAlignmentBoundaryTransition();
     testFilteredFixedDoesNotResetAlignment();
+    testGnssQualityPolicy();
     testTrueFixedLagMarginalization();
     testStandardFixedLagMarginalization();
   } catch (const std::exception &error) {

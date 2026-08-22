@@ -1,0 +1,26 @@
+生成前 30 秒 bag：
+
+cd ~/catkin_ws/src/FAST_LIVO2
+
+source /home/gulu/catkin_ws/devel/setup.bash
+
+python3 tools/dataset_conversion/convert_petrochemical_to_bag.py \
+  --dataset "/media/gulu/一只沙糖桔/BaiduNetdiskDownload/测试数据/融合定位" \
+  --ppk "/media/gulu/一只沙糖桔/BaiduNetdiskDownload/测试数据/融合定位/gnss/gnss.txt" \
+  --output "/media/gulu/一只沙糖桔/BaiduNetdiskDownload/测试数据/petrochemical_compressed_gnss_30s.bag" \
+  --start 0 \
+  --duration 10
+
+从原始数据直接转换整个数据集：
+
+cd ~/catkin_ws/src/FAST_LIVO2
+
+source /home/gulu/catkin_ws/devel/setup.bash
+
+python3 tools/dataset_conversion/convert_petrochemical_to_bag.py \
+  --dataset "/media/gulu/一只沙糖桔/BaiduNetdiskDownload/测试数据/融合定位" \
+  --ppk "/media/gulu/一只沙糖桔/BaiduNetdiskDownload/测试数据/融合定位/gnss/gnss_ppk_tool_bundle/gnss_ppk_tool/output/txt/rover_ppk_solution_full.txt" \
+  --output "/media/gulu/一只沙糖桔/BaiduNetdiskDownload/测试数据/test.bag"
+  
+  
+  
