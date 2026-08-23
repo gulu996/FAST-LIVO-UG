@@ -117,10 +117,20 @@ struct BackendConfig {
   double alignment_max_pair_time_diff_s = 0.05;
   double alignment_max_rmse_m = 0.5;
   gtsam::Point3 antenna_lever_arm_body_m{0.0, 0.0, 0.0};
+  gtsam::Point3 result_pose_lever_arm_body_m{0.0, 0.0, 0.0};
   double min_gnss_sigma_xy_m = 0.03;
   double min_gnss_sigma_z_m = 0.05;
   double max_gnss_sigma_xy_m = 2.0;
   double max_gnss_sigma_z_m = 3.0;
+  double rtk_float_sigma_scale = 1.0;
+  int rtk_float_reference_satellites = 0;
+  double rtk_float_satellite_sigma_scale_max = 1.0;
+  double gnss_recovery_gap_threshold_s = 0.0;
+  double gnss_recovery_ramp_duration_s = 0.0;
+  double gnss_recovery_initial_sigma_scale = 1.0;
+  int gnss_recovery_fixed_confirm_factors = 1;
+  double gnss_recovery_fixed_max_gap_s = 0.5;
+  double gnss_recovery_float_factor_rate_hz = 0.0;
   double max_gnss_residual_m = 3.0;
   double max_gnss_nis = 11.34;
   std::string robust_kernel = "huber";
@@ -200,6 +210,13 @@ class RtkFixedLagBackend {
     ros::Time stamp;
     gtsam::Point3 position;
     gtsam::Vector3 sigmas;
+    gtsam::Vector3 reported_sigmas = gtsam::Vector3::Zero();
+    std::uint8_t raw_quality = fast_livo::GnssStatus::INVALID;
+    std::uint8_t filtered_quality = fast_livo::GnssStatus::INVALID;
+    std::uint8_t num_sv = 0;
+    double quality_sigma_scale = 1.0;
+    double satellite_sigma_scale = 1.0;
+    double recovery_sigma_scale = 1.0;
   };
 
   struct UwbMeasurement {
@@ -247,13 +264,20 @@ class RtkFixedLagBackend {
   void gnssOdomCallback(const nav_msgs::OdometryConstPtr &message);
   void gnssStatusCallback(const fast_livo::GnssStatusConstPtr &message);
   bool gnssQualityAccepted(std::uint8_t quality) const;
+  double gnssQualitySigmaScale(const fast_livo::GnssStatus &status,
+                               double *satellite_scale) const;
+  double updateGnssRecoverySigmaScale(const ros::Time &stamp);
+  bool gnssRecoveryFloatFactorRateLimited(
+      const GnssMeasurement &measurement) const;
+  void commitGnssRecoveryAcceptedFactor(const GnssMeasurement &measurement);
   void uwbRangeCallback(
       const uwb_serial_driver::UwbRangeArrayConstPtr &message);
   void statusTimerCallback(const ros::TimerEvent &);
   void flushTimerCallback(const ros::TimerEvent &);
 
   void tryPairGnssMessages(std::uint64_t stamp_ns);
-  void processAcceptedGnss(const nav_msgs::Odometry &odometry);
+  void processAcceptedGnss(const nav_msgs::Odometry &odometry,
+                           const fast_livo::GnssStatus &status);
   void insertPendingGnss(const GnssMeasurement &measurement);
   void tryCollectAlignmentPairs();
   void transitionPendingGnssAfterAlignment(
@@ -326,6 +350,9 @@ class RtkFixedLagBackend {
   static std::string tumLine(const ros::Time &stamp,
                              const gtsam::Pose3 &pose);
   static std::string gnssTumLine(const GnssMeasurement &measurement);
+  static gtsam::Pose3 resultReferencePose(
+      const gtsam::Pose3 &body_pose,
+      const gtsam::Point3 &lever_arm_body_m);
   static bool poseIsFinite(const gtsam::Pose3 &pose);
 
   BackendConfig config_;
@@ -394,6 +421,11 @@ class RtkFixedLagBackend {
   std::uint64_t gnss_duplicate_factor_count_ = 0;
   std::uint64_t gnss_odom_only_rejected_ = 0;
   std::int64_t last_enqueued_gnss_stamp_ns_ = -1;
+  std::int64_t gnss_recovery_start_stamp_ns_ = -1;
+  std::int64_t gnss_recovery_fade_start_stamp_ns_ = -1;
+  std::int64_t gnss_recovery_last_fixed_stamp_ns_ = -1;
+  std::int64_t last_added_recovery_float_factor_stamp_ns_ = -1;
+  std::uint32_t gnss_recovery_consecutive_fixed_factors_ = 0;
   std::int64_t last_processed_gnss_stamp_ns_ = -1;
   std::int64_t alignment_last_used_gnss_stamp_ns_ = -1;
   std::int64_t last_gnss_triggered_node_stamp_ns_ = -1;

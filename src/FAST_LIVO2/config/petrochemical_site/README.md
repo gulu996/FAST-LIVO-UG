@@ -22,9 +22,21 @@ The compact camera topic is
 `/petrochemical/camera/left/image_raw/compressed` (`sensor_msgs/CompressedImage`).
 The original JPEG file bytes are copied directly with `format: jpeg`; the right
 camera is intentionally omitted. PPK LLA/quality is written as the already-supported
-`gnss_serial_driver/GnssPvtStamped` on `/gnss/pvt_local`; its official BASE-ENU
+`gnss_serial_driver/GnssPvtStamped` on `/gnss/pvt_local`; its BASE-RINEX-origin
 `east_m,north_m,up_m` is written as `nav_msgs/Odometry` on `/gnss/enu_odom`.
+For Float epochs, that Odometry covariance applies the AR-ratio penalty from
+`ppk_covariance` in `rtk_fixed_lag_backend.yaml`; the backend then applies its
+dataset-only Float/satellite scale and post-outage recovery ramp. The PVT
+`h_acc/v_acc` fields remain the source PPK SD values for quality diagnostics.
+During post-outage Float-only recovery, PositionFactors are additionally capped
+at 1 Hz; normal factor rate resumes when accepted Fixed factors are stable.
 The reference truth files are never read by the converter or written to the bag.
+The PPK ENU origin is the BASE RINEX `APPROX POSITION XYZ`. That RINEX has blank
+marker/antenna metadata and zero `ANTENNA: DELTA H/E/N`; the dataset does not
+provide an APC/ARP/marker-to-official-BASE height or offset. Applying only the
+known rover body-to-person lever would therefore be incomplete. The backend
+graph, ROS optimized odometry, and saved optimized TUM files currently remain at
+the body/IMU origin until the missing BASE geometry is supplied.
 
 ## 1. Dry run
 

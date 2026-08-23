@@ -16,6 +16,25 @@
 namespace fast_livo_backend {
 
 struct RtkFixedLagBackendSelfTestAccess {
+  struct GnssWeightResult {
+    double fixed_quality_scale = 0.0;
+    double fixed_satellite_scale = 0.0;
+    double float_quality_scale = 0.0;
+    double float_satellite_scale = 0.0;
+    double recovery_initial_scale = 0.0;
+    double recovery_rejected_later_scale = 0.0;
+    double recovery_float_hold_scale = 0.0;
+    double recovery_before_fixed_stable_scale = 0.0;
+    double recovery_midpoint_scale = 0.0;
+    double recovery_finished_scale = 0.0;
+    bool recovery_started_before_accept = false;
+    bool recovery_fade_started_before_fixed_stable = false;
+    bool recovery_float_rate_limited_before_period = false;
+    bool recovery_float_rate_allowed_at_period = false;
+    bool recovery_float_rate_applied_to_fixed = false;
+    bool recovery_float_rate_applied_after_fade = false;
+  };
+
   struct BoundaryResult {
     bool alignment_ready = false;
     std::set<std::int64_t> factor_stamps;
@@ -224,6 +243,103 @@ struct RtkFixedLagBackendSelfTestAccess {
            !backend.gnssQualityAccepted(fast_livo::GnssStatus::DIFFERENTIAL) &&
            !backend.gnssQualityAccepted(fast_livo::GnssStatus::SINGLE) &&
            !backend.gnssQualityAccepted(fast_livo::GnssStatus::INVALID);
+  }
+
+  static GnssWeightResult runGnssWeightCheck() {
+    RtkFixedLagBackend backend;
+    backend.config_.save_results = false;
+    backend.config_.save_text_log = false;
+    backend.config_.rtk_float_sigma_scale = 3.0;
+    backend.config_.rtk_float_reference_satellites = 10;
+    backend.config_.rtk_float_satellite_sigma_scale_max = 1.5;
+    backend.config_.gnss_recovery_gap_threshold_s = 5.0;
+    backend.config_.gnss_recovery_ramp_duration_s = 10.0;
+    backend.config_.gnss_recovery_initial_sigma_scale = 4.0;
+    backend.config_.gnss_recovery_fixed_confirm_factors = 3;
+    backend.config_.gnss_recovery_fixed_max_gap_s = 0.5;
+    backend.config_.gnss_recovery_float_factor_rate_hz = 1.0;
+
+    fast_livo::GnssStatus status;
+    status.raw_quality = fast_livo::GnssStatus::RTK_FIXED;
+    status.num_sv = 7;
+    GnssWeightResult result;
+    result.fixed_quality_scale = backend.gnssQualitySigmaScale(
+        status, &result.fixed_satellite_scale);
+
+    status.raw_quality = fast_livo::GnssStatus::RTK_FLOAT;
+    result.float_quality_scale = backend.gnssQualitySigmaScale(
+        status, &result.float_satellite_scale);
+
+    backend.last_added_gnss_factor_stamp_ns_ = 1'000'000'000LL;
+    result.recovery_initial_scale =
+        backend.updateGnssRecoverySigmaScale(ros::Time(11, 0));
+    result.recovery_rejected_later_scale =
+        backend.updateGnssRecoverySigmaScale(ros::Time(16, 0));
+    result.recovery_started_before_accept =
+        backend.gnss_recovery_start_stamp_ns_ >= 0;
+    // Simulate the first successful Float factor insertion at t=16 s.
+    RtkFixedLagBackend::GnssMeasurement measurement;
+    backend.gnss_recovery_start_stamp_ns_ = 16'000'000'000LL;
+    backend.last_added_gnss_factor_stamp_ns_ = 16'000'000'000LL;
+    measurement.stamp = ros::Time(16, 0);
+    measurement.raw_quality = fast_livo::GnssStatus::RTK_FLOAT;
+    backend.commitGnssRecoveryAcceptedFactor(measurement);
+    backend.last_added_recovery_float_factor_stamp_ns_ = 16'000'000'000LL;
+    measurement.stamp = ros::Time(16, 900'000'000);
+    result.recovery_float_rate_limited_before_period =
+        backend.gnssRecoveryFloatFactorRateLimited(measurement);
+    measurement.stamp = ros::Time(17, 0);
+    result.recovery_float_rate_allowed_at_period =
+        !backend.gnssRecoveryFloatFactorRateLimited(measurement);
+    measurement.raw_quality = fast_livo::GnssStatus::RTK_FIXED;
+    measurement.stamp = ros::Time(16, 100'000'000);
+    result.recovery_float_rate_applied_to_fixed =
+        backend.gnssRecoveryFloatFactorRateLimited(measurement);
+    backend.gnss_recovery_fade_start_stamp_ns_ = 16'000'000'000LL;
+    measurement.raw_quality = fast_livo::GnssStatus::RTK_FLOAT;
+    result.recovery_float_rate_applied_after_fade =
+        backend.gnssRecoveryFloatFactorRateLimited(measurement);
+    backend.gnss_recovery_fade_start_stamp_ns_ = -1;
+    backend.last_added_gnss_factor_stamp_ns_ = 26'000'000'000LL;
+    result.recovery_float_hold_scale =
+        backend.updateGnssRecoverySigmaScale(ros::Time(26, 0));
+
+    // A Float between Fixed factors breaks continuity, so three new accepted
+    // Fixed factors are required before the time-based fade can start.
+    measurement.raw_quality = fast_livo::GnssStatus::RTK_FIXED;
+    measurement.stamp = ros::Time(26, 200'000'000);
+    backend.commitGnssRecoveryAcceptedFactor(measurement);
+    measurement.raw_quality = fast_livo::GnssStatus::RTK_FLOAT;
+    measurement.stamp = ros::Time(26, 400'000'000);
+    backend.commitGnssRecoveryAcceptedFactor(measurement);
+    for (int i = 0; i < 2; ++i) {
+      measurement.raw_quality = fast_livo::GnssStatus::RTK_FIXED;
+      measurement.stamp = ros::Time(26, 600'000'000 + i * 200'000'000);
+      backend.commitGnssRecoveryAcceptedFactor(measurement);
+    }
+    result.recovery_fade_started_before_fixed_stable =
+        backend.gnss_recovery_fade_start_stamp_ns_ >= 0;
+    backend.last_added_gnss_factor_stamp_ns_ = 27'000'000'000LL;
+    result.recovery_before_fixed_stable_scale =
+        backend.updateGnssRecoverySigmaScale(ros::Time(27, 0));
+    measurement.raw_quality = fast_livo::GnssStatus::RTK_FIXED;
+    measurement.stamp = ros::Time(27, 0);
+    backend.commitGnssRecoveryAcceptedFactor(measurement);
+
+    backend.last_added_gnss_factor_stamp_ns_ = 32'000'000'000LL;
+    result.recovery_midpoint_scale =
+        backend.updateGnssRecoverySigmaScale(ros::Time(32, 0));
+    backend.last_added_gnss_factor_stamp_ns_ = 37'000'000'000LL;
+    result.recovery_finished_scale =
+        backend.updateGnssRecoverySigmaScale(ros::Time(37, 0));
+    return result;
+  }
+
+  static gtsam::Pose3 runResultReferenceCheck() {
+    const gtsam::Pose3 body_pose(gtsam::Rot3::Rz(M_PI_2),
+                                 gtsam::Point3(1.0, 2.0, 3.0));
+    return RtkFixedLagBackend::resultReferencePose(
+        body_pose, gtsam::Point3(0.180, 0.010, -1.192));
   }
 
   static bool runStandardFixedLagCheck() {
@@ -470,6 +586,42 @@ void testGnssQualityPolicy() {
           "backend GNSS quality policy did not honor configured classes");
 }
 
+void testGnssWeightingAndRecoveryRamp() {
+  const auto result = fast_livo_backend::RtkFixedLagBackendSelfTestAccess::
+      runGnssWeightCheck();
+  require(std::abs(result.fixed_quality_scale - 1.0) < 1e-12 &&
+              std::abs(result.fixed_satellite_scale - 1.0) < 1e-12,
+          "Fixed covariance must remain unchanged");
+  require(std::abs(result.float_quality_scale - 3.0) < 1e-12 &&
+              std::abs(result.float_satellite_scale -
+                       std::sqrt(10.0 / 7.0)) < 1e-12,
+          "Float quality/satellite covariance inflation is wrong");
+  require(std::abs(result.recovery_initial_scale - 4.0) < 1e-12 &&
+              std::abs(result.recovery_rejected_later_scale - 4.0) < 1e-12 &&
+              !result.recovery_started_before_accept &&
+              std::abs(result.recovery_float_hold_scale - 4.0) < 1e-12 &&
+              std::abs(result.recovery_before_fixed_stable_scale - 4.0) <
+                  1e-12 &&
+              !result.recovery_fade_started_before_fixed_stable &&
+              result.recovery_float_rate_limited_before_period &&
+              result.recovery_float_rate_allowed_at_period &&
+              !result.recovery_float_rate_applied_to_fixed &&
+              !result.recovery_float_rate_applied_after_fade &&
+              std::abs(result.recovery_midpoint_scale - 2.5) < 1e-12 &&
+              std::abs(result.recovery_finished_scale - 1.0) < 1e-12,
+          "GNSS recovery must hold Float weak until stable Fixed factors");
+}
+
+void testResultReferenceLeverArm() {
+  const gtsam::Pose3 result =
+      fast_livo_backend::RtkFixedLagBackendSelfTestAccess::
+          runResultReferenceCheck();
+  require((result.translation() - gtsam::Point3(0.990, 2.180, 1.808)).norm() <
+              1e-12 &&
+              result.rotation().equals(gtsam::Rot3::Rz(M_PI_2), 1e-12),
+          "saved result pose did not rotate the body-frame scoring lever arm");
+}
+
 void testTrueFixedLagMarginalization() {
   gtsam::IncrementalFixedLagSmoother smoother(2.0);
   gtsam::Vector6 sigmas;
@@ -521,6 +673,8 @@ int main() {
     testAlignmentBoundaryTransition();
     testFilteredFixedDoesNotResetAlignment();
     testGnssQualityPolicy();
+    testGnssWeightingAndRecoveryRamp();
+    testResultReferenceLeverArm();
     testTrueFixedLagMarginalization();
     testStandardFixedLagMarginalization();
   } catch (const std::exception &error) {

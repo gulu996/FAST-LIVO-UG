@@ -1,3 +1,9 @@
+ppk_covariance:
+  # RTKLIB AR ratios below the conventional 3.0 ambiguity-confidence target
+  # increase only Float covariance in the raw-data converter. Fixed is unchanged.
+  float_ar_reference_ratio: 3.0
+  float_ar_sigma_scale_max: 2.0
+
 rtk_backend:
   enable: true
   accept_rtk_fixed: true
@@ -32,11 +38,32 @@ rtk_backend:
 
   # sensor_extrinsics.yaml: body/IMU origin -> GNSS antenna phase center, FLU.
   antenna_lever_arm_body_m: [-0.094, -0.076, 0.136]
+  # Keep saved results at body/IMU. The rover-to-person lever is known, but the
+  # BASE RINEX has no antenna/marker height or APC-to-official-BASE geometry;
+  # applying only the rover side would be an incomplete reference conversion.
+  result_pose_lever_arm_body_m: [0.0, 0.0, 0.0]
 
   min_gnss_sigma_xy_m: 0.03
   min_gnss_sigma_z_m: 0.05
   max_gnss_sigma_xy_m: 2.0
   max_gnss_sigma_z_m: 3.0
+  # PPK Float SDs are conditional estimates and were over-confident near P9.
+  # Inflate sigma (not variance) and further penalize low satellite counts.
+  rtk_float_sigma_scale: 3.0
+  rtk_float_reference_satellites: 10
+  rtk_float_satellite_sigma_scale_max: 1.5
+  # The adapter first confirms recovery; the backend then fades information in
+  # after a long data gap instead of applying full GNSS weight immediately.
+  gnss_recovery_gap_threshold_s: 5.0
+  gnss_recovery_ramp_duration_s: 10.0
+  gnss_recovery_initial_sigma_scale: 4.0
+  # Float remains at the initial recovery scale. Fade starts only after this
+  # many accepted raw Fixed factors with no larger inter-factor gap.
+  gnss_recovery_fixed_confirm_factors: 5
+  gnss_recovery_fixed_max_gap_s: 0.5
+  # Bound cumulative information from the long post-outage Float sequence.
+  # Normal GNSS factor rate resumes as soon as stable Fixed starts the fade.
+  gnss_recovery_float_factor_rate_hz: 1.0
   max_gnss_residual_m: 3.0
   max_gnss_nis: 11.34
   robust_kernel: "huber"

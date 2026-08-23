@@ -15,6 +15,7 @@ from pathlib import Path
 
 import rosbag
 import rospy
+import yaml
 from gnss_serial_driver.msg import GnssPvtStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import CompressedImage, Imu, PointCloud2, PointField
@@ -110,6 +111,44 @@ POINT_FIELDS = [
     PointField(name="offset_time", offset=16, datatype=PointField.FLOAT64, count=1),
     PointField(name="ring", offset=24, datatype=PointField.UINT16, count=1),
 ]
+DEFAULT_WEIGHT_CONFIG = (
+    Path(__file__).resolve().parents[2]
+    / "config"
+    / "petrochemical_site"
+    / "rtk_fixed_lag_backend.yaml"
+)
+
+
+def load_ppk_covariance_config(path):
+    with path.open("r", encoding="utf-8") as stream:
+        document = yaml.safe_load(stream) or {}
+    config = document.get("ppk_covariance")
+    if not isinstance(config, dict):
+        raise ValueError(f"missing ppk_covariance mapping in {path}")
+    try:
+        reference_ratio = float(config["float_ar_reference_ratio"])
+        maximum_scale = float(config["float_ar_sigma_scale_max"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"invalid PPK covariance parameters in {path}") from exc
+    if not math.isfinite(reference_ratio) or reference_ratio <= 0.0:
+        raise ValueError("ppk_covariance/float_ar_reference_ratio must be positive")
+    if not math.isfinite(maximum_scale) or maximum_scale < 1.0:
+        raise ValueError("ppk_covariance/float_ar_sigma_scale_max must be >= 1")
+    return {
+        "float_ar_reference_ratio": reference_ratio,
+        "float_ar_sigma_scale_max": maximum_scale,
+    }
+
+
+def ppk_ar_sigma_scale(quality_code, ar_ratio, config):
+    if quality_code != 2:
+        return 1.0
+    if not math.isfinite(ar_ratio) or ar_ratio <= 0.0:
+        return config["float_ar_sigma_scale_max"]
+    return min(
+        config["float_ar_sigma_scale_max"],
+        max(1.0, math.sqrt(config["float_ar_reference_ratio"] / ar_ratio)),
+    )
 
 
 def ns_to_time(timestamp_ns):
@@ -210,7 +249,7 @@ def camera_events(directory, sensor, stats):
         yield timestamp_ns, sensor, path
 
 
-def ppk_events(path, stats):
+def ppk_events(path, stats, covariance_config):
     previous_ns = None
     previous_epoch = None
     with path.open("r", encoding="utf-8-sig", newline="") as stream:
@@ -237,6 +276,7 @@ def ppk_events(path, stats):
                 sd_n = float(row["sd_n_m"])
                 sd_e = float(row["sd_e_m"])
                 sd_u = float(row["sd_u_m"])
+                ar_ratio = float(row["ar_ratio"])
                 covariance_terms = tuple(float(row[name]) for name in ("sd_en_m", "sd_nu_m", "sd_ue_m"))
                 unix_s_ms = int(Decimal(row["unix_utc_s"]) * 1000)
                 gpst_utc_ms = int(
@@ -249,7 +289,7 @@ def ppk_events(path, stats):
                 continue
             values = (
                 gpst_sow, latitude, longitude, altitude, north, east, up,
-                sd_n, sd_e, sd_u,
+                sd_n, sd_e, sd_u, ar_ratio,
             ) + covariance_terms
             if (
                 timestamp_ns <= 0
@@ -272,6 +312,15 @@ def ppk_events(path, stats):
             previous_ns = timestamp_ns
             previous_epoch = epoch_index
             stats["gnss_fixed" if quality_code == 1 else "gnss_float"] += 1
+            ar_sigma_scale = ppk_ar_sigma_scale(
+                quality_code, ar_ratio, covariance_config
+            )
+            if quality_code == 2:
+                stats["gnss_float_ar_scale_milli_sum"] += int(round(ar_sigma_scale * 1000.0))
+                stats["gnss_float_ar_scale_milli_max"] = max(
+                    stats["gnss_float_ar_scale_milli_max"],
+                    int(round(ar_sigma_scale * 1000.0)),
+                )
             yield timestamp_ns, "gnss", (
                 epoch_index,
                 gpst_week,
@@ -285,8 +334,11 @@ def ppk_events(path, stats):
                 east,
                 north,
                 up,
-                max(sd_n, sd_e),
+                sd_e,
+                sd_n,
                 sd_u,
+                ar_ratio,
+                ar_sigma_scale,
             )
 
 
@@ -445,8 +497,11 @@ def build_gnss(payload, timestamp_ns, sequence):
         east,
         north,
         up,
-        horizontal_sigma,
-        vertical_sigma,
+        sd_e,
+        sd_n,
+        sd_u,
+        _ar_ratio,
+        ar_sigma_scale,
     ) = payload
     msg = GnssPvtStamped()
     msg.header = Header(seq=sequence, stamp=ns_to_time(timestamp_ns), frame_id="gnss_antenna")
@@ -465,8 +520,10 @@ def build_gnss(payload, timestamp_ns, sequence):
     msg.pvt.altitude = altitude
     # The PPK file contains ellipsoidal height only; zero marks unavailable MSL height.
     msg.pvt.height_msl = 0.0
-    msg.pvt.h_acc = horizontal_sigma
-    msg.pvt.v_acc = vertical_sigma
+    # Keep the source PPK SDs visible to the adapter; the official ENU
+    # Odometry covariance below carries the AR-ratio penalty exactly once.
+    msg.pvt.h_acc = max(sd_n, sd_e)
+    msg.pvt.v_acc = sd_u
     # PPK has no PDOP or velocity solution. Match the existing driver's explicit
     # unavailable sentinel; the petrochemical config keeps these fields ungated.
     msg.pvt.p_dop = 999.0
@@ -491,11 +548,12 @@ def build_gnss(payload, timestamp_ns, sequence):
     enu.pose.pose.position.y = north
     enu.pose.pose.position.z = up
     enu.pose.pose.orientation.w = 1.0
-    # Keep the existing isotropic horizontal covariance strategy. The backend
-    # applies the same configured sigma floors/ceilings before PositionFactor.
-    enu.pose.covariance[0] = horizontal_sigma * horizontal_sigma
-    enu.pose.covariance[7] = horizontal_sigma * horizontal_sigma
-    enu.pose.covariance[14] = vertical_sigma * vertical_sigma
+    effective_sd_e = sd_e * ar_sigma_scale
+    effective_sd_n = sd_n * ar_sigma_scale
+    effective_sd_u = sd_u * ar_sigma_scale
+    enu.pose.covariance[0] = effective_sd_e * effective_sd_e
+    enu.pose.covariance[7] = effective_sd_n * effective_sd_n
+    enu.pose.covariance[14] = effective_sd_u * effective_sd_u
     enu.pose.covariance[21] = 1e6
     enu.pose.covariance[28] = 1e6
     enu.pose.covariance[35] = 1e6
@@ -548,12 +606,24 @@ def print_summary(stats, first_ns, last_ns, window_start_ns, window_end_ns, dry_
             f"valid_points={stats['lidar_valid_points']} invalid_points={stats['lidar_invalid_points']} "
             f"max_offset_s={stats['lidar_max_offset_ns'] / 1e9:.9f}"
         )
+    if stats["gnss_float"]:
+        print(
+            "gnss_float_ar_sigma_scale: "
+            f"mean={stats['gnss_float_ar_scale_milli_sum'] / stats['gnss_float'] / 1000.0:.3f} "
+            f"max={stats['gnss_float_ar_scale_milli_max'] / 1000.0:.3f}"
+        )
 
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", required=True, type=Path, help="dataset root")
     parser.add_argument("--ppk", type=Path, help="override rover_ppk_solution_full.txt path")
+    parser.add_argument(
+        "--weight-config",
+        type=Path,
+        default=DEFAULT_WEIGHT_CONFIG,
+        help="petrochemical YAML containing ppk_covariance parameters",
+    )
     parser.add_argument("--output", type=Path, help="output .bag (required unless --dry-run)")
     parser.add_argument("--start", default="0", help="seconds from the earliest sensor timestamp")
     parser.add_argument("--duration", help="duration in seconds")
@@ -572,6 +642,10 @@ def main(argv=None):
     args = parse_args(argv or sys.argv[1:])
     dataset = args.dataset.expanduser().resolve()
     paths = require_dataset_layout(dataset)
+    weight_config_path = args.weight_config.expanduser().resolve()
+    if not weight_config_path.is_file():
+        raise FileNotFoundError(f"weight config does not exist: {weight_config_path}")
+    covariance_config = load_ppk_covariance_config(weight_config_path)
     if args.ppk:
         paths["ppk"] = args.ppk.expanduser().resolve()
         if not paths["ppk"].is_file():
@@ -581,7 +655,7 @@ def main(argv=None):
         imu_events(paths["imu"], stats),
         lidar_events(paths["lidar"], stats, build_payload=not args.dry_run),
         camera_events(paths["left"], "left", stats),
-        ppk_events(paths["ppk"], stats),
+        ppk_events(paths["ppk"], stats, covariance_config),
     ]
 
     heap = []

@@ -39,6 +39,8 @@ constexpr char kInterpolationGapTooLarge[] =
 constexpr char kInterpolationInvalid[] = "RAW_ODOM_INTERPOLATION_INVALID";
 constexpr char kGnssLateOutOfOrder[] = "GNSS_LATE_OUT_OF_ORDER";
 constexpr char kGnssRateLimited[] = "GNSS_RATE_LIMITED";
+constexpr char kGnssRecoveryFloatRateLimited[] =
+    "GNSS_RECOVERY_FLOAT_RATE_LIMITED";
 constexpr char kDuplicateGnssTimestamp[] = "DUPLICATE_GNSS_TIMESTAMP";
 constexpr char kNoActiveGraphState[] = "NO_ACTIVE_GRAPH_STATE";
 constexpr char kAlignmentTransitionTooOld[] =
@@ -56,6 +58,23 @@ constexpr char kUwbNisGate[] = "NIS_GATE";
 
 double clamp(double value, double minimum, double maximum) {
   return std::max(minimum, std::min(value, maximum));
+}
+
+const char *gnssQualityName(std::uint8_t quality) {
+  switch (quality) {
+    case fast_livo::GnssStatus::RTK_FIXED:
+      return "Fixed";
+    case fast_livo::GnssStatus::RTK_FLOAT:
+      return "Float";
+    case fast_livo::GnssStatus::DIFFERENTIAL:
+      return "Differential";
+    case fast_livo::GnssStatus::SINGLE:
+      return "Single";
+    case fast_livo::GnssStatus::RECOVERING:
+      return "Recovering";
+    default:
+      return "Invalid";
+  }
 }
 
 double stampDifference(const ros::Time &a, const ros::Time &b) {
@@ -230,6 +249,27 @@ RtkFixedLagBackend::RtkFixedLagBackend(ros::NodeHandle &nh) {
       << " gnss_factors=" << gnss_factor_enabled_
       << " uwb_factors=" << config_.uwb_factor_backend_en
       << " output_directory=" << config_.output_directory);
+  ROS_INFO_STREAM(
+      "[RTK_BACKEND_GNSS_WEIGHT] float_sigma_scale="
+      << config_.rtk_float_sigma_scale
+      << " float_reference_satellites="
+      << config_.rtk_float_reference_satellites
+      << " float_satellite_scale_max="
+      << config_.rtk_float_satellite_sigma_scale_max
+      << " recovery_gap_threshold_s="
+      << config_.gnss_recovery_gap_threshold_s
+      << " recovery_ramp_duration_s="
+      << config_.gnss_recovery_ramp_duration_s
+      << " recovery_initial_sigma_scale="
+      << config_.gnss_recovery_initial_sigma_scale
+      << " recovery_fixed_confirm_factors="
+      << config_.gnss_recovery_fixed_confirm_factors
+      << " recovery_fixed_max_gap_s="
+      << config_.gnss_recovery_fixed_max_gap_s
+      << " recovery_float_factor_rate_hz="
+      << config_.gnss_recovery_float_factor_rate_hz
+      << " result_pose_lever_arm_body_m=["
+      << config_.result_pose_lever_arm_body_m.transpose() << "]");
   ROS_INFO_STREAM(
       "[RTK_BACKEND] LIVO Pose3 sigmas [rotation xyz, translation xyz]=["
       << (config_.uwb_factor_backend_en
@@ -429,6 +469,32 @@ void RtkFixedLagBackend::loadParameters(ros::NodeHandle &nh) {
                config_.max_gnss_sigma_xy_m);
   params.param("max_gnss_sigma_z_m", config_.max_gnss_sigma_z_m,
                config_.max_gnss_sigma_z_m);
+  params.param("rtk_float_sigma_scale", config_.rtk_float_sigma_scale,
+               config_.rtk_float_sigma_scale);
+  params.param("rtk_float_reference_satellites",
+               config_.rtk_float_reference_satellites,
+               config_.rtk_float_reference_satellites);
+  params.param("rtk_float_satellite_sigma_scale_max",
+               config_.rtk_float_satellite_sigma_scale_max,
+               config_.rtk_float_satellite_sigma_scale_max);
+  params.param("gnss_recovery_gap_threshold_s",
+               config_.gnss_recovery_gap_threshold_s,
+               config_.gnss_recovery_gap_threshold_s);
+  params.param("gnss_recovery_ramp_duration_s",
+               config_.gnss_recovery_ramp_duration_s,
+               config_.gnss_recovery_ramp_duration_s);
+  params.param("gnss_recovery_initial_sigma_scale",
+               config_.gnss_recovery_initial_sigma_scale,
+               config_.gnss_recovery_initial_sigma_scale);
+  params.param("gnss_recovery_fixed_confirm_factors",
+               config_.gnss_recovery_fixed_confirm_factors,
+               config_.gnss_recovery_fixed_confirm_factors);
+  params.param("gnss_recovery_fixed_max_gap_s",
+               config_.gnss_recovery_fixed_max_gap_s,
+               config_.gnss_recovery_fixed_max_gap_s);
+  params.param("gnss_recovery_float_factor_rate_hz",
+               config_.gnss_recovery_float_factor_rate_hz,
+               config_.gnss_recovery_float_factor_rate_hz);
   params.param("max_gnss_residual_m", config_.max_gnss_residual_m,
                config_.max_gnss_residual_m);
   params.param("max_gnss_nis", config_.max_gnss_nis,
@@ -517,6 +583,20 @@ void RtkFixedLagBackend::loadParameters(ros::NodeHandle &nh) {
   config_.antenna_lever_arm_body_m =
       gtsam::Point3(lever_arm[0], lever_arm[1], lever_arm[2]);
 
+  std::vector<double> result_lever_arm;
+  params.param<std::vector<double>>(
+      "result_pose_lever_arm_body_m", result_lever_arm,
+      std::vector<double>{0.0, 0.0, 0.0});
+  if (result_lever_arm.size() != 3 ||
+      !std::all_of(result_lever_arm.begin(), result_lever_arm.end(),
+                   [](double value) { return std::isfinite(value); })) {
+    throw std::invalid_argument(
+        "/rtk_backend/result_pose_lever_arm_body_m must contain exactly 3 "
+        "finite values");
+  }
+  config_.result_pose_lever_arm_body_m = gtsam::Point3(
+      result_lever_arm[0], result_lever_arm[1], result_lever_arm[2]);
+
   nh.param("uwb/time_offset_s", config_.uwb_time_offset_s,
            config_.uwb_time_offset_s);
   nh.param("uwb/range_noise_m", config_.uwb_range_sigma_m,
@@ -588,9 +668,10 @@ void RtkFixedLagBackend::loadParameters(ros::NodeHandle &nh) {
 }
 
 void RtkFixedLagBackend::validateParameters() const {
-  if (!config_.antenna_lever_arm_body_m.allFinite()) {
+  if (!config_.antenna_lever_arm_body_m.allFinite() ||
+      !config_.result_pose_lever_arm_body_m.allFinite()) {
     throw std::invalid_argument(
-        "/rtk_backend/antenna_lever_arm_body_m values must be finite");
+        "/rtk_backend lever-arm values must be finite");
   }
   if (config_.lag_seconds <= 0.0 ||
       config_.keyframe_translation_m <= 0.0 ||
@@ -608,6 +689,16 @@ void RtkFixedLagBackend::validateParameters() const {
       config_.min_gnss_sigma_z_m <= 0.0 ||
       config_.max_gnss_sigma_xy_m < config_.min_gnss_sigma_xy_m ||
       config_.max_gnss_sigma_z_m < config_.min_gnss_sigma_z_m ||
+      config_.rtk_float_sigma_scale < 1.0 ||
+      config_.rtk_float_reference_satellites < 0 ||
+      config_.rtk_float_reference_satellites > 255 ||
+      config_.rtk_float_satellite_sigma_scale_max < 1.0 ||
+      config_.gnss_recovery_gap_threshold_s < 0.0 ||
+      config_.gnss_recovery_ramp_duration_s < 0.0 ||
+      config_.gnss_recovery_initial_sigma_scale < 1.0 ||
+      config_.gnss_recovery_fixed_confirm_factors <= 0 ||
+      config_.gnss_recovery_fixed_max_gap_s <= 0.0 ||
+      config_.gnss_recovery_float_factor_rate_hz < 0.0 ||
       config_.max_gnss_residual_m <= 0.0 || config_.max_gnss_nis <= 0.0 ||
       config_.livo_translation_sigma_m <= 0.0 ||
       config_.livo_lateral_vertical_sigma_m <= 0.0 ||
@@ -749,10 +840,12 @@ void RtkFixedLagBackend::initializeResultFiles() {
         << "# frame_id=odom columns=timestamp tx ty tz qx qy qz qw\n";
     optimized_online_stream_
         << "# frame_id=map/ENU columns=timestamp tx ty tz qx qy qz qw; "
+           "saved_reference=body+R_body*result_pose_lever_arm_body_m; "
            "repeated timestamps may represent a later optimization of the "
            "current node\n";
     optimized_final_stream_
         << "# frame_id=map/ENU columns=timestamp tx ty tz qx qy qz qw; "
+           "saved_reference=body+R_body*result_pose_lever_arm_body_m; "
            "final fixed-lag timestamps are strictly increasing and unique\n";
     gnss_stream_
         << "# frame_id=map/ENU columns=timestamp x_m y_m z_m 0 0 0 1; "
@@ -1089,6 +1182,111 @@ bool RtkFixedLagBackend::gnssQualityAccepted(std::uint8_t quality) const {
   }
 }
 
+double RtkFixedLagBackend::gnssQualitySigmaScale(
+    const fast_livo::GnssStatus &status, double *satellite_scale) const {
+  *satellite_scale = 1.0;
+  if (status.raw_quality != fast_livo::GnssStatus::RTK_FLOAT) return 1.0;
+  if (config_.rtk_float_reference_satellites > 0 && status.num_sv > 0) {
+    *satellite_scale = clamp(
+        std::sqrt(static_cast<double>(config_.rtk_float_reference_satellites) /
+                  static_cast<double>(status.num_sv)),
+        1.0, config_.rtk_float_satellite_sigma_scale_max);
+  }
+  return config_.rtk_float_sigma_scale;
+}
+
+double RtkFixedLagBackend::updateGnssRecoverySigmaScale(
+    const ros::Time &stamp) {
+  const std::int64_t stamp_ns = stampNanoseconds(stamp);
+  const bool recovery_enabled =
+      config_.gnss_recovery_gap_threshold_s > 0.0 &&
+      config_.gnss_recovery_ramp_duration_s > 0.0 &&
+      config_.gnss_recovery_initial_sigma_scale > 1.0;
+  if (!recovery_enabled || last_added_gnss_factor_stamp_ns_ < 0) return 1.0;
+  const double accepted_factor_gap_s =
+      static_cast<double>(stamp_ns - last_added_gnss_factor_stamp_ns_) / 1e9;
+  // Keep rejected recovery candidates at maximum inflation. The ramp clock is
+  // committed only after one of them actually enters the factor graph.
+  if (accepted_factor_gap_s > config_.gnss_recovery_gap_threshold_s)
+    return config_.gnss_recovery_initial_sigma_scale;
+  if (gnss_recovery_start_stamp_ns_ < 0) return 1.0;
+  // Float factors stay weak for the whole post-outage recovery. Time starts
+  // reducing the inflation only after accepted Fixed factors are stable.
+  if (gnss_recovery_fade_start_stamp_ns_ < 0)
+    return config_.gnss_recovery_initial_sigma_scale;
+
+  const double elapsed_s =
+      static_cast<double>(stamp_ns - gnss_recovery_fade_start_stamp_ns_) / 1e9;
+  if (elapsed_s >= config_.gnss_recovery_ramp_duration_s) {
+    gnss_recovery_start_stamp_ns_ = -1;
+    gnss_recovery_fade_start_stamp_ns_ = -1;
+    gnss_recovery_last_fixed_stamp_ns_ = -1;
+    last_added_recovery_float_factor_stamp_ns_ = -1;
+    gnss_recovery_consecutive_fixed_factors_ = 0;
+    return 1.0;
+  }
+  const double fraction =
+      clamp(elapsed_s / config_.gnss_recovery_ramp_duration_s, 0.0, 1.0);
+  return config_.gnss_recovery_initial_sigma_scale +
+         fraction * (1.0 - config_.gnss_recovery_initial_sigma_scale);
+}
+
+bool RtkFixedLagBackend::gnssRecoveryFloatFactorRateLimited(
+    const GnssMeasurement &measurement) const {
+  if (config_.gnss_recovery_float_factor_rate_hz <= 0.0 ||
+      gnss_recovery_start_stamp_ns_ < 0 ||
+      gnss_recovery_fade_start_stamp_ns_ >= 0 ||
+      measurement.raw_quality != fast_livo::GnssStatus::RTK_FLOAT ||
+      last_added_recovery_float_factor_stamp_ns_ < 0) {
+    return false;
+  }
+  const double interval_s =
+      static_cast<double>(stampNanoseconds(measurement.stamp) -
+                          last_added_recovery_float_factor_stamp_ns_) /
+      1e9;
+  return interval_s + 1e-12 <
+         1.0 / config_.gnss_recovery_float_factor_rate_hz;
+}
+
+void RtkFixedLagBackend::commitGnssRecoveryAcceptedFactor(
+    const GnssMeasurement &measurement) {
+  if (gnss_recovery_start_stamp_ns_ < 0 ||
+      gnss_recovery_fade_start_stamp_ns_ >= 0) {
+    return;
+  }
+
+  const std::int64_t stamp_ns = stampNanoseconds(measurement.stamp);
+  if (measurement.raw_quality != fast_livo::GnssStatus::RTK_FIXED) {
+    gnss_recovery_last_fixed_stamp_ns_ = -1;
+    gnss_recovery_consecutive_fixed_factors_ = 0;
+    return;
+  }
+
+  const bool continues_fixed =
+      gnss_recovery_last_fixed_stamp_ns_ >= 0 &&
+      static_cast<double>(stamp_ns - gnss_recovery_last_fixed_stamp_ns_) /
+              1e9 <=
+          config_.gnss_recovery_fixed_max_gap_s;
+  gnss_recovery_consecutive_fixed_factors_ =
+      continues_fixed ? gnss_recovery_consecutive_fixed_factors_ + 1 : 1;
+  gnss_recovery_last_fixed_stamp_ns_ = stamp_ns;
+  if (gnss_recovery_consecutive_fixed_factors_ <
+      static_cast<std::uint32_t>(
+          config_.gnss_recovery_fixed_confirm_factors)) {
+    return;
+  }
+
+  gnss_recovery_fade_start_stamp_ns_ = stamp_ns;
+  last_added_recovery_float_factor_stamp_ns_ = -1;
+  std::ostringstream detail;
+  detail << "stamp=" << std::setprecision(15) << measurement.stamp.toSec()
+         << " accepted_fixed_factors="
+         << gnss_recovery_consecutive_fixed_factors_
+         << " fixed_max_gap_s=" << config_.gnss_recovery_fixed_max_gap_s
+         << " ramp_duration_s=" << config_.gnss_recovery_ramp_duration_s;
+  queueTextEvent("GNSS_COVARIANCE_RECOVERY_FIXED_STABLE", detail.str());
+}
+
 void RtkFixedLagBackend::gnssOdomCallback(
     const nav_msgs::OdometryConstPtr &message) {
   std::lock_guard<std::mutex> lock(state_mutex_);
@@ -1189,13 +1387,14 @@ void RtkFixedLagBackend::tryPairGnssMessages(std::uint64_t stamp_ns) {
       odometry == pending_gnss_odom_.end()) {
     return;
   }
-  processAcceptedGnss(odometry->second);
+  processAcceptedGnss(odometry->second, status->second);
   pending_status_.erase(status);
   pending_gnss_odom_.erase(odometry);
 }
 
 void RtkFixedLagBackend::processAcceptedGnss(
-    const nav_msgs::Odometry &odometry) {
+    const nav_msgs::Odometry &odometry,
+    const fast_livo::GnssStatus &status) {
   const std::int64_t stamp_ns = stampNanoseconds(odometry.header.stamp);
   if (last_enqueued_gnss_stamp_ns_ >= 0 &&
       stamp_ns <= last_enqueued_gnss_stamp_ns_) {
@@ -1223,13 +1422,29 @@ void RtkFixedLagBackend::processAcceptedGnss(
   GnssMeasurement measurement;
   measurement.stamp = odometry.header.stamp;
   measurement.position = gtsam::Point3(position.x, position.y, position.z);
+  measurement.reported_sigmas = gtsam::Vector3(
+      std::sqrt(covariance_x), std::sqrt(covariance_y),
+      std::sqrt(covariance_z));
+  measurement.raw_quality = status.raw_quality;
+  measurement.filtered_quality = status.filtered_quality;
+  measurement.num_sv = status.num_sv;
+  measurement.quality_sigma_scale =
+      gnssQualitySigmaScale(status, &measurement.satellite_sigma_scale);
+  const double total_scale = measurement.quality_sigma_scale *
+                             measurement.satellite_sigma_scale;
   measurement.sigmas = gtsam::Vector3(
-      clamp(std::sqrt(covariance_x), config_.min_gnss_sigma_xy_m,
-            config_.max_gnss_sigma_xy_m),
-      clamp(std::sqrt(covariance_y), config_.min_gnss_sigma_xy_m,
-            config_.max_gnss_sigma_xy_m),
-      clamp(std::sqrt(covariance_z), config_.min_gnss_sigma_z_m,
-            config_.max_gnss_sigma_z_m));
+      clamp(std::max(measurement.reported_sigmas.x(),
+                     config_.min_gnss_sigma_xy_m) *
+                total_scale,
+            config_.min_gnss_sigma_xy_m, config_.max_gnss_sigma_xy_m),
+      clamp(std::max(measurement.reported_sigmas.y(),
+                     config_.min_gnss_sigma_xy_m) *
+                total_scale,
+            config_.min_gnss_sigma_xy_m, config_.max_gnss_sigma_xy_m),
+      clamp(std::max(measurement.reported_sigmas.z(),
+                     config_.min_gnss_sigma_z_m) *
+                total_scale,
+            config_.min_gnss_sigma_z_m, config_.max_gnss_sigma_z_m));
   last_enqueued_gnss_stamp_ns_ = stamp_ns;
 
   if (!alignment_.valid) {
@@ -1694,6 +1909,17 @@ void RtkFixedLagBackend::processPendingGnss() {
       continue;
     }
 
+    if (gnssRecoveryFloatFactorRateLimited(*measurement)) {
+      // A rate-limited raw Float still breaks the consecutive Fixed streak.
+      gnss_recovery_last_fixed_stamp_ns_ = -1;
+      gnss_recovery_consecutive_fixed_factors_ = 0;
+      rejectGnss(kGnssRecoveryFloatRateLimited, 0.0, 0.0,
+                 &measurement->stamp);
+      last_processed_gnss_stamp_ns_ = stampNanoseconds(measurement->stamp);
+      measurement = pending_factor_gnss_.erase(measurement);
+      continue;
+    }
+
     double association_dt_s = std::numeric_limits<double>::infinity();
     Keyframe *keyframe =
         findReusableKeyframe(measurement->stamp, &association_dt_s);
@@ -1773,6 +1999,33 @@ bool RtkFixedLagBackend::addGnssFactor(
     return false;
   }
 
+  GnssMeasurement effective_measurement = measurement;
+  effective_measurement.recovery_sigma_scale =
+      updateGnssRecoverySigmaScale(measurement.stamp);
+  effective_measurement.sigmas = gtsam::Vector3(
+      clamp(measurement.sigmas.x() *
+                effective_measurement.recovery_sigma_scale,
+            config_.min_gnss_sigma_xy_m, config_.max_gnss_sigma_xy_m),
+      clamp(measurement.sigmas.y() *
+                effective_measurement.recovery_sigma_scale,
+            config_.min_gnss_sigma_xy_m, config_.max_gnss_sigma_xy_m),
+      clamp(measurement.sigmas.z() *
+                effective_measurement.recovery_sigma_scale,
+            config_.min_gnss_sigma_z_m, config_.max_gnss_sigma_z_m));
+  const bool starts_recovery =
+      last_added_gnss_factor_stamp_ns_ >= 0 &&
+      static_cast<double>(measurement_stamp_ns -
+                          last_added_gnss_factor_stamp_ns_) /
+              1e9 >
+          config_.gnss_recovery_gap_threshold_s &&
+      effective_measurement.recovery_sigma_scale > 1.0;
+  const double accepted_factor_gap_s =
+      last_added_gnss_factor_stamp_ns_ < 0
+          ? 0.0
+          : static_cast<double>(measurement_stamp_ns -
+                                last_added_gnss_factor_stamp_ns_) /
+                1e9;
+
   gtsam::Pose3 pose = keyframe.optimized_pose;
   try {
     pose = smoother_->calculateEstimate<gtsam::Pose3>(keyframe.key);
@@ -1790,7 +2043,7 @@ bool RtkFixedLagBackend::addGnssFactor(
       antenna_jacobian * smoother_->marginalCovariance(keyframe.key) *
       antenna_jacobian.transpose();
   innovation_covariance.diagonal() +=
-      measurement.sigmas.array().square().matrix();
+      effective_measurement.sigmas.array().square().matrix();
   const Eigen::LDLT<gtsam::Matrix3> decomposition(innovation_covariance);
   if (decomposition.info() != Eigen::Success) {
     rejectGnss("INVALID_INNOVATION_COVARIANCE", residual_m, 0.0,
@@ -1817,7 +2070,7 @@ bool RtkFixedLagBackend::addGnssFactor(
   }
 
   gtsam::SharedNoiseModel noise =
-      gtsam::noiseModel::Diagonal::Sigmas(measurement.sigmas);
+      gtsam::noiseModel::Diagonal::Sigmas(effective_measurement.sigmas);
   if (config_.robust_kernel == "huber") {
     noise = gtsam::noiseModel::Robust::Create(
         gtsam::noiseModel::mEstimator::Huber::Create(config_.huber_delta),
@@ -1836,15 +2089,59 @@ bool RtkFixedLagBackend::addGnssFactor(
 
   ++gnss_accepted_;
   ++gnss_factor_count_;
+  if (starts_recovery) {
+    gnss_recovery_start_stamp_ns_ = measurement_stamp_ns;
+    gnss_recovery_fade_start_stamp_ns_ = -1;
+    gnss_recovery_last_fixed_stamp_ns_ = -1;
+    last_added_recovery_float_factor_stamp_ns_ = -1;
+    gnss_recovery_consecutive_fixed_factors_ = 0;
+    std::ostringstream recovery_detail;
+    recovery_detail << "stamp=" << std::setprecision(15)
+                    << measurement.stamp.toSec()
+                    << " accepted_factor_gap_s=" << accepted_factor_gap_s
+                    << " initial_sigma_scale="
+                    << config_.gnss_recovery_initial_sigma_scale
+                    << " fixed_confirm_factors="
+                    << config_.gnss_recovery_fixed_confirm_factors
+                    << " fixed_max_gap_s="
+                    << config_.gnss_recovery_fixed_max_gap_s
+                    << " ramp_duration_s="
+                    << config_.gnss_recovery_ramp_duration_s;
+    queueTextEvent("GNSS_COVARIANCE_RECOVERY_STARTED",
+                   recovery_detail.str());
+  }
+  commitGnssRecoveryAcceptedFactor(effective_measurement);
+  if (gnss_recovery_start_stamp_ns_ >= 0 &&
+      gnss_recovery_fade_start_stamp_ns_ < 0 &&
+      effective_measurement.raw_quality ==
+          fast_livo::GnssStatus::RTK_FLOAT) {
+    last_added_recovery_float_factor_stamp_ns_ = measurement_stamp_ns;
+  }
   last_added_gnss_factor_stamp_ns_ = measurement_stamp_ns;
   last_reject_reason_.clear();
-  queueGnssPosition(measurement);
+  queueGnssPosition(effective_measurement);
   std::ostringstream detail;
   detail << "key=" << keyframe.id
          << " stamp=" << std::setprecision(15) << measurement.stamp.toSec()
+         << " raw_quality="
+         << gnssQualityName(effective_measurement.raw_quality)
+         << " filtered_quality="
+         << gnssQualityName(effective_measurement.filtered_quality)
+         << " satellites=" << static_cast<int>(effective_measurement.num_sv)
+         << " reported_sigmas=["
+         << effective_measurement.reported_sigmas.transpose()
+         << "] quality_scale=" << effective_measurement.quality_sigma_scale
+         << " satellite_scale="
+         << effective_measurement.satellite_sigma_scale
+         << " recovery_scale="
+         << effective_measurement.recovery_sigma_scale
+         << " recovery_fixed_factors="
+         << gnss_recovery_consecutive_fixed_factors_
+         << " recovery_fade_started="
+         << (gnss_recovery_fade_start_stamp_ns_ >= 0)
          << " dt=" << last_gnss_dt_s_ << " residual=" << residual_m
-         << " nis=" << nis << " sigmas=[" << measurement.sigmas.transpose()
-         << "]";
+         << " nis=" << nis << " effective_sigmas=["
+         << effective_measurement.sigmas.transpose() << "] accepted=1";
   queueTextEvent("GNSS_FACTOR_ADDED", detail.str());
   ROS_INFO_STREAM_THROTTLE(config_.log_interval_s,
                            "[RTK_BACKEND_GNSS_FACTOR] " << detail.str());
@@ -2349,7 +2646,8 @@ void RtkFixedLagBackend::rejectGnss(const std::string &reason,
   } else if (reason == kGnssLateOutOfOrder) {
     ++gnss_late_out_of_order_;
     ++gnss_time_rejected_;
-  } else if (reason == kGnssRateLimited) {
+  } else if (reason == kGnssRateLimited ||
+             reason == kGnssRecoveryFloatRateLimited) {
     ++gnss_rate_limited_;
     ++gnss_time_rejected_;
   } else if (reason == kDuplicateGnssTimestamp) {
@@ -2618,6 +2916,13 @@ std::string RtkFixedLagBackend::gnssTumLine(
   return line.str();
 }
 
+gtsam::Pose3 RtkFixedLagBackend::resultReferencePose(
+    const gtsam::Pose3 &body_pose,
+    const gtsam::Point3 &lever_arm_body_m) {
+  return gtsam::Pose3(body_pose.rotation(),
+                      body_pose.transformFrom(lever_arm_body_m));
+}
+
 void RtkFixedLagBackend::queueRawPose(const RawOdomSample &sample) {
   if (config_.save_results) pending_file_batch_.raw_lines.push_back(
       tumLine(sample.stamp, sample.pose));
@@ -2627,14 +2932,19 @@ void RtkFixedLagBackend::queueOptimizedOnlinePose(
     const Keyframe &keyframe) {
   if (config_.save_results)
     pending_file_batch_.optimized_online_lines.push_back(
-        tumLine(keyframe.stamp, keyframe.optimized_pose));
+        tumLine(keyframe.stamp,
+                resultReferencePose(
+                    keyframe.optimized_pose,
+                    config_.result_pose_lever_arm_body_m)));
 }
 
 void RtkFixedLagBackend::queueFinalPose(const ArchiveRecord &record) {
   if (!finalized_keys_.insert(record.key).second) return;
   if (config_.save_results)
     pending_file_batch_.optimized_final_lines.push_back(
-        tumLine(record.stamp, record.pose));
+        tumLine(record.stamp,
+                resultReferencePose(
+                    record.pose, config_.result_pose_lever_arm_body_m)));
 }
 
 void RtkFixedLagBackend::queueGnssPosition(
