@@ -60,6 +60,7 @@ public:
   void logVisualImageFlow(double timestamp, const char *event, const std::string &detail);
   void logLioDegeneracy(bool map_insert_skipped, const std::string &map_insert_skip_reason,
                         bool map_guard_requested, bool map_guard_enforced);
+  void logLioDirectionalShadow();
   
   bool sync_packages(LidarMeasureGroup &meas);
   void prop_imu_once(StatesGroup &imu_prop_state, const double dt, V3D acc_avr, V3D angvel_avr);
@@ -298,8 +299,9 @@ public:
   PointCloudXYZI::Ptr pcl_wait_save_intensity;
 
   ofstream fout_pre, fout_out, fout_pcd_pos, fout_points, fout_lio_degeneracy,
-      fout_runtime_memory, fout_visual_image_flow;
+      fout_lio_directional_shadow, fout_runtime_memory, fout_visual_image_flow;
   int visual_image_flow_pending_rows_ = 0;
+  int lio_directional_shadow_pending_rows_ = 0;
 
   V3D euler_cur;
 

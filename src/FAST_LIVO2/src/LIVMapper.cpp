@@ -992,11 +992,66 @@ void LIVMapper::initializeFiles()
           << "raw_is_degenerate,is_degenerate,is_severely_degenerate,direction_conflict,direction_conflict_consecutive_frames,"
           << "direction_guard_triggered,state_intervention_applied,"
           << "update_was_suppressed,update_was_significantly_suppressed,"
-          << "map_guard_requested,map_guard_enforced,map_insert_skipped,map_insert_skip_reason\n";
+          << "map_guard_requested,map_guard_enforced,map_insert_skipped,map_insert_skip_reason,"
+          << "input_feature_count,downsampled_feature_count,valid_plane_count,observability_feature_count,inlier_ratio,"
+          << "abs_residual_median,abs_residual_p90,abs_residual_p95,residual_rmse,abs_residual_max,"
+          << "measurement_variance_mean,measurement_variance_median,measurement_variance_p90,measurement_variance_p95,"
+          << "measurement_variance_min,measurement_variance_max,"
+          << "rotation_eigenvalue_ratio,rotation_condition_number,"
+          << "weak_rotation_direction_body_x,weak_rotation_direction_body_y,weak_rotation_direction_body_z,"
+          << "weak_translation_direction_body_x,weak_translation_direction_body_y,weak_translation_direction_body_z,"
+          << "weak_translation_vertical_abs,delta_rotation_vector_x,delta_rotation_vector_y,delta_rotation_vector_z,"
+          << "delta_roll_deg,delta_pitch_deg,delta_yaw_deg,delta_rotation_deg\n";
     }
     else
     {
       ROS_WARN("[LIO_DEGEN] Failed to open %slio_degeneracy.csv", save_path.c_str());
+    }
+    if (voxelmap_manager && voxelmap_manager->config_setting_.directional_shadow_enable)
+    {
+      fout_lio_directional_shadow.open(
+          save_path + "lio_directional_shadow.csv", std::ios::out);
+      if (fout_lio_directional_shadow.is_open())
+      {
+        fout_lio_directional_shadow
+            << "timestamp,frame_id,iteration_index,iteration_count,valid,relative_threshold,"
+               "effective_feature_count,residual_mean,residual_median,residual_p90,residual_rmse,"
+               "measurement_variance_mean,measurement_variance_median,"
+               "rotation_eigenvalue_0,rotation_eigenvalue_1,rotation_eigenvalue_2,"
+               "rotation_eigenvalue_ratio,rotation_condition,weak_rotation_x,weak_rotation_y,weak_rotation_z,"
+               "translation_eigenvalue_0,translation_eigenvalue_1,translation_eigenvalue_2,"
+               "translation_eigenvalue_ratio,translation_condition,weak_translation_x,weak_translation_y,"
+               "weak_translation_z,weak_translation_vertical_abs,"
+               "rotation_weight_0,rotation_weight_1,rotation_weight_2,"
+               "translation_weight_0,translation_weight_1,translation_weight_2,"
+               "affected_direction_count,partial_suppression_count,full_suppression_count,"
+               "information_trace_raw,information_trace_shadow,information_trace_retained_ratio,"
+               "rotation_information_trace_raw,rotation_information_trace_shadow,"
+               "translation_information_trace_raw,translation_information_trace_shadow,"
+               "raw_dx,raw_dy,raw_dz,raw_dp_norm,raw_droll_deg,raw_dpitch_deg,raw_dyaw_deg,raw_dR_deg,"
+               "shadow_dx,shadow_dy,shadow_dz,shadow_dp_norm,shadow_droll_deg,shadow_dpitch_deg,"
+               "shadow_dyaw_deg,shadow_dR_deg,removed_dx,removed_dy,removed_dz,removed_dp_norm,"
+               "removed_droll_deg,removed_dpitch_deg,removed_dyaw_deg,removed_dR_deg,"
+               "raw_weak_translation_projection,shadow_weak_translation_projection,"
+               "raw_weak_rotation_projection_deg,shadow_weak_rotation_projection_deg,"
+               "raw_posterior_pose_cov_trace,shadow_posterior_pose_cov_trace,"
+               "raw_posterior_rotation_cov_eigenvalue_0,raw_posterior_rotation_cov_eigenvalue_1,"
+               "raw_posterior_rotation_cov_eigenvalue_2,shadow_posterior_rotation_cov_eigenvalue_0,"
+               "shadow_posterior_rotation_cov_eigenvalue_1,shadow_posterior_rotation_cov_eigenvalue_2,"
+               "raw_posterior_translation_cov_eigenvalue_0,raw_posterior_translation_cov_eigenvalue_1,"
+               "raw_posterior_translation_cov_eigenvalue_2,shadow_posterior_translation_cov_eigenvalue_0,"
+               "shadow_posterior_translation_cov_eigenvalue_1,shadow_posterior_translation_cov_eigenvalue_2,"
+               "raw_posterior_cov_diag_r0,raw_posterior_cov_diag_r1,raw_posterior_cov_diag_r2,"
+               "raw_posterior_cov_diag_t0,raw_posterior_cov_diag_t1,raw_posterior_cov_diag_t2,"
+               "shadow_posterior_cov_diag_r0,shadow_posterior_cov_diag_r1,shadow_posterior_cov_diag_r2,"
+               "shadow_posterior_cov_diag_t0,shadow_posterior_cov_diag_t1,shadow_posterior_cov_diag_t2,"
+               "shadow_solve_time_ms\n";
+      }
+      else
+      {
+        ROS_WARN("[LIO_SHADOW] Failed to open %slio_directional_shadow.csv",
+                 save_path.c_str());
+      }
     }
     fout_visual_image_flow.open(save_path + "visual_image_flow.csv", std::ios::out);
     if (fout_visual_image_flow.is_open())
@@ -1035,7 +1090,16 @@ void LIVMapper::logLioDegeneracy(bool map_insert_skipped,
   const StatesGroup &updated = diagnostics.updated_state;
   const V3D delta_position = updated.pos_end - predicted.pos_end;
   const V3D delta_velocity = updated.vel_end - predicted.vel_end;
+  const M3D delta_rotation = predicted.rot_end.transpose() * updated.rot_end;
+  const V3D delta_rotation_vector = Log(delta_rotation);
+  constexpr double rad_to_deg = 57.29577951308232;
+  const double delta_pitch = std::asin(std::min(1.0, std::max(-1.0, -delta_rotation(2, 0))));
+  const double delta_roll = std::atan2(delta_rotation(2, 1), delta_rotation(2, 2));
+  const double delta_yaw = std::atan2(delta_rotation(1, 0), delta_rotation(0, 0));
   const auto &metrics = diagnostics.observability;
+  V3D weak_translation_body = V3D::Zero();
+  if (metrics.valid)
+    weak_translation_body = predicted.rot_end.transpose() * metrics.weak_translation_direction_world;
   const double timestamp = LidarMeasures.last_lio_update_time;
   const int lio_frame_id = voxelmap_manager->current_frame_id_;
 
@@ -1044,6 +1108,9 @@ void LIVMapper::logLioDegeneracy(bool map_insert_skipped,
        << "[LIO_DEGEN] timestamp=" << timestamp
        << " frame_id=" << lio_frame_id
        << " effective_feature_count=" << diagnostics.effective_feature_count
+       << " input_feature_count=" << diagnostics.input_feature_count
+       << " downsampled_feature_count=" << diagnostics.downsampled_feature_count
+       << " inlier_ratio=" << diagnostics.inlier_ratio
        << " average_point_plane_residual=" << diagnostics.average_point_plane_residual
        << " predicted_position=(" << predicted.pos_end.transpose() << ")"
        << " predicted_velocity=(" << predicted.vel_end.transpose() << ")"
@@ -1051,11 +1118,13 @@ void LIVMapper::logLioDegeneracy(bool map_insert_skipped,
        << " updated_velocity=(" << updated.vel_end.transpose() << ")"
        << " delta_position=(" << delta_position.transpose() << ")"
        << " delta_velocity=(" << delta_velocity.transpose() << ")"
+       << " delta_rotation_vector=(" << delta_rotation_vector.transpose() << ")"
        << " rotation_eigenvalues=(" << metrics.rotation_eigenvalues.transpose() << ")"
        << " translation_eigenvalues=(" << metrics.translation_eigenvalues.transpose() << ")"
        << " translation_eigenvalue_ratio=" << metrics.translation_eigenvalue_ratio
        << " translation_condition_number=" << metrics.translation_condition_number
        << " weak_translation_direction_world=(" << metrics.weak_translation_direction_world.transpose() << ")"
+       << " weak_rotation_direction_body=(" << metrics.weak_rotation_direction_body.transpose() << ")"
        << " predicted_speed_mps=" << diagnostics.predicted_speed_mps
        << " velocity_weak_direction_cos=" << diagnostics.velocity_weak_direction_cos
        << " raw_position_correction=(" << diagnostics.raw_position_correction.transpose() << ")"
@@ -1116,12 +1185,129 @@ void LIVMapper::logLioDegeneracy(bool map_insert_skipped,
       << static_cast<int>(diagnostics.update_was_significantly_suppressed) << ','
       << static_cast<int>(map_guard_requested) << ','
       << static_cast<int>(map_guard_enforced) << ','
-      << static_cast<int>(map_insert_skipped) << ',' << map_insert_skip_reason << '\n';
+      << static_cast<int>(map_insert_skipped) << ',' << map_insert_skip_reason << ','
+      << diagnostics.input_feature_count << ','
+      << diagnostics.downsampled_feature_count << ','
+      << diagnostics.valid_plane_count << ','
+      << diagnostics.observability_feature_count << ','
+      << diagnostics.inlier_ratio << ','
+      << diagnostics.median_abs_point_plane_residual << ','
+      << diagnostics.p90_abs_point_plane_residual << ','
+      << diagnostics.p95_abs_point_plane_residual << ','
+      << diagnostics.point_plane_residual_rmse << ','
+      << diagnostics.max_abs_point_plane_residual << ','
+      << diagnostics.measurement_variance_mean << ','
+      << diagnostics.measurement_variance_median << ','
+      << diagnostics.measurement_variance_p90 << ','
+      << diagnostics.measurement_variance_p95 << ','
+      << diagnostics.measurement_variance_min << ','
+      << diagnostics.measurement_variance_max << ','
+      << metrics.rotation_eigenvalue_ratio << ','
+      << metrics.rotation_condition_number << ','
+      << metrics.weak_rotation_direction_body.x() << ','
+      << metrics.weak_rotation_direction_body.y() << ','
+      << metrics.weak_rotation_direction_body.z() << ','
+      << weak_translation_body.x() << ','
+      << weak_translation_body.y() << ','
+      << weak_translation_body.z() << ','
+      << std::fabs(metrics.weak_translation_direction_world.z()) << ','
+      << delta_rotation_vector.x() << ','
+      << delta_rotation_vector.y() << ','
+      << delta_rotation_vector.z() << ','
+      << delta_roll * rad_to_deg << ','
+      << delta_pitch * rad_to_deg << ','
+      << delta_yaw * rad_to_deg << ','
+      << delta_rotation_vector.norm() * rad_to_deg << '\n';
   ++lio_diagnostics_pending_rows_;
   if (lio_diagnostics_pending_rows_ >= diagnostics_csv_flush_interval_rows_)
   {
     fout_lio_degeneracy.flush();
     lio_diagnostics_pending_rows_ = 0;
+  }
+}
+
+void LIVMapper::logLioDirectionalShadow()
+{
+  if (!fout_lio_directional_shadow.is_open() || !voxelmap_manager) return;
+  const LioUpdateDiagnostics &diagnostics = voxelmap_manager->getLastLioDiagnostics();
+  const double timestamp = LidarMeasures.last_lio_update_time;
+  const int frame_id = voxelmap_manager->current_frame_id_;
+  for (const auto &shadow : diagnostics.directional_shadows)
+  {
+    const auto &metrics = shadow.observability;
+    fout_lio_directional_shadow << std::setprecision(17)
+        << timestamp << ',' << frame_id << ',' << shadow.iteration_index << ','
+        << shadow.iteration_count << ',' << static_cast<int>(shadow.valid) << ','
+        << shadow.relative_threshold << ',' << shadow.effective_feature_count << ','
+        << shadow.residual_mean << ',' << shadow.residual_median << ','
+        << shadow.residual_p90 << ',' << shadow.residual_rmse << ','
+        << shadow.measurement_variance_mean << ','
+        << shadow.measurement_variance_median << ','
+        << metrics.rotation_eigenvalues[0] << ',' << metrics.rotation_eigenvalues[1] << ','
+        << metrics.rotation_eigenvalues[2] << ',' << metrics.rotation_eigenvalue_ratio << ','
+        << metrics.rotation_condition_number << ','
+        << metrics.weak_rotation_direction_body.x() << ','
+        << metrics.weak_rotation_direction_body.y() << ','
+        << metrics.weak_rotation_direction_body.z() << ','
+        << metrics.translation_eigenvalues[0] << ',' << metrics.translation_eigenvalues[1] << ','
+        << metrics.translation_eigenvalues[2] << ',' << metrics.translation_eigenvalue_ratio << ','
+        << metrics.translation_condition_number << ','
+        << metrics.weak_translation_direction_world.x() << ','
+        << metrics.weak_translation_direction_world.y() << ','
+        << metrics.weak_translation_direction_world.z() << ','
+        << std::fabs(metrics.weak_translation_direction_world.z()) << ','
+        << shadow.rotation_weights[0] << ',' << shadow.rotation_weights[1] << ','
+        << shadow.rotation_weights[2] << ',' << shadow.translation_weights[0] << ','
+        << shadow.translation_weights[1] << ',' << shadow.translation_weights[2] << ','
+        << shadow.affected_direction_count << ',' << shadow.partial_suppression_count << ','
+        << shadow.full_suppression_count << ',' << shadow.information_trace_raw << ','
+        << shadow.information_trace_shadow << ','
+        << shadow.information_trace_retained_ratio << ','
+        << shadow.rotation_information_trace_raw << ','
+        << shadow.rotation_information_trace_shadow << ','
+        << shadow.translation_information_trace_raw << ','
+        << shadow.translation_information_trace_shadow << ','
+        << shadow.raw_delta_position.x() << ',' << shadow.raw_delta_position.y() << ','
+        << shadow.raw_delta_position.z() << ',' << shadow.raw_delta_position_norm << ','
+        << shadow.raw_delta_rpy_deg.x() << ',' << shadow.raw_delta_rpy_deg.y() << ','
+        << shadow.raw_delta_rpy_deg.z() << ',' << shadow.raw_delta_rotation_deg << ','
+        << shadow.shadow_delta_position.x() << ',' << shadow.shadow_delta_position.y() << ','
+        << shadow.shadow_delta_position.z() << ',' << shadow.shadow_delta_position_norm << ','
+        << shadow.shadow_delta_rpy_deg.x() << ',' << shadow.shadow_delta_rpy_deg.y() << ','
+        << shadow.shadow_delta_rpy_deg.z() << ',' << shadow.shadow_delta_rotation_deg << ','
+        << shadow.removed_delta_position.x() << ',' << shadow.removed_delta_position.y() << ','
+        << shadow.removed_delta_position.z() << ',' << shadow.removed_delta_position_norm << ','
+        << shadow.removed_delta_rpy_deg.x() << ',' << shadow.removed_delta_rpy_deg.y() << ','
+        << shadow.removed_delta_rpy_deg.z() << ',' << shadow.removed_delta_rotation_deg << ','
+        << shadow.raw_weak_translation_projection << ','
+        << shadow.shadow_weak_translation_projection << ','
+        << shadow.raw_weak_rotation_projection_deg << ','
+        << shadow.shadow_weak_rotation_projection_deg << ','
+        << shadow.raw_posterior_pose_cov_trace << ','
+        << shadow.shadow_posterior_pose_cov_trace << ','
+        << shadow.raw_posterior_rotation_cov_eigenvalues[0] << ','
+        << shadow.raw_posterior_rotation_cov_eigenvalues[1] << ','
+        << shadow.raw_posterior_rotation_cov_eigenvalues[2] << ','
+        << shadow.shadow_posterior_rotation_cov_eigenvalues[0] << ','
+        << shadow.shadow_posterior_rotation_cov_eigenvalues[1] << ','
+        << shadow.shadow_posterior_rotation_cov_eigenvalues[2] << ','
+        << shadow.raw_posterior_translation_cov_eigenvalues[0] << ','
+        << shadow.raw_posterior_translation_cov_eigenvalues[1] << ','
+        << shadow.raw_posterior_translation_cov_eigenvalues[2] << ','
+        << shadow.shadow_posterior_translation_cov_eigenvalues[0] << ','
+        << shadow.shadow_posterior_translation_cov_eigenvalues[1] << ','
+        << shadow.shadow_posterior_translation_cov_eigenvalues[2] << ',';
+    for (int i = 0; i < 6; ++i)
+      fout_lio_directional_shadow << shadow.raw_posterior_pose_cov_diagonal[i] << ',';
+    for (int i = 0; i < 6; ++i)
+      fout_lio_directional_shadow << shadow.shadow_posterior_pose_cov_diagonal[i] << ',';
+    fout_lio_directional_shadow << shadow.solve_time_ms << '\n';
+    ++lio_directional_shadow_pending_rows_;
+  }
+  if (lio_directional_shadow_pending_rows_ >= diagnostics_csv_flush_interval_rows_)
+  {
+    fout_lio_directional_shadow.flush();
+    lio_directional_shadow_pending_rows_ = 0;
   }
 }
 
@@ -2140,6 +2326,7 @@ void LIVMapper::handleLIO()
 
   logLioDegeneracy(skip_map_insert, map_insert_skip_reason,
                    map_guard_request, lio_map_guard_enforced);
+  logLioDirectionalShadow();
   
   PointCloudXYZI::Ptr laserCloudFullRes(dense_map_en ? feats_undistort : feats_down_body);
   int size = laserCloudFullRes->points.size();

@@ -60,6 +60,10 @@ void checkNormalPositiveDefiniteAndConditionalAnalysis()
           "translation eigenvalues must be sorted ascending");
   require(std::fabs(metrics.weak_translation_direction_world.norm() - 1.0) < 1e-12,
           "weak translation direction must have unit length");
+  require(std::fabs(metrics.weak_rotation_direction_body.norm() - 1.0) < 1e-12,
+          "weak rotation direction must have unit length");
+  require(std::fabs(metrics.rotation_eigenvalue_ratio - 80.0 / 120.0) < 1e-12,
+          "rotation eigenvalue ratio is wrong");
 }
 
 void checkWeakTranslationAxes()
@@ -151,6 +155,45 @@ void checkDiagnosticModeDoesNotMutateInputs()
   require(covariance == covariance_before, "diagnostics modified the covariance");
 }
 
+void checkRelativeDirectionWeights()
+{
+  const Eigen::Vector3d eigenvalues(0.01, 0.05, 1.0);
+  const Eigen::Vector3d weights =
+      fast_livo::lioRelativeEigenDirectionWeights(eigenvalues, 0.10);
+  require(weights[0] == 0.0, "ratio below one-quarter threshold must be fully suppressed");
+  require(std::fabs(weights[1] - std::sqrt(0.5)) < 1e-12,
+          "partial direction weight does not match the established observability formula");
+  require(weights[2] == 1.0, "strong direction must remain unchanged");
+}
+
+void checkDirectionalProjectorNormalEquation()
+{
+  const fast_livo::Matrix6d information = blockDiagonalInformation(
+      Eigen::Vector3d(1.0, 4.0, 9.0), Eigen::Vector3d(0.01, 2.0, 8.0));
+  Vector6d rhs;
+  rhs << 1.0, 2.0, 3.0, 4.0, 5.0, 6.0;
+  const auto metrics = fast_livo::analyzeLioPoseInformation(information, 1e-6, true);
+  require(metrics.valid, "directional projector fixture must be observable");
+
+  const auto unchanged = fast_livo::applyLioDirectionalProjectors(
+      information, rhs, metrics, Eigen::Vector3d::Ones(), Eigen::Vector3d::Ones());
+  require(unchanged.information == information,
+          "all-one directional projector must preserve information exactly");
+  require(unchanged.rhs == rhs, "all-one directional projector must preserve RHS exactly");
+
+  Eigen::Vector3d translation_weights = Eigen::Vector3d::Ones();
+  translation_weights[0] = 0.0;
+  const auto suppressed = fast_livo::applyLioDirectionalProjectors(
+      information, rhs, metrics, Eigen::Vector3d::Ones(), translation_weights);
+  require(std::fabs(suppressed.information(3, 3)) < 1e-12,
+          "fully suppressed translation direction retained information");
+  require(std::fabs(suppressed.rhs[3]) < 1e-12,
+          "fully suppressed translation direction retained RHS");
+  require(std::fabs(suppressed.information(4, 4) - information(4, 4)) < 1e-12 &&
+              std::fabs(suppressed.information(5, 5) - information(5, 5)) < 1e-12,
+          "strong translation directions changed unexpectedly");
+}
+
 } // namespace
 
 int main()
@@ -163,6 +206,8 @@ int main()
     checkInvalidInputsReturnSafely();
     checkExtremeConditionNumber();
     checkDiagnosticModeDoesNotMutateInputs();
+    checkRelativeDirectionWeights();
+    checkDirectionalProjectorNormalEquation();
     std::cout << "lio_degeneracy_self_test: PASS\n";
     return 0;
   }

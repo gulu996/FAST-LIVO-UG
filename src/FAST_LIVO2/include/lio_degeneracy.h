@@ -15,6 +15,10 @@ struct LioObservabilityMetrics
 {
   bool valid = false;
   Eigen::Vector3d rotation_eigenvalues = Eigen::Vector3d::Zero();
+  Eigen::Matrix3d rotation_eigenvectors = Eigen::Matrix3d::Identity();
+  Eigen::Vector3d weak_rotation_direction_body = Eigen::Vector3d::UnitX();
+  double rotation_eigenvalue_ratio = 0.0;
+  double rotation_condition_number = std::numeric_limits<double>::infinity();
   Eigen::Vector3d translation_eigenvalues = Eigen::Vector3d::Zero();
   Eigen::Matrix3d translation_eigenvectors = Eigen::Matrix3d::Identity();
   Eigen::Matrix3d conditional_translation_information = Eigen::Matrix3d::Zero();
@@ -73,6 +77,8 @@ inline LioObservabilityMetrics analyzeLioPoseInformation(
     return result;
 
   result.rotation_eigenvalues = rotation_solver.eigenvalues().cwiseMax(0.0);
+  result.rotation_eigenvectors = rotation_solver.eigenvectors();
+  result.weak_rotation_direction_body = result.rotation_eigenvectors.col(0).normalized();
   result.translation_eigenvalues = translation_solver.eigenvalues().cwiseMax(0.0);
   result.translation_eigenvectors = translation_solver.eigenvectors();
   result.conditional_translation_information = translation_information;
@@ -83,6 +89,14 @@ inline LioObservabilityMetrics analyzeLioPoseInformation(
 
   const double lambda_min = result.translation_eigenvalues[0];
   const double lambda_max = result.translation_eigenvalues[2];
+  const double rotation_lambda_min = result.rotation_eigenvalues[0];
+  const double rotation_lambda_max = result.rotation_eigenvalues[2];
+  if (rotation_lambda_max > 1e-12)
+  {
+    result.rotation_eigenvalue_ratio = rotation_lambda_min / rotation_lambda_max;
+    result.rotation_condition_number = rotation_lambda_min > 1e-12 ?
+        rotation_lambda_max / rotation_lambda_min : std::numeric_limits<double>::infinity();
+  }
   if (lambda_max > 1e-12)
   {
     result.translation_eigenvalue_ratio = lambda_min / lambda_max;
@@ -90,6 +104,8 @@ inline LioObservabilityMetrics analyzeLioPoseInformation(
         lambda_min > 1e-12 ? lambda_max / lambda_min : std::numeric_limits<double>::infinity();
   }
   result.valid = result.rotation_eigenvalues.allFinite() &&
+                 result.rotation_eigenvectors.allFinite() &&
+                 result.weak_rotation_direction_body.allFinite() &&
                  result.translation_eigenvalues.allFinite() &&
                  result.weak_translation_direction_world.allFinite();
   return result;
@@ -109,11 +125,66 @@ inline Eigen::Vector3d lioTranslationInformationWeights(
   return weights;
 }
 
+inline Eigen::Vector3d lioRelativeEigenDirectionWeights(
+    const Eigen::Vector3d &eigenvalues,
+    double relative_threshold)
+{
+  Eigen::Vector3d weights = Eigen::Vector3d::Ones();
+  if (!eigenvalues.allFinite() || relative_threshold <= 0.0) return weights;
+  const double lambda_max = eigenvalues.maxCoeff();
+  if (!(lambda_max > 1e-12)) return Eigen::Vector3d::Zero();
+  for (int i = 0; i < 3; ++i)
+  {
+    const double ratio = std::max(0.0, eigenvalues[i]) / lambda_max;
+    if (ratio < 0.25 * relative_threshold)
+      weights[i] = 0.0;
+    else if (ratio < relative_threshold)
+      weights[i] = std::sqrt(ratio / relative_threshold);
+  }
+  return weights;
+}
+
 struct LioNormalEquation
 {
   Matrix6d information = Matrix6d::Zero();
   Eigen::Matrix<double, 6, 1> rhs = Eigen::Matrix<double, 6, 1>::Zero();
 };
+
+// Shadow-only pose-column projection. This is the same parameter-space form
+// used by the visual observability gate: J_shadow = J * diag(P_r, P_t), so the
+// normal equation remains symmetric and retains rotation/translation coupling.
+inline LioNormalEquation applyLioDirectionalProjectors(
+    const Matrix6d &pose_information,
+    const Eigen::Matrix<double, 6, 1> &pose_rhs,
+    const LioObservabilityMetrics &metrics,
+    const Eigen::Vector3d &rotation_weights,
+    const Eigen::Vector3d &translation_weights)
+{
+  LioNormalEquation result{pose_information, pose_rhs};
+  if (!metrics.valid || !pose_information.allFinite() || !pose_rhs.allFinite() ||
+      !rotation_weights.allFinite() || !translation_weights.allFinite())
+    return result;
+
+  const Eigen::Vector3d bounded_rotation =
+      rotation_weights.cwiseMax(0.0).cwiseMin(1.0);
+  const Eigen::Vector3d bounded_translation =
+      translation_weights.cwiseMax(0.0).cwiseMin(1.0);
+  if (bounded_rotation.isOnes(1e-15) && bounded_translation.isOnes(1e-15))
+    return result;
+
+  Matrix6d projector = Matrix6d::Zero();
+  projector.block<3, 3>(0, 0) =
+      metrics.rotation_eigenvectors * bounded_rotation.asDiagonal() *
+      metrics.rotation_eigenvectors.transpose();
+  projector.block<3, 3>(3, 3) =
+      metrics.translation_eigenvectors * bounded_translation.asDiagonal() *
+      metrics.translation_eigenvectors.transpose();
+  result.information = projector.transpose() * pose_information * projector;
+  result.information =
+      0.5 * (result.information + result.information.transpose()).eval();
+  result.rhs = projector.transpose() * pose_rhs;
+  return result;
+}
 
 // EXPERIMENTAL: retained for offline research only. The stable runtime path
 // does not call this information-matrix reconstruction.

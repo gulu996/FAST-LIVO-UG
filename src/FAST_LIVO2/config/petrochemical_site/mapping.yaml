@@ -137,6 +137,12 @@ lio:
   max_points_num: 50
   layer_init_num: [5, 5, 5, 5, 5]
 
+lio_degeneracy:
+  # Stage 4B: six counterfactual solves share the real final-iteration H/R/P,
+  # but their state/covariance candidates are diagnostic-only and never applied.
+  directional_shadow_enable: true
+  directional_shadow_relative_thresholds: [0.02, 0.05, 0.08, 0.10, 0.15, 0.20]
+
 local_map:
   map_sliding_en: true
   half_map_size: 100

@@ -15,7 +15,75 @@ which is included as part of this source code package.
 #include <cctype>
 #include <cmath>
 #include <limits>
+#include <sstream>
 #include <unordered_set>
+
+namespace
+{
+
+struct ScalarDiagnostics
+{
+  double mean = 0.0;
+  double median = 0.0;
+  double p90 = 0.0;
+  double p95 = 0.0;
+  double rmse = 0.0;
+  double minimum = 0.0;
+  double maximum = 0.0;
+};
+
+ScalarDiagnostics summarizeFiniteValues(std::vector<double> values)
+{
+  values.erase(std::remove_if(values.begin(), values.end(),
+                              [](double value) { return !std::isfinite(value); }),
+               values.end());
+  ScalarDiagnostics summary;
+  if (values.empty()) return summary;
+  std::sort(values.begin(), values.end());
+  double sum = 0.0;
+  double sum_squares = 0.0;
+  for (const double value : values)
+  {
+    sum += value;
+    sum_squares += value * value;
+  }
+  const auto percentile = [&values](double fraction) {
+    const double index = fraction * static_cast<double>(values.size() - 1);
+    const size_t lower = static_cast<size_t>(std::floor(index));
+    const size_t upper = std::min(values.size() - 1, lower + 1);
+    const double alpha = index - static_cast<double>(lower);
+    return values[lower] * (1.0 - alpha) + values[upper] * alpha;
+  };
+  summary.mean = sum / static_cast<double>(values.size());
+  summary.median = percentile(0.50);
+  summary.p90 = percentile(0.90);
+  summary.p95 = percentile(0.95);
+  summary.rmse = std::sqrt(sum_squares / static_cast<double>(values.size()));
+  summary.minimum = values.front();
+  summary.maximum = values.back();
+  return summary;
+}
+
+Eigen::Vector3d relativeRpyDegrees(const StatesGroup &from, const StatesGroup &to)
+{
+  const Eigen::Matrix3d relative = from.rot_end.transpose() * to.rot_end;
+  const double pitch = std::asin(std::max(-1.0, std::min(1.0, -relative(2, 0))));
+  const double roll = std::atan2(relative(2, 1), relative(2, 2));
+  const double yaw = std::atan2(relative(1, 0), relative(0, 0));
+  constexpr double kRadToDeg = 57.29577951308232;
+  return Eigen::Vector3d(roll, pitch, yaw) * kRadToDeg;
+}
+
+Eigen::Vector3d symmetricEigenvalues(const Eigen::Matrix3d &matrix)
+{
+  const Eigen::Matrix3d symmetric = 0.5 * (matrix + matrix.transpose());
+  Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(symmetric);
+  return solver.info() == Eigen::Success && solver.eigenvalues().allFinite()
+      ? solver.eigenvalues()
+      : Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
+}
+
+} // namespace
 
 void calcBodyCov(Eigen::Vector3d &pb, const float range_inc, const float degree_inc, Eigen::Matrix3d &cov)
 {
@@ -79,6 +147,12 @@ void loadVoxelConfig(ros::NodeHandle &nh, VoxelMapConfig &voxel_config)
                 voxel_config.degeneracy_enter_consecutive_frames, 3);
   nh.param<int>("lio_degeneracy/exit_consecutive_frames",
                 voxel_config.degeneracy_exit_consecutive_frames, 8);
+  nh.param<bool>("lio_degeneracy/directional_shadow_enable",
+                 voxel_config.directional_shadow_enable, false);
+  nh.param<std::vector<double>>(
+      "lio_degeneracy/directional_shadow_relative_thresholds",
+      voxel_config.directional_shadow_relative_thresholds,
+      std::vector<double>{0.02, 0.05, 0.08, 0.10, 0.15, 0.20});
 
   nh.param<std::string>("lio_direction_guard/mode",
                         voxel_config.direction_guard_mode, "diagnostic");
@@ -120,6 +194,14 @@ void loadVoxelConfig(ros::NodeHandle &nh, VoxelMapConfig &voxel_config)
       std::max(1, voxel_config.degeneracy_enter_consecutive_frames);
   voxel_config.degeneracy_exit_consecutive_frames =
       std::max(1, voxel_config.degeneracy_exit_consecutive_frames);
+  for (double &threshold : voxel_config.directional_shadow_relative_thresholds)
+    threshold = std::max(0.0, std::min(1.0, threshold));
+  std::sort(voxel_config.directional_shadow_relative_thresholds.begin(),
+            voxel_config.directional_shadow_relative_thresholds.end());
+  voxel_config.directional_shadow_relative_thresholds.erase(
+      std::unique(voxel_config.directional_shadow_relative_thresholds.begin(),
+                  voxel_config.directional_shadow_relative_thresholds.end()),
+      voxel_config.directional_shadow_relative_thresholds.end());
   voxel_config.direction_guard_min_predicted_speed_mps =
       std::max(0.0, voxel_config.direction_guard_min_predicted_speed_mps);
   voxel_config.direction_guard_min_velocity_weak_direction_cos =
@@ -176,6 +258,15 @@ void loadVoxelConfig(ros::NodeHandle &nh, VoxelMapConfig &voxel_config)
            voxel_config.degeneracy_ratio_thresh,
            voxel_config.degeneracy_enter_consecutive_frames,
            voxel_config.degeneracy_exit_consecutive_frames);
+  std::ostringstream shadow_thresholds;
+  for (size_t i = 0; i < voxel_config.directional_shadow_relative_thresholds.size(); ++i)
+  {
+    if (i != 0) shadow_thresholds << ',';
+    shadow_thresholds << voxel_config.directional_shadow_relative_thresholds[i];
+  }
+  ROS_INFO("[LIO_SHADOW_CONFIG] enabled=%d relative_thresholds=[%s] real_state_intervention=0",
+           static_cast<int>(voxel_config.directional_shadow_enable),
+           shadow_thresholds.str().c_str());
   ROS_INFO("[LIO_GUARD_CONFIG] direction_mode=%s speed=%.3f weak_cos=%.3f opposite_position=%.3f opposite_velocity=%.3f enter=%d exit=%d map_mode=%s severe_ratio=%.6g recovery=%d max_freeze=%d",
            voxel_config.direction_guard_mode.c_str(),
            voxel_config.direction_guard_min_predicted_speed_mps,
@@ -489,6 +580,9 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
   ++current_frame_id_;
   last_lio_diagnostics_ = LioUpdateDiagnostics();
   last_lio_diagnostics_.predicted_state = state_propagat;
+  last_lio_diagnostics_.input_feature_count =
+      feats_undistort_ ? static_cast<int>(feats_undistort_->size()) : 0;
+  last_lio_diagnostics_.downsampled_feature_count = feats_down_size_;
 
   cross_mat_list_.clear();
   cross_mat_list_.reserve(feats_down_size_);
@@ -579,7 +673,20 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
 
     const double avg_residual = total_residual / static_cast<double>(effct_feat_num_);
     last_lio_diagnostics_.effective_feature_count = effct_feat_num_;
+    last_lio_diagnostics_.valid_plane_count = effct_feat_num_;
+    last_lio_diagnostics_.inlier_ratio = feats_down_size_ > 0 ?
+        static_cast<double>(effct_feat_num_) / static_cast<double>(feats_down_size_) : 0.0;
     last_lio_diagnostics_.average_point_plane_residual = avg_residual;
+    std::vector<double> absolute_residuals;
+    absolute_residuals.reserve(ptpl_list_.size());
+    for (const auto &ptpl : ptpl_list_)
+      absolute_residuals.push_back(std::fabs(static_cast<double>(ptpl.dis_to_plane_)));
+    const ScalarDiagnostics residual_summary = summarizeFiniteValues(absolute_residuals);
+    last_lio_diagnostics_.median_abs_point_plane_residual = residual_summary.median;
+    last_lio_diagnostics_.p90_abs_point_plane_residual = residual_summary.p90;
+    last_lio_diagnostics_.p95_abs_point_plane_residual = residual_summary.p95;
+    last_lio_diagnostics_.point_plane_residual_rmse = residual_summary.rmse;
+    last_lio_diagnostics_.max_abs_point_plane_residual = residual_summary.maximum;
     cout << "[ LIO ] Raw feature num: " << feats_undistort_->size() << ", downsampled feature num:" << feats_down_size_ 
          << " effective feature num: " << effct_feat_num_ << " average residual: " << avg_residual << endl;
 
@@ -589,6 +696,8 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     MatrixXd Hsub_T_R_inv(6, effct_feat_num_);
     VectorXd R_inv(effct_feat_num_);
     VectorXd meas_vec(effct_feat_num_);
+    std::vector<double> measurement_variances;
+    measurement_variances.reserve(effct_feat_num_);
     meas_vec.setZero();
     for (int i = 0; i < effct_feat_num_; i++)
     {
@@ -626,6 +735,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       double sigma_l = J_nq * ptpl_list_[i].plane_var_ * J_nq.transpose();
 
       R_inv(i) = 1.0 / (0.001 + sigma_l + ptpl_list_[i].normal_.transpose() * var * ptpl_list_[i].normal_);
+      measurement_variances.push_back(1.0 / R_inv(i));
       // R_inv(i) = 1.0 / (sigma_l + ptpl_list_[i].normal_.transpose() * var * ptpl_list_[i].normal_);
 
       /*** calculate the Measuremnt Jacobian matrix H ***/
@@ -635,6 +745,13 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
           ptpl_list_[i].normal_[1] * R_inv(i), ptpl_list_[i].normal_[2] * R_inv(i);
       meas_vec(i) = -ptpl_list_[i].dis_to_plane_;
     }
+    const ScalarDiagnostics variance_summary = summarizeFiniteValues(measurement_variances);
+    last_lio_diagnostics_.measurement_variance_mean = variance_summary.mean;
+    last_lio_diagnostics_.measurement_variance_median = variance_summary.median;
+    last_lio_diagnostics_.measurement_variance_p90 = variance_summary.p90;
+    last_lio_diagnostics_.measurement_variance_p95 = variance_summary.p95;
+    last_lio_diagnostics_.measurement_variance_min = variance_summary.minimum;
+    last_lio_diagnostics_.measurement_variance_max = variance_summary.maximum;
     EKF_stop_flg = false;
     flg_EKF_converged = false;
     /*** Iterative Kalman Filter Update ***/
@@ -677,6 +794,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
           config_setting_.use_conditional_translation_information);
       frame_observability_initialized = true;
       last_lio_diagnostics_.observability = frame_observability;
+      last_lio_diagnostics_.observability_feature_count = effct_feat_num_;
       if (!frame_observability.valid)
         ROS_WARN_THROTTLE(1.0, "[LIO_DEGEN] Observability decomposition invalid; diagnostics marked invalid and original ESIKF update retained.");
       lidar_constraint_ratio_ = frame_observability.valid ?
@@ -730,6 +848,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       last_lio_diagnostics_.state_intervention_applied = false;
     }
     int minRow, minCol;
+    const StatesGroup iteration_state_before = state_;
 
     auto rot_add = solution.block<3, 1>(0, 0);
     auto t_add = solution.block<3, 1>(3, 0);
@@ -746,6 +865,175 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     }
 
     state_ += solution;
+
+    std::vector<LioUpdateDiagnostics::DirectionalShadow> current_iteration_shadows;
+    if (config_setting_.directional_shadow_enable &&
+        !config_setting_.directional_shadow_relative_thresholds.empty())
+    {
+      const fast_livo::LioObservabilityMetrics shadow_observability =
+          fast_livo::analyzeLioPoseInformation(
+              raw_pose_information,
+              config_setting_.degeneracy_rotation_regularization,
+              config_setting_.use_conditional_translation_information);
+      const MD(DIM_STATE, DIM_STATE) prior_covariance = iteration_state_before.cov;
+      const MD(DIM_STATE, DIM_STATE) prior_information = prior_covariance.inverse();
+      current_iteration_shadows.reserve(
+          config_setting_.directional_shadow_relative_thresholds.size());
+
+      for (const double threshold : config_setting_.directional_shadow_relative_thresholds)
+      {
+        const double shadow_begin = omp_get_wtime();
+        LioUpdateDiagnostics::DirectionalShadow diagnostic;
+        diagnostic.iteration_index = iterCount;
+        diagnostic.iteration_count = iterCount + 1;
+        diagnostic.effective_feature_count = effct_feat_num_;
+        diagnostic.relative_threshold = threshold;
+        diagnostic.residual_mean = avg_residual;
+        diagnostic.residual_median = residual_summary.median;
+        diagnostic.residual_p90 = residual_summary.p90;
+        diagnostic.residual_rmse = residual_summary.rmse;
+        diagnostic.measurement_variance_mean = variance_summary.mean;
+        diagnostic.measurement_variance_median = variance_summary.median;
+        diagnostic.observability = shadow_observability;
+        diagnostic.rotation_weights = fast_livo::lioRelativeEigenDirectionWeights(
+            shadow_observability.rotation_eigenvalues, threshold);
+        diagnostic.translation_weights = fast_livo::lioRelativeEigenDirectionWeights(
+            shadow_observability.translation_eigenvalues, threshold);
+
+        auto count_weights = [&](const Eigen::Vector3d &weights) {
+          for (int i = 0; i < 3; ++i)
+          {
+            if (weights[i] >= 1.0 - 1e-12) continue;
+            ++diagnostic.affected_direction_count;
+            if (weights[i] <= 1e-12)
+              ++diagnostic.full_suppression_count;
+            else
+              ++diagnostic.partial_suppression_count;
+          }
+        };
+        count_weights(diagnostic.rotation_weights);
+        count_weights(diagnostic.translation_weights);
+
+        const fast_livo::LioNormalEquation shadow_normal =
+            fast_livo::applyLioDirectionalProjectors(
+                raw_pose_information, raw_pose_rhs, shadow_observability,
+                diagnostic.rotation_weights, diagnostic.translation_weights);
+        diagnostic.information_trace_raw = raw_pose_information.trace();
+        diagnostic.information_trace_shadow = shadow_normal.information.trace();
+        diagnostic.information_trace_retained_ratio =
+            std::fabs(diagnostic.information_trace_raw) > 1e-12
+                ? diagnostic.information_trace_shadow / diagnostic.information_trace_raw
+                : 1.0;
+        diagnostic.rotation_information_trace_raw =
+            raw_pose_information.block<3, 3>(0, 0).trace();
+        diagnostic.rotation_information_trace_shadow =
+            shadow_normal.information.block<3, 3>(0, 0).trace();
+        diagnostic.translation_information_trace_raw =
+            raw_pose_information.block<3, 3>(3, 3).trace();
+        diagnostic.translation_information_trace_shadow =
+            shadow_normal.information.block<3, 3>(3, 3).trace();
+
+        MD(DIM_STATE, DIM_STATE) shadow_information_full =
+            MD(DIM_STATE, DIM_STATE)::Zero();
+        shadow_information_full.block<6, 6>(0, 0) = shadow_normal.information;
+        const MD(DIM_STATE, DIM_STATE) shadow_K =
+            (shadow_information_full + prior_information).inverse();
+        MD(DIM_STATE, DIM_STATE) shadow_G = MD(DIM_STATE, DIM_STATE)::Zero();
+        shadow_G.block<DIM_STATE, 6>(0, 0) =
+            shadow_K.block<DIM_STATE, 6>(0, 0) * shadow_normal.information;
+        VD(DIM_STATE) shadow_solution =
+            shadow_K.block<DIM_STATE, 6>(0, 0) * shadow_normal.rhs + vec -
+            shadow_G.block<DIM_STATE, 6>(0, 0) * vec.block<6, 1>(0, 0);
+
+        if (shadow_observability.valid && shadow_normal.information.allFinite() &&
+            shadow_normal.rhs.allFinite() && shadow_K.allFinite() &&
+            shadow_solution.allFinite())
+        {
+          const double shadow_rot_step_deg =
+              shadow_solution.block<3, 1>(0, 0).norm() * 57.3;
+          const double shadow_trans_step_m =
+              shadow_solution.block<3, 1>(3, 0).norm();
+          double shadow_step_scale = 1.0;
+          if (shadow_rot_step_deg > max_rot_step_deg)
+            shadow_step_scale = std::min(
+                shadow_step_scale,
+                max_rot_step_deg / std::max(shadow_rot_step_deg, 1e-6));
+          if (shadow_trans_step_m > max_trans_step_m)
+            shadow_step_scale = std::min(
+                shadow_step_scale,
+                max_trans_step_m / std::max(shadow_trans_step_m, 1e-6));
+          shadow_solution *= shadow_step_scale;
+
+          StatesGroup shadow_candidate = iteration_state_before;
+          shadow_candidate += shadow_solution;
+          diagnostic.raw_delta_position = state_.pos_end - state_propagat.pos_end;
+          diagnostic.shadow_delta_position =
+              shadow_candidate.pos_end - state_propagat.pos_end;
+          diagnostic.removed_delta_position =
+              diagnostic.raw_delta_position - diagnostic.shadow_delta_position;
+          diagnostic.raw_delta_position_norm = diagnostic.raw_delta_position.norm();
+          diagnostic.shadow_delta_position_norm =
+              diagnostic.shadow_delta_position.norm();
+          diagnostic.removed_delta_position_norm =
+              diagnostic.removed_delta_position.norm();
+          diagnostic.raw_delta_rpy_deg = relativeRpyDegrees(state_propagat, state_);
+          diagnostic.shadow_delta_rpy_deg =
+              relativeRpyDegrees(state_propagat, shadow_candidate);
+          diagnostic.removed_delta_rpy_deg =
+              relativeRpyDegrees(shadow_candidate, state_);
+          constexpr double kRadToDeg = 57.29577951308232;
+          const Eigen::Vector3d raw_rotation_vector =
+              Log((state_propagat.rot_end.transpose() * state_.rot_end).eval());
+          const Eigen::Vector3d shadow_rotation_vector =
+              Log((state_propagat.rot_end.transpose() * shadow_candidate.rot_end).eval());
+          diagnostic.raw_delta_rotation_deg = raw_rotation_vector.norm() * kRadToDeg;
+          diagnostic.shadow_delta_rotation_deg =
+              shadow_rotation_vector.norm() * kRadToDeg;
+          diagnostic.removed_delta_rotation_deg =
+              Log((shadow_candidate.rot_end.transpose() * state_.rot_end).eval()).norm() *
+              kRadToDeg;
+          diagnostic.raw_weak_translation_projection =
+              diagnostic.raw_delta_position.dot(
+                  shadow_observability.weak_translation_direction_world);
+          diagnostic.shadow_weak_translation_projection =
+              diagnostic.shadow_delta_position.dot(
+                  shadow_observability.weak_translation_direction_world);
+          diagnostic.raw_weak_rotation_projection_deg =
+              raw_rotation_vector.dot(
+                  shadow_observability.weak_rotation_direction_body) * kRadToDeg;
+          diagnostic.shadow_weak_rotation_projection_deg =
+              shadow_rotation_vector.dot(
+                  shadow_observability.weak_rotation_direction_body) * kRadToDeg;
+
+          const MD(DIM_STATE, DIM_STATE) raw_posterior =
+              (I_STATE - G) * prior_covariance;
+          const MD(DIM_STATE, DIM_STATE) shadow_posterior =
+              (I_STATE - shadow_G) * prior_covariance;
+          const Eigen::Matrix<double, 6, 6> raw_pose_covariance =
+              0.5 * (raw_posterior.block<6, 6>(0, 0) +
+                     raw_posterior.block<6, 6>(0, 0).transpose());
+          const Eigen::Matrix<double, 6, 6> shadow_pose_covariance =
+              0.5 * (shadow_posterior.block<6, 6>(0, 0) +
+                     shadow_posterior.block<6, 6>(0, 0).transpose());
+          diagnostic.raw_posterior_pose_cov_trace = raw_pose_covariance.trace();
+          diagnostic.shadow_posterior_pose_cov_trace = shadow_pose_covariance.trace();
+          diagnostic.raw_posterior_pose_cov_diagonal = raw_pose_covariance.diagonal();
+          diagnostic.shadow_posterior_pose_cov_diagonal =
+              shadow_pose_covariance.diagonal();
+          diagnostic.raw_posterior_rotation_cov_eigenvalues =
+              symmetricEigenvalues(raw_pose_covariance.block<3, 3>(0, 0));
+          diagnostic.shadow_posterior_rotation_cov_eigenvalues =
+              symmetricEigenvalues(shadow_pose_covariance.block<3, 3>(0, 0));
+          diagnostic.raw_posterior_translation_cov_eigenvalues =
+              symmetricEigenvalues(raw_pose_covariance.block<3, 3>(3, 3));
+          diagnostic.shadow_posterior_translation_cov_eigenvalues =
+              symmetricEigenvalues(shadow_pose_covariance.block<3, 3>(3, 3));
+          diagnostic.valid = raw_posterior.allFinite() && shadow_posterior.allFinite();
+        }
+        diagnostic.solve_time_ms = (omp_get_wtime() - shadow_begin) * 1000.0;
+        current_iteration_shadows.push_back(diagnostic);
+      }
+    }
     if ((rot_add.norm() * 57.3 < 0.01) && (t_add.norm() * 100 < 0.015)) { flg_EKF_converged = true; }
     V3D euler_cur = state_.rot_end.eulerAngles(2, 1, 0);
 
@@ -778,6 +1066,7 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       // _state.cov = (I_STATE - G) * _state.cov;
       state_.cov.block<DIM_STATE, DIM_STATE>(0, 0) =
           (I_STATE.block<DIM_STATE, DIM_STATE>(0, 0) - G.block<DIM_STATE, DIM_STATE>(0, 0)) * state_.cov.block<DIM_STATE, DIM_STATE>(0, 0);
+      last_lio_diagnostics_.directional_shadows = current_iteration_shadows;
       last_lio_diagnostics_.valid_update = true;
       // total_distance += (_state.pos_end - position_last).norm();
       position_last_ = state_.pos_end;

@@ -68,6 +68,8 @@ typedef struct VoxelMapConfig
   double degeneracy_ratio_thresh;
   int degeneracy_enter_consecutive_frames;
   int degeneracy_exit_consecutive_frames;
+  bool directional_shadow_enable;
+  std::vector<double> directional_shadow_relative_thresholds;
 
   std::string direction_guard_mode;
   double direction_guard_min_predicted_speed_mps;
@@ -113,8 +115,24 @@ typedef struct PointToPlane
 struct LioUpdateDiagnostics
 {
   bool valid_update = false;
+  int input_feature_count = 0;
+  int downsampled_feature_count = 0;
   int effective_feature_count = 0;
+  int valid_plane_count = 0;
+  int observability_feature_count = 0;
+  double inlier_ratio = 0.0;
   double average_point_plane_residual = 0.0;
+  double median_abs_point_plane_residual = 0.0;
+  double p90_abs_point_plane_residual = 0.0;
+  double p95_abs_point_plane_residual = 0.0;
+  double point_plane_residual_rmse = 0.0;
+  double max_abs_point_plane_residual = 0.0;
+  double measurement_variance_mean = 0.0;
+  double measurement_variance_median = 0.0;
+  double measurement_variance_p90 = 0.0;
+  double measurement_variance_p95 = 0.0;
+  double measurement_variance_min = 0.0;
+  double measurement_variance_max = 0.0;
   StatesGroup predicted_state;
   StatesGroup updated_state;
   fast_livo::LioObservabilityMetrics observability;
@@ -134,6 +152,62 @@ struct LioUpdateDiagnostics
   bool update_was_suppressed = false;
   bool update_was_significantly_suppressed = false;
   bool is_severely_degenerate = false;
+
+  struct DirectionalShadow
+  {
+    bool valid = false;
+    int iteration_index = -1;
+    int iteration_count = 0;
+    int effective_feature_count = 0;
+    double relative_threshold = 0.0;
+    double residual_mean = 0.0;
+    double residual_median = 0.0;
+    double residual_p90 = 0.0;
+    double residual_rmse = 0.0;
+    double measurement_variance_mean = 0.0;
+    double measurement_variance_median = 0.0;
+    fast_livo::LioObservabilityMetrics observability;
+    Eigen::Vector3d rotation_weights = Eigen::Vector3d::Ones();
+    Eigen::Vector3d translation_weights = Eigen::Vector3d::Ones();
+    int affected_direction_count = 0;
+    int partial_suppression_count = 0;
+    int full_suppression_count = 0;
+    double information_trace_raw = 0.0;
+    double information_trace_shadow = 0.0;
+    double information_trace_retained_ratio = 1.0;
+    double rotation_information_trace_raw = 0.0;
+    double rotation_information_trace_shadow = 0.0;
+    double translation_information_trace_raw = 0.0;
+    double translation_information_trace_shadow = 0.0;
+    Eigen::Vector3d raw_delta_position = Eigen::Vector3d::Zero();
+    Eigen::Vector3d shadow_delta_position = Eigen::Vector3d::Zero();
+    Eigen::Vector3d removed_delta_position = Eigen::Vector3d::Zero();
+    Eigen::Vector3d raw_delta_rpy_deg = Eigen::Vector3d::Zero();
+    Eigen::Vector3d shadow_delta_rpy_deg = Eigen::Vector3d::Zero();
+    Eigen::Vector3d removed_delta_rpy_deg = Eigen::Vector3d::Zero();
+    double raw_delta_position_norm = 0.0;
+    double shadow_delta_position_norm = 0.0;
+    double removed_delta_position_norm = 0.0;
+    double raw_delta_rotation_deg = 0.0;
+    double shadow_delta_rotation_deg = 0.0;
+    double removed_delta_rotation_deg = 0.0;
+    double raw_weak_translation_projection = 0.0;
+    double shadow_weak_translation_projection = 0.0;
+    double raw_weak_rotation_projection_deg = 0.0;
+    double shadow_weak_rotation_projection_deg = 0.0;
+    double raw_posterior_pose_cov_trace = 0.0;
+    double shadow_posterior_pose_cov_trace = 0.0;
+    Eigen::Vector3d raw_posterior_rotation_cov_eigenvalues = Eigen::Vector3d::Zero();
+    Eigen::Vector3d shadow_posterior_rotation_cov_eigenvalues = Eigen::Vector3d::Zero();
+    Eigen::Vector3d raw_posterior_translation_cov_eigenvalues = Eigen::Vector3d::Zero();
+    Eigen::Vector3d shadow_posterior_translation_cov_eigenvalues = Eigen::Vector3d::Zero();
+    Eigen::Matrix<double, 6, 1> raw_posterior_pose_cov_diagonal =
+        Eigen::Matrix<double, 6, 1>::Zero();
+    Eigen::Matrix<double, 6, 1> shadow_posterior_pose_cov_diagonal =
+        Eigen::Matrix<double, 6, 1>::Zero();
+    double solve_time_ms = 0.0;
+  };
+  std::vector<DirectionalShadow> directional_shadows;
 };
 
 typedef struct VoxelPlane
