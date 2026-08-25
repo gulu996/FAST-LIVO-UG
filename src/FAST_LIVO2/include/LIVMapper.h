@@ -57,6 +57,7 @@ public:
   bool startupWarmupReady();
   void updateMappingReady();
   void logRuntimeMemory();
+  void logVisualImageFlow(double timestamp, const char *event, const std::string &detail);
   void logLioDegeneracy(bool map_insert_skipped, const std::string &map_insert_skip_reason,
                         bool map_guard_requested, bool map_guard_enforced);
   
@@ -161,6 +162,17 @@ public:
   bool normal_en = true;
   bool exposure_estimate_en = false;
   bool visual_map_prune_en = true;
+  bool visual_map_supply_diagnostics_en_ = false;
+  bool visual_map_fov_fallback_en_ = false;
+  bool visual_tracking_only_dry_run_en_ = false;
+  bool visual_adaptive_covariance_shadow_en_ = false;
+  bool visual_adaptive_covariance_relaxed_en_ = false;
+  int visual_adaptive_covariance_relaxed_min_points_ = 15;
+  double visual_adaptive_covariance_k_ncc_ = 1.0;
+  double visual_adaptive_covariance_k_level_ = 1.0;
+  double visual_adaptive_covariance_k_photo_ = 0.5;
+  double visual_adaptive_covariance_scale_max_ = 4.0;
+  int visual_map_fov_fallback_target_grid_candidates_ = 60;
   int visual_map_max_voxels = 1800;
   int visual_map_max_points_per_voxel = 10;
   int visual_map_max_total_points = 20000;
@@ -200,6 +212,7 @@ public:
   double vio_visual_reference_refresh_min_horizontal_coverage_ = 0.30;
   double vio_visual_reference_refresh_min_vertical_coverage_ = 0.30;
   int vio_visual_reference_refresh_max_per_frame_ = 30;
+  bool vio_visual_search_level_low_contrast_retry_en_ = false;
   int vio_min_update_meas_ = 900;
   int vio_low_track_force_update_stride_ = 0;
   int vio_low_track_force_min_points_ = 8;
@@ -236,6 +249,7 @@ public:
   double vio_visual_robust_delta_ = 20.0;
   bool vio_visual_observability_gate_en_ = true;
   double vio_visual_observability_relative_eigen_threshold_ = 0.02;
+  double vio_visual_relaxed_observability_relative_eigen_threshold_ = 0.02;
   double vio_visual_observability_absolute_eigen_threshold_ = 0.0;
   bool vio_image_quality_gate_en_ = false;
   double vio_image_quality_max_saturated_fraction_ = 0.20;
@@ -284,7 +298,8 @@ public:
   PointCloudXYZI::Ptr pcl_wait_save_intensity;
 
   ofstream fout_pre, fout_out, fout_pcd_pos, fout_points, fout_lio_degeneracy,
-      fout_runtime_memory;
+      fout_runtime_memory, fout_visual_image_flow;
+  int visual_image_flow_pending_rows_ = 0;
 
   V3D euler_cur;
 

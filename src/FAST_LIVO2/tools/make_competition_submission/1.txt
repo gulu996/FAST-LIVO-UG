@@ -1,0 +1,8 @@
+
+python3 make_competition_submission_v2.py \
+    ~/data/2026-08-23-202045 \
+    
+使用final作为评估（默认online）
+python3 make_competition_submission_v2.py \
+    ~/data/2026-08-23-202045 \
+    --use-final

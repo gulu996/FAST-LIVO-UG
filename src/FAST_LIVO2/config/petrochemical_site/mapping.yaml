@@ -66,6 +66,24 @@ vio:
   min_retrieve_points: 30
   min_update_meas: 500
   visual_map_prune_en: true
+  visual_map_supply_diagnostics_en: true
+  visual_map_fov_fallback_en: true
+  visual_tracking_only_dry_run_en: false
+  # Stage 3C-A: read-only first-level EKF linearization diagnostics. This never
+  # applies a Kalman update and does not relax the existing 30-track gate.
+  visual_adaptive_covariance_shadow_en: true
+  # Stage 3C-B. Code defaults remain disabled; the petrochemical launch exposes
+  # enable/min-points overrides for BASELINE, TEST-20 and TEST-15 replays.
+  visual_adaptive_covariance_relaxed_en: false
+  visual_adaptive_covariance_relaxed_min_points: 20
+  visual_adaptive_covariance_k_ncc: 1.0
+  visual_adaptive_covariance_k_level: 1.0
+  visual_adaptive_covariance_k_photo: 0.5
+  visual_adaptive_covariance_scale_max: 4.0
+  # Stage 3C-C2: selected from the offline internal-observability shadow sweep.
+  # NORMAL >=30 continues to use visual_observability_relative_eigen_threshold=0.02.
+  visual_relaxed_observability_relative_eigen_threshold: 0.10
+  visual_map_fov_fallback_target_grid_candidates: 60
   visual_map_max_voxels: 1800
   visual_map_max_points_per_voxel: 10
   visual_map_max_total_points: 20000
@@ -85,6 +103,9 @@ vio:
   visual_patch_quality_gate_en: true
   visual_patch_max_saturated_fraction: 0.10
   visual_patch_min_intensity_std: 4.0
+  # Stage 3B-2: only retry a level-0 low-contrast current patch at the sampling
+  # level already selected for the later EKF residual. All thresholds stay fixed.
+  visual_search_level_low_contrast_retry_en: true
   image_quality_saturated_pixel_value: 245
   image_quality_dark_pixel_value: 8
   image_quality_tile_rows: 6

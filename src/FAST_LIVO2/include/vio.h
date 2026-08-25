@@ -35,6 +35,9 @@ struct SubSparseMap
   vector<float> errors;
   vector<vector<float>> warp_patch;
   vector<int> search_levels;
+  vector<double> ncc_scores;
+  vector<double> photometric_mses;
+  vector<double> depths;
   vector<VisualPoint *> voxel_points;
   vector<double> inv_expo_list;
   vector<pointWithVar> add_from_voxel_map;
@@ -45,6 +48,9 @@ struct SubSparseMap
     errors.reserve(SIZE_LARGE);
     warp_patch.reserve(SIZE_LARGE);
     search_levels.reserve(SIZE_LARGE);
+    ncc_scores.reserve(SIZE_LARGE);
+    photometric_mses.reserve(SIZE_LARGE);
+    depths.reserve(SIZE_LARGE);
     voxel_points.reserve(SIZE_LARGE);
     inv_expo_list.reserve(SIZE_LARGE);
     add_from_voxel_map.reserve(SIZE_SMALL);
@@ -56,6 +62,9 @@ struct SubSparseMap
     errors.clear();
     warp_patch.clear();
     search_levels.clear();
+    ncc_scores.clear();
+    photometric_mses.clear();
+    depths.clear();
     voxel_points.clear();
     inv_expo_list.clear();
     add_from_voxel_map.clear();
@@ -86,6 +95,98 @@ public:
   }
 };
 
+struct VisualScalarDistribution
+{
+  int count = 0;
+  double mean = 0.0;
+  double p10 = 0.0;
+  double median = 0.0;
+  double p90 = 0.0;
+  double p95 = 0.0;
+  double max = 0.0;
+};
+
+struct VisualMapSupplyDiagnostics
+{
+  int global_in_front = 0;
+  int global_inside_image = 0;
+  int global_border_valid = 0;
+  int global_usable_tile = 0;
+  int global_grid_cells = 0;
+  int spatial_voxels = 0;
+  int spatial_map_points = 0;
+  int spatial_in_front = 0;
+  int spatial_inside_image = 0;
+  int spatial_border_valid = 0;
+  int spatial_usable_tile = 0;
+  int spatial_grid_cells = 0;
+  VisualScalarDistribution global_all_distance;
+  VisualScalarDistribution global_view_distance;
+  VisualScalarDistribution spatial_all_distance;
+  VisualScalarDistribution spatial_view_distance;
+  VisualScalarDistribution global_view_abs_cos;
+  VisualScalarDistribution spatial_view_abs_cos;
+  VisualScalarDistribution global_view_reference_age;
+  VisualScalarDistribution spatial_view_reference_age;
+  VisualScalarDistribution global_view_last_seen_age;
+  VisualScalarDistribution spatial_view_last_seen_age;
+  VisualScalarDistribution global_view_observation_count;
+  VisualScalarDistribution spatial_view_observation_count;
+};
+
+struct VisualCandidateDiagnostics
+{
+  int observation_count = 0;
+  int last_seen_age = 0;
+  int reference_level = 0;
+  int grid_index = -1;
+  bool from_fov_fallback = false;
+  double view_angle_deg = 0.0;
+  double warp_condition = 0.0;
+  double warp_frobenius = 0.0;
+  double warp_max_singular = 0.0;
+  double depth_z = 0.0;
+  double range_m = 0.0;
+  double image_u = 0.0;
+  double image_v = 0.0;
+  V3D current_view_direction = V3D::Zero();
+  V3D reference_view_direction = V3D::Zero();
+};
+
+struct VisualAdaptiveCovarianceShadowDiagnostics
+{
+  bool evaluated = false;
+  bool valid = false;
+  bool min_measurement_pass = false;
+  bool observability_pass = false;
+  bool nis_pass = false;
+  int pyramid_level = -1;
+  int tracked_points = 0;
+  int measurement_dof = 0;
+  int suppressed_directions = 0;
+  double residual_rms = std::numeric_limits<double>::quiet_NaN();
+  double robust_residual_rms = std::numeric_limits<double>::quiet_NaN();
+  double total_nis = std::numeric_limits<double>::quiet_NaN();
+  double normalized_nis = std::numeric_limits<double>::quiet_NaN();
+  double rotation_min_eigenvalue = std::numeric_limits<double>::quiet_NaN();
+  double rotation_max_eigenvalue = std::numeric_limits<double>::quiet_NaN();
+  double rotation_condition = std::numeric_limits<double>::quiet_NaN();
+  double translation_min_eigenvalue = std::numeric_limits<double>::quiet_NaN();
+  double translation_max_eigenvalue = std::numeric_limits<double>::quiet_NaN();
+  double translation_condition = std::numeric_limits<double>::quiet_NaN();
+};
+
+struct VisualPoseObservabilityDiagnostics
+{
+  bool valid = false;
+  V3D rotation_eigenvalues = V3D::Constant(std::numeric_limits<double>::quiet_NaN());
+  M3D rotation_eigenvectors = M3D::Constant(std::numeric_limits<double>::quiet_NaN());
+  V3D rotation_direction_weights = V3D::Ones();
+  V3D translation_eigenvalues = V3D::Constant(std::numeric_limits<double>::quiet_NaN());
+  M3D translation_eigenvectors = M3D::Constant(std::numeric_limits<double>::quiet_NaN());
+  V3D translation_direction_weights = V3D::Ones();
+};
+
 class VIOManager
 {
 public:
@@ -109,6 +210,7 @@ public:
   double visual_robust_delta = 20.0;
   bool visual_observability_gate_en = true;
   double visual_observability_relative_eigen_threshold = 0.02;
+  double visual_relaxed_observability_relative_eigen_threshold = 0.02;
   double visual_observability_absolute_eigen_threshold = 0.0;
 
   int width, height, grid_n_width, grid_n_height, length;
@@ -203,8 +305,18 @@ public:
   double visual_reference_refresh_min_horizontal_coverage = 0.30;
   double visual_reference_refresh_min_vertical_coverage = 0.30;
   int visual_reference_refresh_max_per_frame = 30;
+  bool visual_search_level_low_contrast_retry_en = false;
+  bool visual_adaptive_covariance_relaxed_en = false;
+  int visual_adaptive_covariance_relaxed_min_points = 15;
+  double visual_adaptive_covariance_k_ncc = 1.0;
+  double visual_adaptive_covariance_k_level = 1.0;
+  double visual_adaptive_covariance_k_photo = 0.5;
+  double visual_adaptive_covariance_scale_max = 4.0;
   bool last_visual_tracked_gate_pass = false;
   bool last_visual_relaxed_track_gate_pass = false;
+  bool last_visual_adaptive_covariance_relaxed_candidate = false;
+  bool last_visual_adaptive_covariance_relaxed_gate_pass = false;
+  bool current_visual_adaptive_covariance_relaxed_update = false;
   bool last_visual_degeneracy_relaxed_track_gate_pass = false;
   double last_visual_degeneracy_constrained_step_m = 0.0;
   int min_update_meas = 600;
@@ -241,6 +353,11 @@ public:
   int last_visual_observability_suppressed_directions = 0;
   int last_visual_candidate_patches = 0;
   int last_visual_patch_quality_rejects = 0;
+  int last_visual_search_level_low_contrast_retries = 0;
+  int last_visual_search_level_low_contrast_recovered = 0;
+  int last_visual_depth_discontinuity_rejects = 0;
+  int last_visual_normal_uninitialized_rejects = 0;
+  int last_visual_warp_invalid_candidates = 0;
   int last_visual_ncc_rejects = 0;
   int last_visual_photometric_rejects = 0;
   int last_visual_ref_age_count = 0;
@@ -325,6 +442,27 @@ public:
   double last_visual_horizontal_coverage = 0.0;
   double last_visual_vertical_coverage = 0.0;
   double visual_voxel_size = 0.5;
+  bool visual_map_supply_diagnostics_en = false;
+  bool visual_map_fov_fallback_en = false;
+  bool visual_adaptive_covariance_shadow_en = false;
+  int visual_map_fov_fallback_target_grid_candidates = 60;
+  int last_visual_fov_fallback_added_grid_candidates = 0;
+  VisualMapSupplyDiagnostics last_visual_map_supply;
+  VisualCandidateDiagnostics current_visual_candidate_diagnostics;
+  VisualAdaptiveCovarianceShadowDiagnostics last_visual_adaptive_covariance_shadow;
+  VisualPoseObservabilityDiagnostics last_visual_pose_observability;
+  VisualScalarDistribution last_visual_adaptive_scale_distribution;
+  VisualScalarDistribution last_visual_adaptive_ncc_distribution;
+  VisualScalarDistribution last_visual_adaptive_photo_distribution;
+  VisualScalarDistribution last_visual_adaptive_depth_distribution;
+  std::array<int, 3> last_visual_adaptive_search_level_hist{{0, 0, 0}};
+  std::vector<double> current_visual_adaptive_point_scales;
+  double last_visual_huber_pose_information_trace = std::numeric_limits<double>::quiet_NaN();
+  double last_visual_weighted_pose_information_trace = std::numeric_limits<double>::quiet_NaN();
+  double last_visual_suppressed_pose_information_trace = std::numeric_limits<double>::quiet_NaN();
+  double current_visual_process_begin_wall_time = 0.0;
+  bool current_visual_tracking_only_dry_run = false;
+  std::string current_visual_frame_mode = "NORMAL_LIDAR_SUPPORTED";
   bool console_timing_print_en = true;
   int console_timing_print_stride = 1;
   
@@ -368,14 +506,22 @@ public:
   ofstream timing_log_file;
   ofstream visual_patch_quality_file;
   ofstream visual_funnel_file;
+  ofstream visual_map_supply_file;
+  ofstream visual_adaptive_covariance_shadow_file;
+  ofstream visual_adaptive_covariance_relaxed_file;
   int visual_patch_quality_pending_rows = 0;
   int visual_funnel_pending_rows = 0;
+  int visual_map_supply_pending_rows = 0;
+  int visual_adaptive_covariance_shadow_pending_rows = 0;
+  int visual_adaptive_covariance_relaxed_pending_rows = 0;
   double current_visual_time = 0.0;
+  bool last_visual_observability_rejected = false;
   unordered_map<VOXEL_LOCATION, VOXEL_POINTS *> feat_map;
   unordered_map<VOXEL_LOCATION, int> sub_feat_map; 
   std::unordered_set<const VisualPoint *> protected_visual_points_;
   unordered_map<int, Warp *> warp_map;
   vector<VisualPoint *> retrieve_voxel_points;
+  vector<uint8_t> retrieve_voxel_from_fov_fallback;
   vector<pointWithVar> append_voxel_points;
   FramePtr new_frame_;
   cv::Mat img_cp, img_rgb, img_test;
@@ -391,7 +537,9 @@ public:
   ~VIOManager();
   bool updateStateInverse(cv::Mat img, int level);
   bool updateState(cv::Mat img, int level);
-  void processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time);
+  void processFrame(cv::Mat &img, vector<pointWithVar> &pg,
+                    const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map,
+                    double img_time, bool tracking_only_dry_run = false);
   void retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
   void generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg);
   void clearVisualMap();
@@ -436,14 +584,30 @@ public:
   void initializeTimingLogFileIfNeeded();
   void appendTimingLogLines(const vector<string> &lines);
   void logVisualPatchQuality(double photometric_mse, double ncc,
-                             const char *decision);
+                             const char *decision, int ref_age,
+                             int search_level, double warp_determinant,
+                             bool warp_valid, double ref_inv_exposure,
+                             double current_inv_exposure);
   void logVisualFunnel(const std::string &skip_reason, bool ekf_attempted,
                        bool final_guard_rejected, bool accepted);
+  void logVisualMapSupply();
+  void evaluateVisualAdaptiveCovarianceShadow(const cv::Mat &img);
+  void logVisualAdaptiveCovarianceShadow();
+  void prepareVisualAdaptiveCovarianceDiagnostics(bool compute_scales);
+  void applyVisualAdaptiveCovarianceWhitening(Eigen::VectorXd &residuals,
+                                              Eigen::MatrixXd &jacobian) const;
+  void logVisualAdaptiveCovarianceRelaxed(const std::string &decision,
+                                          bool ekf_attempted, bool accepted,
+                                          bool guard_rejected, bool rollback,
+                                          const StatesGroup &before,
+                                          const StatesGroup &attempted);
   bool isPixelInUsableTile(const V2D &px) const;
   void updateTrackedSpatialCoverage();
   void refreshTrackedReferencePatches(cv::Mat img);
   void applyPatchRobustWeights(Eigen::VectorXd &residuals,
                                Eigen::MatrixXd &jacobian) const;
+  void recordHuberMeasurementInformation(const Eigen::MatrixXd &jacobian);
+  double activeVisualObservabilityRelativeThreshold() const;
   bool applyPoseObservabilityGate(Eigen::MatrixXd &jacobian);
   void logVisualDelta(double timestamp, int tracked_point_count,
                       double image_saturated_fraction,

@@ -2,12 +2,21 @@
   <arg name="cmd_name" default="/tmp/fast_livo_petrochemical" />
   <arg name="rviz" default="true" />
   <arg name="use_sim_time" default="false" />
+  <arg name="img_time_offset" default="0.0" />
+  <arg name="visual_adaptive_covariance_relaxed_en" default="false" />
+  <arg name="visual_adaptive_covariance_relaxed_min_points" default="20" />
 
   <param name="/use_sim_time" value="$(arg use_sim_time)" />
   <rosparam command="load" file="$(find fast_livo)/config/petrochemical_site/mapping.yaml" />
   <rosparam command="load" file="$(find fast_livo)/config/petrochemical_site/calibration.yaml" />
   <rosparam command="load" file="$(find fast_livo)/config/petrochemical_site/gnss_adapter.yaml" />
   <rosparam command="load" file="$(find fast_livo)/config/petrochemical_site/rtk_fixed_lag_backend.yaml" />
+  <!-- Diagnostic override; the default preserves the dataset configuration. -->
+  <param name="/time_offset/img_time_offset" value="$(arg img_time_offset)" />
+  <param name="/vio/visual_adaptive_covariance_relaxed_en"
+         value="$(arg visual_adaptive_covariance_relaxed_en)" />
+  <param name="/vio/visual_adaptive_covariance_relaxed_min_points"
+         value="$(arg visual_adaptive_covariance_relaxed_min_points)" />
 
   <!-- Native image_transport decoder; compressed input is the base topic plus /compressed. -->
   <node pkg="image_transport" type="republish" name="petrochemical_image_decoder"

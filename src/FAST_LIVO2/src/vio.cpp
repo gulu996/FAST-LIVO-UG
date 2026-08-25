@@ -19,6 +19,7 @@ which is included as part of this source code package.
 #include <ctime>
 #include <iomanip>
 #include <limits>
+#include <numeric>
 #include <sstream>
 
 namespace
@@ -123,9 +124,15 @@ bool isPatchGradientInsideImage(int u_ref_i, int v_ref_i, int scale, int cols, i
 }
 
 bool isPatchPhotometricallyUsable(const float *patch, int patch_size, int saturation_threshold,
-                                  double max_saturated_fraction, double min_intensity_std)
+                                  double max_saturated_fraction, double min_intensity_std,
+                                  const char **reject_reason = nullptr)
 {
-  if (patch == nullptr || patch_size <= 0) return false;
+  auto reject = [&](const char *reason)
+  {
+    if (reject_reason != nullptr) *reject_reason = reason;
+    return false;
+  };
+  if (patch == nullptr || patch_size <= 0) return reject("invalid_input");
 
   double sum = 0.0;
   double sum_sq = 0.0;
@@ -133,7 +140,7 @@ bool isPatchPhotometricallyUsable(const float *patch, int patch_size, int satura
   for (int i = 0; i < patch_size; ++i)
   {
     const double value = patch[i];
-    if (!std::isfinite(value)) return false;
+    if (!std::isfinite(value)) return reject("non_finite");
     sum += value;
     sum_sq += value * value;
     if (value >= saturation_threshold) ++saturated;
@@ -145,7 +152,35 @@ bool isPatchPhotometricallyUsable(const float *patch, int patch_size, int satura
   const double variance = std::max(0.0, sum_sq / count - mean * mean);
   const double stddev = std::sqrt(variance);
 
-  return saturated_fraction <= max_saturated_fraction && stddev >= min_intensity_std;
+  if (saturated_fraction > max_saturated_fraction) return reject("saturation");
+  if (stddev < min_intensity_std) return reject("low_contrast");
+  if (reject_reason != nullptr) *reject_reason = "none";
+  return true;
+}
+
+VisualScalarDistribution summarizeVisualScalars(std::vector<double> values)
+{
+  VisualScalarDistribution result;
+  result.count = static_cast<int>(values.size());
+  if (values.empty()) return result;
+
+  std::sort(values.begin(), values.end());
+  const double sum = std::accumulate(values.begin(), values.end(), 0.0);
+  result.mean = sum / values.size();
+  auto percentile = [&](double q)
+  {
+    const double index = q * (values.size() - 1);
+    const size_t lo = static_cast<size_t>(std::floor(index));
+    const size_t hi = static_cast<size_t>(std::ceil(index));
+    const double fraction = index - lo;
+    return values[lo] * (1.0 - fraction) + values[hi] * fraction;
+  };
+  result.p10 = percentile(0.10);
+  result.median = percentile(0.50);
+  result.p90 = percentile(0.90);
+  result.p95 = percentile(0.95);
+  result.max = values.back();
+  return result;
 }
 }
 
@@ -161,6 +196,11 @@ VIOManager::~VIOManager()
   if (timing_log_file.is_open()) timing_log_file.close();
   if (visual_patch_quality_file.is_open()) visual_patch_quality_file.close();
   if (visual_funnel_file.is_open()) visual_funnel_file.close();
+  if (visual_map_supply_file.is_open()) visual_map_supply_file.close();
+  if (visual_adaptive_covariance_shadow_file.is_open())
+    visual_adaptive_covariance_shadow_file.close();
+  if (visual_adaptive_covariance_relaxed_file.is_open())
+    visual_adaptive_covariance_relaxed_file.close();
   delete visual_submap;
   for (auto& pair : warp_map) delete pair.second;
   warp_map.clear();
@@ -429,8 +469,8 @@ void VIOManager::initializeVIO(ros::NodeHandle &nh)
 
   patch_size_total = patch_size * patch_size;
   patch_size_half = static_cast<int>(patch_size / 2);
-  patch_buffer.resize(patch_size_total);
   warp_len = patch_size_total * patch_pyrimid_level;
+  patch_buffer.resize(warp_len);
   border = (patch_size_half + 1) * (1 << patch_pyrimid_level);
 
   retrieve_voxel_points.reserve(length);
@@ -480,7 +520,10 @@ void VIOManager::appendTimingLogLines(const vector<string> &lines)
 }
 
 void VIOManager::logVisualPatchQuality(double photometric_mse, double ncc,
-                                       const char *decision)
+                                       const char *decision, int ref_age,
+                                       int search_level, double warp_determinant,
+                                       bool warp_valid, double ref_inv_exposure,
+                                       double current_inv_exposure)
 {
   if (!timing_log_enable || timing_log_dir.empty()) return;
   if (!visual_patch_quality_file.is_open())
@@ -489,11 +532,40 @@ void VIOManager::logVisualPatchQuality(double photometric_mse, double ncc,
     if (dir.back() != '/') dir += '/';
     visual_patch_quality_file.open(dir + "visual_patch_quality.csv", std::ios::out);
     if (!visual_patch_quality_file.is_open()) return;
-    visual_patch_quality_file << "timestamp,photometric_mse,ncc,decision\n";
+    visual_patch_quality_file
+        << "timestamp,frame_mode,photometric_mse,ncc,decision,ref_age,search_level,"
+           "warp_determinant,warp_valid,ref_inv_exposure,current_inv_exposure,"
+           "observation_count,last_seen_age,reference_level,grid_index,source,"
+           "view_angle_deg,warp_condition,warp_frobenius,warp_max_singular,"
+           "depth_z,range_m,image_u,image_v,current_view_x,current_view_y,current_view_z,"
+           "reference_view_x,reference_view_y,reference_view_z\n";
   }
   visual_patch_quality_file << std::setprecision(12) << current_visual_time << ','
+                            << current_visual_frame_mode << ','
                             << photometric_mse << ',' << ncc << ','
-                            << (decision ? decision : "unknown") << '\n';
+                            << (decision ? decision : "unknown") << ','
+                            << ref_age << ',' << search_level << ','
+                            << warp_determinant << ',' << static_cast<int>(warp_valid) << ','
+                            << ref_inv_exposure << ',' << current_inv_exposure << ','
+                            << current_visual_candidate_diagnostics.observation_count << ','
+                            << current_visual_candidate_diagnostics.last_seen_age << ','
+                            << current_visual_candidate_diagnostics.reference_level << ','
+                            << current_visual_candidate_diagnostics.grid_index << ','
+                            << (current_visual_candidate_diagnostics.from_fov_fallback ? "fov_fallback" : "lidar_submap") << ','
+                            << current_visual_candidate_diagnostics.view_angle_deg << ','
+                            << current_visual_candidate_diagnostics.warp_condition << ','
+                            << current_visual_candidate_diagnostics.warp_frobenius << ','
+                            << current_visual_candidate_diagnostics.warp_max_singular << ','
+                            << current_visual_candidate_diagnostics.depth_z << ','
+                            << current_visual_candidate_diagnostics.range_m << ','
+                            << current_visual_candidate_diagnostics.image_u << ','
+                            << current_visual_candidate_diagnostics.image_v << ','
+                            << current_visual_candidate_diagnostics.current_view_direction[0] << ','
+                            << current_visual_candidate_diagnostics.current_view_direction[1] << ','
+                            << current_visual_candidate_diagnostics.current_view_direction[2] << ','
+                            << current_visual_candidate_diagnostics.reference_view_direction[0] << ','
+                            << current_visual_candidate_diagnostics.reference_view_direction[1] << ','
+                            << current_visual_candidate_diagnostics.reference_view_direction[2] << '\n';
   if (++visual_patch_quality_pending_rows >= 100)
   {
     visual_patch_quality_file.flush();
@@ -625,6 +697,8 @@ void VIOManager::refreshTrackedReferencePatches(cv::Mat img)
 void VIOManager::logVisualFunnel(const std::string &skip_reason, bool ekf_attempted,
                                  bool final_guard_rejected, bool accepted)
 {
+  logVisualAdaptiveCovarianceShadow();
+  logVisualMapSupply();
   if (!timing_log_enable || timing_log_dir.empty()) return;
   if (!visual_funnel_file.is_open())
   {
@@ -633,18 +707,20 @@ void VIOManager::logVisualFunnel(const std::string &skip_reason, bool ekf_attemp
     visual_funnel_file.open(dir + "visual_funnel.csv", std::ios::out);
     if (!visual_funnel_file.is_open()) return;
     visual_funnel_file
-        << "timestamp,image_quality_pass,quality_reject_reason,saturated_fraction,max_tile_saturated_fraction,"
+        << "timestamp,frame_mode,image_quality_pass,quality_reject_reason,saturated_fraction,max_tile_saturated_fraction,"
            "dark_fraction,contrast,global_saturation_fail,global_dark_fail,global_contrast_fail,"
            "usable_tiles,unusable_tiles,overexposed_tiles,underexposed_tiles,low_contrast_tiles,"
            "good_tile_ratio,good_tile_horizontal_coverage,good_tile_vertical_coverage,"
            "map_points,map_voxels,projected_candidates,inside_image_candidates,good_tile_candidates,grid_candidates,"
-           "patch_quality_input,patch_quality_rejected,patch_valid,ncc_rejected,ncc_pass,"
+           "depth_discontinuity_rejected,normal_uninitialized_rejected,warp_invalid_candidates,"
+           "patch_quality_input,patch_quality_rejected,search_level_low_contrast_retried,"
+           "search_level_low_contrast_recovered,patch_valid,ncc_rejected,ncc_pass,"
            "photometric_rejected,tracked_points,ref_input_mean_age,ref_input_max_age,"
            "ncc_pass_mean_ref_age,ncc_pass_max_ref_age,tracked_mean_ref_age,tracked_max_ref_age,"
            "converged_ref_candidate_ratio,reference_refreshes,occupied_good_tiles,occupied_tile_ratio,"
            "horizontal_coverage,vertical_coverage,lidar_degenerated,tracked_gate_pass,relaxed_track_gate_pass,"
            "degeneracy_relaxed_track_gate_pass,degeneracy_constrained_step_m,measurement_dof,ekf_attempted,"
-           "nis_rejected,observability_suppressed,final_guard_rejected,skip_reason,accepted,"
+           "nis_rejected,observability_rejected,observability_suppressed,final_guard_rejected,skip_reason,accepted,"
            "map_points_after,map_voxels_after,evicted_points,evicted_voxels,mean_visual_point_age,max_visual_point_age\n";
   }
 
@@ -680,6 +756,7 @@ void VIOManager::logVisualFunnel(const std::string &skip_reason, bool ekf_attemp
 
   visual_funnel_file << std::setprecision(12)
       << current_visual_time << ','
+      << current_visual_frame_mode << ','
       << static_cast<int>(last_image_quality_reject_reason == "none") << ','
       << last_image_quality_reject_reason << ','
       << last_image_saturated_fraction << ',' << last_image_max_tile_saturated_fraction << ','
@@ -694,7 +771,12 @@ void VIOManager::logVisualFunnel(const std::string &skip_reason, bool ekf_attemp
       << last_visual_map_points_at_retrieve << ',' << last_visual_map_voxels_at_retrieve << ','
       << last_visual_projected_candidates << ',' << last_visual_inside_image_candidates << ','
       << last_visual_good_tile_candidates << ',' << last_visual_grid_candidates << ','
+      << last_visual_depth_discontinuity_rejects << ','
+      << last_visual_normal_uninitialized_rejects << ','
+      << last_visual_warp_invalid_candidates << ','
       << patch_quality_input << ',' << last_visual_patch_quality_rejects << ','
+      << last_visual_search_level_low_contrast_retries << ','
+      << last_visual_search_level_low_contrast_recovered << ','
       << last_visual_candidate_patches << ',' << last_visual_ncc_rejects << ',' << ncc_pass << ','
       << last_visual_photometric_rejects << ',' << total_points << ','
       << mean_ref_age << ',' << last_visual_ref_age_max << ','
@@ -709,6 +791,7 @@ void VIOManager::logVisualFunnel(const std::string &skip_reason, bool ekf_attemp
       << static_cast<int>(last_visual_degeneracy_relaxed_track_gate_pass) << ','
       << last_visual_degeneracy_constrained_step_m << ',' << last_visual_measurement_dof << ','
       << static_cast<int>(ekf_attempted) << ',' << static_cast<int>(last_visual_nis_rejected) << ','
+      << static_cast<int>(last_visual_observability_rejected) << ','
       << last_visual_observability_suppressed_directions << ',' << static_cast<int>(final_guard_rejected) << ','
       << (skip_reason.empty() ? "none" : skip_reason) << ',' << static_cast<int>(accepted) << ','
       << map_points_after << ',' << feat_map.size() << ',' << last_visual_map_evicted_points << ','
@@ -717,6 +800,97 @@ void VIOManager::logVisualFunnel(const std::string &skip_reason, bool ekf_attemp
   {
     visual_funnel_file.flush();
     visual_funnel_pending_rows = 0;
+  }
+}
+
+void VIOManager::logVisualMapSupply()
+{
+  if (!visual_map_supply_diagnostics_en || !timing_log_enable || timing_log_dir.empty()) return;
+  if (!visual_map_supply_file.is_open())
+  {
+    std::string dir = timing_log_dir;
+    if (dir.back() != '/') dir += '/';
+    visual_map_supply_file.open(dir + "visual_map_supply.csv", std::ios::out);
+    if (!visual_map_supply_file.is_open()) return;
+
+    visual_map_supply_file
+        << "timestamp,frame_mode,processing_time_s,map_points_total,map_voxels_total,"
+           "global_in_front,global_inside_image,global_border_valid,global_usable_tile,global_grid_cells,"
+           "spatial_voxels,spatial_map_points,spatial_in_front,spatial_inside_image,spatial_border_valid,"
+           "spatial_usable_tile,spatial_grid_cells,combined_grid_cells,fallback_added_grid_cells,"
+           "depth_valid,normal_valid,patch_input,";
+    auto append_header = [&](const char *name)
+    {
+      visual_map_supply_file << name << "_count," << name << "_mean," << name << "_p10,"
+                             << name << "_median," << name << "_p90," << name << "_p95,";
+    };
+    append_header("global_all_distance_m");
+    append_header("global_view_distance_m");
+    append_header("spatial_all_distance_m");
+    append_header("spatial_view_distance_m");
+    append_header("global_view_abs_cos");
+    append_header("spatial_view_abs_cos");
+    append_header("global_view_reference_age_frames");
+    append_header("spatial_view_reference_age_frames");
+    append_header("global_view_last_seen_age_frames");
+    append_header("spatial_view_last_seen_age_frames");
+    append_header("global_view_observation_count");
+    append_header("spatial_view_observation_count");
+    visual_map_supply_file
+        << "map_pg_size,map_candidate_slots,map_patch_rejects,map_added_points,map_evicted_points,"
+           "map_evicted_voxels,map_insert_reject_invalid,map_insert_reject_voxel_full,"
+           "map_insert_reject_voxel_cap\n";
+  }
+
+  const int depth_valid = std::max(0, last_visual_grid_candidates - last_visual_depth_discontinuity_rejects);
+  const int normal_valid = std::max(0, depth_valid - last_visual_normal_uninitialized_rejects);
+  const int patch_input = last_visual_candidate_patches + last_visual_patch_quality_rejects;
+  const double processing_time = current_visual_process_begin_wall_time > 0.0
+      ? omp_get_wtime() - current_visual_process_begin_wall_time : 0.0;
+  visual_map_supply_file << std::setprecision(12)
+      << current_visual_time << ',' << current_visual_frame_mode << ',' << processing_time << ','
+      << last_visual_map_points_at_retrieve << ',' << last_visual_map_voxels_at_retrieve << ','
+      << last_visual_map_supply.global_in_front << ','
+      << last_visual_map_supply.global_inside_image << ','
+      << last_visual_map_supply.global_border_valid << ','
+      << last_visual_map_supply.global_usable_tile << ','
+      << last_visual_map_supply.global_grid_cells << ','
+      << last_visual_map_supply.spatial_voxels << ','
+      << last_visual_map_supply.spatial_map_points << ','
+      << last_visual_map_supply.spatial_in_front << ','
+      << last_visual_map_supply.spatial_inside_image << ','
+      << last_visual_map_supply.spatial_border_valid << ','
+      << last_visual_map_supply.spatial_usable_tile << ','
+      << last_visual_map_supply.spatial_grid_cells << ','
+      << last_visual_grid_candidates << ',' << last_visual_fov_fallback_added_grid_candidates << ','
+      << depth_valid << ',' << normal_valid << ',' << patch_input << ',';
+  auto append_distribution = [&](const VisualScalarDistribution &distribution)
+  {
+    visual_map_supply_file << distribution.count << ',' << distribution.mean << ',' << distribution.p10 << ','
+                           << distribution.median << ',' << distribution.p90 << ',' << distribution.p95 << ',';
+  };
+  append_distribution(last_visual_map_supply.global_all_distance);
+  append_distribution(last_visual_map_supply.global_view_distance);
+  append_distribution(last_visual_map_supply.spatial_all_distance);
+  append_distribution(last_visual_map_supply.spatial_view_distance);
+  append_distribution(last_visual_map_supply.global_view_abs_cos);
+  append_distribution(last_visual_map_supply.spatial_view_abs_cos);
+  append_distribution(last_visual_map_supply.global_view_reference_age);
+  append_distribution(last_visual_map_supply.spatial_view_reference_age);
+  append_distribution(last_visual_map_supply.global_view_last_seen_age);
+  append_distribution(last_visual_map_supply.spatial_view_last_seen_age);
+  append_distribution(last_visual_map_supply.global_view_observation_count);
+  append_distribution(last_visual_map_supply.spatial_view_observation_count);
+  visual_map_supply_file
+      << last_visual_map_pg_size << ',' << last_visual_map_candidate_slots << ','
+      << last_visual_map_patch_rejects << ',' << last_visual_map_added_points << ','
+      << last_visual_map_evicted_points << ',' << last_visual_map_evicted_voxels << ','
+      << last_visual_map_insert_reject_invalid << ',' << last_visual_map_insert_reject_voxel_full << ','
+      << last_visual_map_insert_reject_voxel_cap << '\n';
+  if (++visual_map_supply_pending_rows >= 100)
+  {
+    visual_map_supply_file.flush();
+    visual_map_supply_pending_rows = 0;
   }
 }
 
@@ -740,17 +914,383 @@ void VIOManager::applyPatchRobustWeights(Eigen::VectorXd &residuals,
   }
 }
 
-bool VIOManager::applyPoseObservabilityGate(Eigen::MatrixXd &jacobian)
+void VIOManager::prepareVisualAdaptiveCovarianceDiagnostics(bool compute_scales)
 {
-  if (!visual_observability_gate_en) return true;
-  if (jacobian.cols() < 6 || jacobian.rows() == 0) return false;
+  current_visual_adaptive_point_scales.clear();
+  last_visual_adaptive_search_level_hist = {{0, 0, 0}};
+  last_visual_adaptive_scale_distribution = VisualScalarDistribution();
+  last_visual_adaptive_ncc_distribution = VisualScalarDistribution();
+  last_visual_adaptive_photo_distribution = VisualScalarDistribution();
+  last_visual_adaptive_depth_distribution = VisualScalarDistribution();
+  if (visual_submap == nullptr || total_points <= 0) return;
+
+  const int count = std::min(
+      total_points,
+      static_cast<int>(std::min(visual_submap->search_levels.size(),
+                                std::min(visual_submap->ncc_scores.size(),
+                                         std::min(visual_submap->photometric_mses.size(),
+                                                  visual_submap->depths.size())))));
+  if (count <= 0) return;
+
+  std::vector<double> ncc_values;
+  std::vector<double> photo_values;
+  std::vector<double> depth_values;
+  ncc_values.reserve(count);
+  photo_values.reserve(count);
+  depth_values.reserve(count);
+  current_visual_adaptive_point_scales.reserve(count);
+  const double ncc_denominator = std::max(1e-6, 1.0 - ncc_thre);
+  const double photo_denominator = std::max(1e-6, outlier_threshold);
+  const double level_denominator = std::max(1, patch_pyrimid_level - 1);
+
+  for (int i = 0; i < count; ++i)
+  {
+    const double ncc = visual_submap->ncc_scores[i];
+    const double photo_mse = visual_submap->photometric_mses[i];
+    const int search_level = visual_submap->search_levels[i];
+    ncc_values.push_back(ncc);
+    photo_values.push_back(photo_mse);
+    depth_values.push_back(visual_submap->depths[i]);
+    ++last_visual_adaptive_search_level_hist[std::min(2, std::max(0, search_level))];
+
+    double scale = 1.0;
+    if (compute_scales)
+    {
+      const double q_ncc = std::min(1.0, std::max(0.0, (1.0 - ncc) / ncc_denominator));
+      const double q_photo = std::min(1.0, std::max(0.0, photo_mse / photo_denominator));
+      const double q_level = std::min(1.0, std::max(0.0,
+          static_cast<double>(search_level) / level_denominator));
+      // Poorer correspondence quality may only reduce information. The plus
+      // signs are required; subtraction followed by clamp(scale, 1, max)
+      // would silently make every scale exactly one.
+      scale = 1.0 + visual_adaptive_covariance_k_ncc * q_ncc +
+              visual_adaptive_covariance_k_level * q_level +
+              visual_adaptive_covariance_k_photo * q_photo;
+      scale = std::min(visual_adaptive_covariance_scale_max, std::max(1.0, scale));
+    }
+    assert(std::isfinite(scale) && scale >= 1.0 &&
+           scale <= std::max(1.0, visual_adaptive_covariance_scale_max));
+    current_visual_adaptive_point_scales.push_back(scale);
+  }
+
+  last_visual_adaptive_scale_distribution =
+      summarizeVisualScalars(current_visual_adaptive_point_scales);
+  last_visual_adaptive_ncc_distribution = summarizeVisualScalars(ncc_values);
+  last_visual_adaptive_photo_distribution = summarizeVisualScalars(photo_values);
+  last_visual_adaptive_depth_distribution = summarizeVisualScalars(depth_values);
+}
+
+void VIOManager::applyVisualAdaptiveCovarianceWhitening(
+    Eigen::VectorXd &residuals, Eigen::MatrixXd &jacobian) const
+{
+  if (!current_visual_adaptive_covariance_relaxed_update) return;
+  if (patch_size_total <= 0 ||
+      current_visual_adaptive_point_scales.size() < static_cast<size_t>(total_points))
+  {
+    ROS_ERROR_THROTTLE(1.0,
+        "[VIO_ADAPTIVE_COV] Missing per-point scales for RELAXED update; rejecting rows.");
+    residuals.setConstant(std::numeric_limits<double>::quiet_NaN());
+    return;
+  }
+
+  for (int i = 0; i < total_points; ++i)
+  {
+    const Eigen::Index start = static_cast<Eigen::Index>(i) * patch_size_total;
+    if (start >= residuals.rows()) break;
+    const Eigen::Index count = std::min<Eigen::Index>(
+        patch_size_total, residuals.rows() - start);
+    const double scale = current_visual_adaptive_point_scales[i];
+    const double whitening = 1.0 / std::sqrt(scale);
+    residuals.segment(start, count) *= whitening;
+    jacobian.middleRows(start, count) *= whitening;
+  }
+}
+
+void VIOManager::logVisualAdaptiveCovarianceRelaxed(
+    const std::string &decision, bool ekf_attempted, bool accepted,
+    bool guard_rejected, bool rollback, const StatesGroup &before,
+    const StatesGroup &attempted)
+{
+  if (!timing_log_enable || timing_log_dir.empty() ||
+      current_visual_tracking_only_dry_run || total_points < 15)
+    return;
+  if (!visual_adaptive_covariance_relaxed_file.is_open())
+  {
+    std::string dir = timing_log_dir;
+    if (dir.back() != '/') dir += '/';
+    visual_adaptive_covariance_relaxed_file.open(
+        dir + "visual_adaptive_covariance_relaxed.csv", std::ios::out);
+    if (!visual_adaptive_covariance_relaxed_file.is_open()) return;
+    visual_adaptive_covariance_relaxed_file
+        << "timestamp,branch,feature_enabled,relaxed_candidate,spatial_gate_pass,"
+           "whitening_applied,ekf_attempted,accepted,decision,tracked_points,"
+           "occupied_good_tiles,occupied_tile_ratio,image_usable_tile_ratio,"
+           "horizontal_coverage,vertical_coverage,scale_mean,scale_p50,scale_p90,"
+           "scale_max,ncc_mean,ncc_p10,photo_mse_mean,photo_mse_p90,search_level_0,"
+           "search_level_1,search_level_2,observability_suppressed,observability_rejected,"
+           "measurement_dof,total_nis,normalized_nis,nis_pass,guard_rejected,rollback,"
+           "delta_px,delta_py,delta_pz,delta_p_norm,delta_rotation_deg,processing_time_s,"
+           "depth_p10,depth_p50,depth_p90,delta_rotvec_x,delta_rotvec_y,delta_rotvec_z,"
+           "delta_roll_deg,delta_pitch_deg,delta_yaw_deg,huber_pose_information_trace,"
+           "weighted_pose_information_trace,suppressed_pose_information_trace,"
+           "rotation_eigenvalue_0,rotation_eigenvalue_1,rotation_eigenvalue_2,rotation_condition,"
+           "rotation_weight_0,rotation_weight_1,rotation_weight_2,"
+           "rotation_eigenvector_0_x,rotation_eigenvector_0_y,rotation_eigenvector_0_z,"
+           "rotation_eigenvector_1_x,rotation_eigenvector_1_y,rotation_eigenvector_1_z,"
+           "rotation_eigenvector_2_x,rotation_eigenvector_2_y,rotation_eigenvector_2_z,"
+           "translation_eigenvalue_0,translation_eigenvalue_1,translation_eigenvalue_2,translation_condition,"
+           "translation_weight_0,translation_weight_1,translation_weight_2,"
+           "translation_eigenvector_0_x,translation_eigenvector_0_y,translation_eigenvector_0_z,"
+           "translation_eigenvector_1_x,translation_eigenvector_1_y,translation_eigenvector_1_z,"
+           "translation_eigenvector_2_x,translation_eigenvector_2_y,translation_eigenvector_2_z,"
+           "translation_weak_vertical_abs,delta_rotation_weak0,delta_position_weak0,"
+           "observability_relative_threshold,observability_absolute_threshold\n";
+  }
+
+  std::string branch = "NORMAL_GE30";
+  if (total_points < 20) branch = "RELAXED_15_19";
+  else if (total_points < 25) branch = "RELAXED_20_24";
+  else if (total_points < 30) branch = "RELAXED_25_29";
+
+  const V3D delta_position = attempted.pos_end - before.pos_end;
+  const M3D delta_rotation = before.rot_end.transpose() * attempted.rot_end;
+  const V3D delta_rotation_vector = Log(delta_rotation);
+  const double rad_to_deg = 57.29577951308232;
+  const double delta_rotation_deg = delta_rotation_vector.norm() * rad_to_deg;
+  const double delta_pitch = std::asin(std::min(1.0, std::max(-1.0, -delta_rotation(2, 0))));
+  const double delta_roll = std::atan2(delta_rotation(2, 1), delta_rotation(2, 2));
+  const double delta_yaw = std::atan2(delta_rotation(1, 0), delta_rotation(0, 0));
+  const bool nis_pass = !last_visual_nis_rejected &&
+      (visual_update_normalized_nis_max <= 0.0 ||
+       (std::isfinite(last_visual_normalized_nis) &&
+        last_visual_normalized_nis <= visual_update_normalized_nis_max));
+  const auto &scale = last_visual_adaptive_scale_distribution;
+  const auto &ncc = last_visual_adaptive_ncc_distribution;
+  const auto &photo = last_visual_adaptive_photo_distribution;
+  const auto &depth = last_visual_adaptive_depth_distribution;
+  const auto &observability = last_visual_pose_observability;
+  const double delta_rotation_weak0 = observability.valid
+      ? delta_rotation_vector.dot(observability.rotation_eigenvectors.col(0))
+      : std::numeric_limits<double>::quiet_NaN();
+  const double delta_position_weak0 = observability.valid
+      ? delta_position.dot(observability.translation_eigenvectors.col(0))
+      : std::numeric_limits<double>::quiet_NaN();
+  const double translation_weak_vertical_abs = observability.valid
+      ? std::abs(observability.translation_eigenvectors(2, 0))
+      : std::numeric_limits<double>::quiet_NaN();
+  const double processing_time = current_visual_process_begin_wall_time > 0.0
+      ? omp_get_wtime() - current_visual_process_begin_wall_time : 0.0;
+
+  visual_adaptive_covariance_relaxed_file << std::setprecision(12)
+      << current_visual_time << ',' << branch << ','
+      << static_cast<int>(visual_adaptive_covariance_relaxed_en) << ','
+      << static_cast<int>(last_visual_adaptive_covariance_relaxed_candidate) << ','
+      << static_cast<int>(last_visual_adaptive_covariance_relaxed_gate_pass) << ','
+      << static_cast<int>(current_visual_adaptive_covariance_relaxed_update) << ','
+      << static_cast<int>(ekf_attempted) << ',' << static_cast<int>(accepted) << ','
+      << decision << ',' << total_points << ',' << last_visual_occupied_good_tiles << ','
+      << last_visual_occupied_tile_ratio << ',' << last_image_usable_tile_ratio << ','
+      << last_visual_horizontal_coverage << ',' << last_visual_vertical_coverage << ','
+      << scale.mean << ',' << scale.median << ',' << scale.p90 << ',' << scale.max << ','
+      << ncc.mean << ',' << ncc.p10 << ',' << photo.mean << ',' << photo.p90 << ','
+      << last_visual_adaptive_search_level_hist[0] << ','
+      << last_visual_adaptive_search_level_hist[1] << ','
+      << last_visual_adaptive_search_level_hist[2] << ','
+      << last_visual_observability_suppressed_directions << ','
+      << static_cast<int>(last_visual_observability_rejected) << ','
+      << last_visual_measurement_dof << ',' << last_visual_total_nis << ','
+      << last_visual_normalized_nis << ',' << static_cast<int>(nis_pass) << ','
+      << static_cast<int>(guard_rejected) << ',' << static_cast<int>(rollback) << ','
+      << delta_position[0] << ',' << delta_position[1] << ',' << delta_position[2] << ','
+      << delta_position.norm() << ',' << delta_rotation_deg << ',' << processing_time << ','
+      << depth.p10 << ',' << depth.median << ',' << depth.p90 << ','
+      << delta_rotation_vector[0] << ',' << delta_rotation_vector[1] << ','
+      << delta_rotation_vector[2] << ',' << delta_roll * rad_to_deg << ','
+      << delta_pitch * rad_to_deg << ',' << delta_yaw * rad_to_deg << ','
+      << last_visual_huber_pose_information_trace << ','
+      << last_visual_weighted_pose_information_trace << ','
+      << last_visual_suppressed_pose_information_trace << ','
+      << observability.rotation_eigenvalues[0] << ','
+      << observability.rotation_eigenvalues[1] << ','
+      << observability.rotation_eigenvalues[2] << ','
+      << last_visual_rotation_condition << ','
+      << observability.rotation_direction_weights[0] << ','
+      << observability.rotation_direction_weights[1] << ','
+      << observability.rotation_direction_weights[2] << ','
+      << observability.rotation_eigenvectors(0, 0) << ','
+      << observability.rotation_eigenvectors(1, 0) << ','
+      << observability.rotation_eigenvectors(2, 0) << ','
+      << observability.rotation_eigenvectors(0, 1) << ','
+      << observability.rotation_eigenvectors(1, 1) << ','
+      << observability.rotation_eigenvectors(2, 1) << ','
+      << observability.rotation_eigenvectors(0, 2) << ','
+      << observability.rotation_eigenvectors(1, 2) << ','
+      << observability.rotation_eigenvectors(2, 2) << ','
+      << observability.translation_eigenvalues[0] << ','
+      << observability.translation_eigenvalues[1] << ','
+      << observability.translation_eigenvalues[2] << ','
+      << last_visual_translation_condition << ','
+      << observability.translation_direction_weights[0] << ','
+      << observability.translation_direction_weights[1] << ','
+      << observability.translation_direction_weights[2] << ','
+      << observability.translation_eigenvectors(0, 0) << ','
+      << observability.translation_eigenvectors(1, 0) << ','
+      << observability.translation_eigenvectors(2, 0) << ','
+      << observability.translation_eigenvectors(0, 1) << ','
+      << observability.translation_eigenvectors(1, 1) << ','
+      << observability.translation_eigenvectors(2, 1) << ','
+      << observability.translation_eigenvectors(0, 2) << ','
+      << observability.translation_eigenvectors(1, 2) << ','
+      << observability.translation_eigenvectors(2, 2) << ','
+      << translation_weak_vertical_abs << ',' << delta_rotation_weak0 << ','
+      << delta_position_weak0 << ',' << activeVisualObservabilityRelativeThreshold() << ','
+      << visual_observability_absolute_eigen_threshold << '\n';
+  if (++visual_adaptive_covariance_relaxed_pending_rows >= 100)
+  {
+    visual_adaptive_covariance_relaxed_file.flush();
+    visual_adaptive_covariance_relaxed_pending_rows = 0;
+  }
+}
+
+void VIOManager::evaluateVisualAdaptiveCovarianceShadow(const cv::Mat &img)
+{
+  last_visual_adaptive_covariance_shadow = VisualAdaptiveCovarianceShadowDiagnostics();
+  auto &diagnostics = last_visual_adaptive_covariance_shadow;
+  diagnostics.evaluated = true;
+  diagnostics.tracked_points = total_points;
+  diagnostics.pyramid_level = std::max(0, patch_pyrimid_level - 1);
+  if (state == nullptr || visual_submap == nullptr || img.empty() || total_points <= 0 ||
+      patch_size_total <= 0)
+    return;
+
+  // ponytail: use the exact first (coarsest) linearization that a relaxed
+  // branch would encounter. Simulating later iterative levels would require a
+  // state update, which is deliberately outside this read-only shadow pass.
+  StatesGroup shadow_state(*state);
+  snapStateForDeterminism(shadow_state);
+  const int measurement_columns = exposure_estimate_en ? 7 : 6;
+  const int H_DIM = total_points * patch_size_total;
+  Eigen::VectorXd residuals = Eigen::VectorXd::Zero(H_DIM);
+  Eigen::MatrixXd jacobian = Eigen::MatrixXd::Zero(H_DIM, measurement_columns);
+  const int img_step = static_cast<int>(img.step);
+  const int level = diagnostics.pyramid_level;
+
+  const M3D Rwi(shadow_state.rot_end);
+  const V3D Pwi(shadow_state.pos_end);
+  const M3D shadow_Rcw = Rci * Rwi.transpose();
+  const V3D shadow_Pcw = -Rci * Rwi.transpose() * Pwi + Pci;
+  const M3D shadow_Jdp_dt = Rci * Rwi.transpose();
+
+  int n_meas = 0;
+  for (int i = 0; i < total_points; ++i)
+  {
+    if (i >= static_cast<int>(visual_submap->voxel_points.size()) ||
+        i >= static_cast<int>(visual_submap->search_levels.size()) ||
+        i >= static_cast<int>(visual_submap->warp_patch.size()) ||
+        i >= static_cast<int>(visual_submap->inv_expo_list.size()))
+      continue;
+    const VisualPoint *pt = visual_submap->voxel_points[i];
+    if (pt == nullptr) continue;
+
+    const int search_level = visual_submap->search_levels[i];
+    const int pyramid_level = level + search_level;
+    if (pyramid_level < 0 || pyramid_level >= 30) continue;
+    const int scale = 1 << pyramid_level;
+    const float inv_scale = 1.0f / scale;
+    const std::vector<float> &reference_patch = visual_submap->warp_patch[i];
+    const int reference_offset = patch_size_total * level;
+    if (reference_offset < 0 ||
+        reference_offset + patch_size_total > static_cast<int>(reference_patch.size()))
+      continue;
+
+    const V3D camera_point =
+        snapCameraPointForDeterminism(shadow_Rcw * pt->pos_ + shadow_Pcw);
+    if (!camera_point.allFinite() || std::fabs(camera_point[2]) < 1e-12) continue;
+    const V2D pixel = snapPixelForDeterminism(cam->world2cam(camera_point));
+    if (!pixel.allFinite()) continue;
+
+    MD(2, 3) projection_jacobian;
+    computeProjectionJacobian(camera_point, projection_jacobian);
+    M3D camera_point_hat;
+    camera_point_hat << SKEW_SYM_MATRX(camera_point);
+
+    const float u_ref = pixel[0];
+    const float v_ref = pixel[1];
+    const int u_ref_i = floorf(pixel[0] / scale) * scale;
+    const int v_ref_i = floorf(pixel[1] / scale) * scale;
+    if (!isPatchGradientInsideImage(u_ref_i, v_ref_i, scale, img.cols, img.rows,
+                                    patch_size, patch_size_half))
+      continue;
+
+    const float subpix_u_ref = (u_ref - u_ref_i) / scale;
+    const float subpix_v_ref = (v_ref - v_ref_i) / scale;
+    const float w_ref_tl = (1.0f - subpix_u_ref) * (1.0f - subpix_v_ref);
+    const float w_ref_tr = subpix_u_ref * (1.0f - subpix_v_ref);
+    const float w_ref_bl = (1.0f - subpix_u_ref) * subpix_v_ref;
+    const float w_ref_br = subpix_u_ref * subpix_v_ref;
+    const double inv_ref_expo = visual_submap->inv_expo_list[i];
+
+    for (int x = 0; x < patch_size; ++x)
+    {
+      const uint8_t *img_ptr = img.data +
+          (v_ref_i + x * scale - patch_size_half * scale) * img_step +
+          u_ref_i - patch_size_half * scale;
+      for (int y = 0; y < patch_size; ++y, img_ptr += scale)
+      {
+        const float du = 0.5f *
+            ((w_ref_tl * img_ptr[scale] + w_ref_tr * img_ptr[scale * 2] +
+              w_ref_bl * img_ptr[scale * img_step + scale] +
+              w_ref_br * img_ptr[scale * img_step + scale * 2]) -
+             (w_ref_tl * img_ptr[-scale] + w_ref_tr * img_ptr[0] +
+              w_ref_bl * img_ptr[scale * img_step - scale] +
+              w_ref_br * img_ptr[scale * img_step]));
+        const float dv = 0.5f *
+            ((w_ref_tl * img_ptr[scale * img_step] +
+              w_ref_tr * img_ptr[scale + scale * img_step] +
+              w_ref_bl * img_ptr[img_step * scale * 2] +
+              w_ref_br * img_ptr[img_step * scale * 2 + scale]) -
+             (w_ref_tl * img_ptr[-scale * img_step] +
+              w_ref_tr * img_ptr[-scale * img_step + scale] +
+              w_ref_bl * img_ptr[0] + w_ref_br * img_ptr[scale]));
+
+        MD(1, 2) image_jacobian;
+        image_jacobian << du, dv;
+        image_jacobian *= shadow_state.inv_expo_time * inv_scale;
+        const MD(1, 3) Jdphi = image_jacobian * projection_jacobian * camera_point_hat;
+        const MD(1, 3) Jdp = -image_jacobian * projection_jacobian;
+        const MD(1, 3) JdR = Jdphi * Jdphi_dR + Jdp * Jdp_dR;
+        const MD(1, 3) Jdt = Jdp * shadow_Jdp_dt;
+
+        const double current_value =
+            w_ref_tl * img_ptr[0] + w_ref_tr * img_ptr[scale] +
+            w_ref_bl * img_ptr[scale * img_step] +
+            w_ref_br * img_ptr[scale * img_step + scale];
+        const int row = i * patch_size_total + x * patch_size + y;
+        residuals[row] = shadow_state.inv_expo_time * current_value -
+                         inv_ref_expo * reference_patch[reference_offset + x * patch_size + y];
+        if (exposure_estimate_en)
+          jacobian.block<1, 7>(row, 0) << JdR, Jdt, current_value;
+        else
+          jacobian.block<1, 6>(row, 0) << JdR, Jdt;
+        ++n_meas;
+      }
+    }
+  }
+
+  diagnostics.measurement_dof = n_meas;
+  diagnostics.min_measurement_pass = n_meas >= min_update_meas;
+  if (n_meas <= 0 || !residuals.allFinite() || !jacobian.allFinite()) return;
+  diagnostics.residual_rms = std::sqrt(residuals.squaredNorm() / n_meas);
+  applyPatchRobustWeights(residuals, jacobian);
+  diagnostics.robust_residual_rms = std::sqrt(residuals.squaredNorm() / n_meas);
 
   const Eigen::Matrix<double, 6, 6> pose_information =
       jacobian.leftCols(6).transpose() * jacobian.leftCols(6);
   const M3D Irr = pose_information.block<3, 3>(0, 0);
   const M3D Irt = pose_information.block<3, 3>(0, 3);
   const M3D Itt = pose_information.block<3, 3>(3, 3);
-  const double regularizer = 1e-9 * std::max(1.0, pose_information.diagonal().maxCoeff());
+  const double regularizer =
+      1e-9 * std::max(1.0, pose_information.diagonal().maxCoeff());
   const M3D rotation_information =
       (Irr - Irt * (Itt + regularizer * M3D::Identity()).ldlt().solve(Irt.transpose())).eval();
   const M3D translation_information =
@@ -763,7 +1303,6 @@ bool VIOManager::applyPoseObservabilityGate(Eigen::MatrixXd &jacobian)
     const M3D information = 0.5 * (raw_information + raw_information.transpose());
     Eigen::SelfAdjointEigenSolver<M3D> solver(information);
     if (solver.info() != Eigen::Success || !solver.eigenvalues().allFinite()) return false;
-
     const V3D eigenvalues = solver.eigenvalues().cwiseMax(0.0);
     min_eigenvalue = eigenvalues[0];
     max_eigenvalue = eigenvalues[2];
@@ -771,7 +1310,169 @@ bool VIOManager::applyPoseObservabilityGate(Eigen::MatrixXd &jacobian)
     if (!(max_eigenvalue > 1e-12)) return false;
 
     V3D direction_weights = V3D::Ones();
-    const double relative_threshold = visual_observability_relative_eigen_threshold;
+    for (int i = 0; i < 3; ++i)
+    {
+      const double ratio = eigenvalues[i] / max_eigenvalue;
+      if ((visual_observability_absolute_eigen_threshold > 0.0 &&
+           eigenvalues[i] < visual_observability_absolute_eigen_threshold) ||
+          (visual_observability_relative_eigen_threshold > 0.0 &&
+           ratio < 0.25 * visual_observability_relative_eigen_threshold))
+      {
+        direction_weights[i] = 0.0;
+        ++diagnostics.suppressed_directions;
+      }
+      else if (visual_observability_relative_eigen_threshold > 0.0 &&
+               ratio < visual_observability_relative_eigen_threshold)
+      {
+        direction_weights[i] =
+            std::sqrt(ratio / visual_observability_relative_eigen_threshold);
+        ++diagnostics.suppressed_directions;
+      }
+    }
+    projector = solver.eigenvectors() * direction_weights.asDiagonal() *
+                solver.eigenvectors().transpose();
+    return true;
+  };
+
+  M3D rotation_projector = M3D::Identity();
+  M3D translation_projector = M3D::Identity();
+  const bool finite_observability =
+      analyze(rotation_information, rotation_projector,
+              diagnostics.rotation_min_eigenvalue,
+              diagnostics.rotation_max_eigenvalue,
+              diagnostics.rotation_condition) &&
+      analyze(translation_information, translation_projector,
+              diagnostics.translation_min_eigenvalue,
+              diagnostics.translation_max_eigenvalue,
+              diagnostics.translation_condition);
+  diagnostics.observability_pass = !visual_observability_gate_en || finite_observability;
+  if (!diagnostics.observability_pass) return;
+  if (visual_observability_gate_en)
+  {
+    jacobian.block(0, 0, jacobian.rows(), 3) *= rotation_projector;
+    jacobian.block(0, 3, jacobian.rows(), 3) *= translation_projector;
+  }
+
+  const Eigen::MatrixXd jacobian_transpose = jacobian.transpose();
+  MD(DIM_STATE, DIM_STATE) information = MD(DIM_STATE, DIM_STATE)::Zero();
+  information.block(0, 0, measurement_columns, measurement_columns) =
+      jacobian_transpose * jacobian;
+  const double measurement_variance = std::max(img_point_cov, 1e-12);
+  const MD(DIM_STATE, DIM_STATE) K1 =
+      (information + (shadow_state.cov / measurement_variance).inverse()).inverse();
+  const Eigen::VectorXd HTz = jacobian_transpose * residuals;
+  const double total_nis =
+      (residuals.squaredNorm() -
+       HTz.dot(K1.block(0, 0, measurement_columns, measurement_columns) * HTz)) /
+      measurement_variance;
+  diagnostics.total_nis = std::max(0.0, total_nis);
+  diagnostics.normalized_nis = diagnostics.total_nis / n_meas;
+  diagnostics.nis_pass =
+      visual_update_normalized_nis_max <= 0.0 ||
+      (std::isfinite(diagnostics.normalized_nis) &&
+       diagnostics.normalized_nis <= visual_update_normalized_nis_max);
+  diagnostics.valid = std::isfinite(diagnostics.normalized_nis);
+}
+
+void VIOManager::logVisualAdaptiveCovarianceShadow()
+{
+  if (!visual_adaptive_covariance_shadow_en || current_visual_tracking_only_dry_run ||
+      !timing_log_enable || timing_log_dir.empty())
+    return;
+  if (!visual_adaptive_covariance_shadow_file.is_open())
+  {
+    std::string dir = timing_log_dir;
+    if (dir.back() != '/') dir += '/';
+    visual_adaptive_covariance_shadow_file.open(
+        dir + "visual_adaptive_covariance_shadow.csv", std::ios::out);
+    if (!visual_adaptive_covariance_shadow_file.is_open()) return;
+    visual_adaptive_covariance_shadow_file
+        << "timestamp,frame_mode,evaluated,valid,pyramid_level,tracked_points,measurement_dof,"
+           "min_measurement_pass,residual_rms,robust_residual_rms,observability_pass,"
+           "observability_suppressed,rotation_min_eigenvalue,rotation_max_eigenvalue,"
+           "rotation_condition,translation_min_eigenvalue,translation_max_eigenvalue,"
+           "translation_condition,total_nis,normalized_nis,nis_pass,img_point_cov\n";
+  }
+  const auto &d = last_visual_adaptive_covariance_shadow;
+  visual_adaptive_covariance_shadow_file << std::setprecision(12)
+      << current_visual_time << ',' << current_visual_frame_mode << ','
+      << static_cast<int>(d.evaluated) << ',' << static_cast<int>(d.valid) << ','
+      << d.pyramid_level << ',' << d.tracked_points << ',' << d.measurement_dof << ','
+      << static_cast<int>(d.min_measurement_pass) << ',' << d.residual_rms << ','
+      << d.robust_residual_rms << ',' << static_cast<int>(d.observability_pass) << ','
+      << d.suppressed_directions << ',' << d.rotation_min_eigenvalue << ','
+      << d.rotation_max_eigenvalue << ',' << d.rotation_condition << ','
+      << d.translation_min_eigenvalue << ',' << d.translation_max_eigenvalue << ','
+      << d.translation_condition << ',' << d.total_nis << ',' << d.normalized_nis << ','
+      << static_cast<int>(d.nis_pass) << ',' << img_point_cov << '\n';
+  if (++visual_adaptive_covariance_shadow_pending_rows >= 100)
+  {
+    visual_adaptive_covariance_shadow_file.flush();
+    visual_adaptive_covariance_shadow_pending_rows = 0;
+  }
+}
+
+void VIOManager::recordHuberMeasurementInformation(const Eigen::MatrixXd &jacobian)
+{
+  last_visual_huber_pose_information_trace =
+      jacobian.cols() >= 6 && jacobian.rows() > 0
+          ? jacobian.leftCols(6).squaredNorm()
+          : std::numeric_limits<double>::quiet_NaN();
+}
+
+double VIOManager::activeVisualObservabilityRelativeThreshold() const
+{
+  return current_visual_adaptive_covariance_relaxed_update
+      ? visual_relaxed_observability_relative_eigen_threshold
+      : visual_observability_relative_eigen_threshold;
+}
+
+bool VIOManager::applyPoseObservabilityGate(Eigen::MatrixXd &jacobian)
+{
+  if (!visual_observability_gate_en)
+  {
+    if (jacobian.cols() >= 6 && jacobian.rows() > 0)
+    {
+      last_visual_weighted_pose_information_trace = jacobian.leftCols(6).squaredNorm();
+      last_visual_suppressed_pose_information_trace = last_visual_weighted_pose_information_trace;
+    }
+    return true;
+  }
+  if (jacobian.cols() < 6 || jacobian.rows() == 0) return false;
+
+  const Eigen::Matrix<double, 6, 6> pose_information =
+      jacobian.leftCols(6).transpose() * jacobian.leftCols(6);
+  last_visual_weighted_pose_information_trace = pose_information.trace();
+  last_visual_suppressed_pose_information_trace = pose_information.trace();
+  last_visual_pose_observability = VisualPoseObservabilityDiagnostics();
+  const M3D Irr = pose_information.block<3, 3>(0, 0);
+  const M3D Irt = pose_information.block<3, 3>(0, 3);
+  const M3D Itt = pose_information.block<3, 3>(3, 3);
+  const double regularizer = 1e-9 * std::max(1.0, pose_information.diagonal().maxCoeff());
+  const M3D rotation_information =
+      (Irr - Irt * (Itt + regularizer * M3D::Identity()).ldlt().solve(Irt.transpose())).eval();
+  const M3D translation_information =
+      (Itt - Irt.transpose() * (Irr + regularizer * M3D::Identity()).ldlt().solve(Irt)).eval();
+
+  auto analyze = [&](const M3D &raw_information, M3D &projector,
+                     double &min_eigenvalue, double &max_eigenvalue,
+                     double &condition, V3D &eigenvalues_out,
+                     M3D &eigenvectors_out, V3D &direction_weights_out) -> bool
+  {
+    const M3D information = 0.5 * (raw_information + raw_information.transpose());
+    Eigen::SelfAdjointEigenSolver<M3D> solver(information);
+    if (solver.info() != Eigen::Success || !solver.eigenvalues().allFinite()) return false;
+
+    const V3D eigenvalues = solver.eigenvalues().cwiseMax(0.0);
+    eigenvalues_out = eigenvalues;
+    eigenvectors_out = solver.eigenvectors();
+    min_eigenvalue = eigenvalues[0];
+    max_eigenvalue = eigenvalues[2];
+    condition = max_eigenvalue / std::max(1e-12, min_eigenvalue);
+    if (!(max_eigenvalue > 1e-12)) return false;
+
+    V3D direction_weights = V3D::Ones();
+    const double relative_threshold = activeVisualObservabilityRelativeThreshold();
     const double absolute_threshold = visual_observability_absolute_eigen_threshold;
     for (int i = 0; i < 3; ++i)
     {
@@ -790,6 +1491,7 @@ bool VIOManager::applyPoseObservabilityGate(Eigen::MatrixXd &jacobian)
     }
     projector = solver.eigenvectors() * direction_weights.asDiagonal() *
                 solver.eigenvectors().transpose();
+    direction_weights_out = direction_weights;
     return true;
   };
 
@@ -800,15 +1502,23 @@ bool VIOManager::applyPoseObservabilityGate(Eigen::MatrixXd &jacobian)
   if (!analyze(rotation_information, rotation_projector,
                last_visual_rotation_min_eigenvalue,
                last_visual_rotation_max_eigenvalue,
-               last_visual_rotation_condition) ||
+               last_visual_rotation_condition,
+               last_visual_pose_observability.rotation_eigenvalues,
+               last_visual_pose_observability.rotation_eigenvectors,
+               last_visual_pose_observability.rotation_direction_weights) ||
       !analyze(translation_information, translation_projector,
                last_visual_translation_min_eigenvalue,
                last_visual_translation_max_eigenvalue,
-               last_visual_translation_condition))
+               last_visual_translation_condition,
+               last_visual_pose_observability.translation_eigenvalues,
+               last_visual_pose_observability.translation_eigenvectors,
+               last_visual_pose_observability.translation_direction_weights))
     return false;
 
+  last_visual_pose_observability.valid = true;
   jacobian.block(0, 0, jacobian.rows(), 3) *= rotation_projector;
   jacobian.block(0, 3, jacobian.rows(), 3) *= translation_projector;
+  last_visual_suppressed_pose_information_trace = jacobian.leftCols(6).squaredNorm();
   return true;
 }
 
@@ -872,6 +1582,7 @@ void VIOManager::resetGrid()
 
   retrieve_voxel_points.clear();
   retrieve_voxel_points.resize(length);
+  retrieve_voxel_from_fov_fallback.assign(length, 0);
 
   append_voxel_points.clear();
   append_voxel_points.resize(length);
@@ -1395,9 +2106,23 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
   last_visual_inside_image_candidates = 0;
   last_visual_good_tile_candidates = 0;
   last_visual_grid_candidates = 0;
+  last_visual_fov_fallback_added_grid_candidates = 0;
   visual_submap->reset();
   if (feat_map.size() <= 0) return;
   double ts0 = omp_get_wtime();
+
+  std::vector<double> global_all_distance;
+  std::vector<double> global_view_distance;
+  std::vector<double> spatial_all_distance;
+  std::vector<double> spatial_view_distance;
+  std::vector<double> global_view_abs_cos;
+  std::vector<double> spatial_view_abs_cos;
+  std::vector<double> global_view_reference_age;
+  std::vector<double> spatial_view_reference_age;
+  std::vector<double> global_view_last_seen_age;
+  std::vector<double> spatial_view_last_seen_age;
+  std::vector<double> global_view_observation_count;
+  std::vector<double> spatial_view_observation_count;
 
   // pg_down->reserve(feat_map.size());
   // downSizeFilter.setInputCloud(pg);
@@ -1470,6 +2195,55 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
     // t_depth += omp_get_wtime()-t2;
   }
 
+  if (visual_map_supply_diagnostics_en)
+  {
+    global_all_distance.reserve(last_visual_map_points_at_retrieve);
+    std::vector<uint8_t> occupied_global_grids(length, 0);
+    for (const auto &entry : feat_map)
+    {
+      if (entry.second == nullptr) continue;
+      for (const VisualPoint *pt : entry.second->voxel_points)
+      {
+        if (pt == nullptr || pt->obs_.empty()) continue;
+        const V3D point_camera = new_frame_->w2f(pt->pos_);
+        const double distance = point_camera.norm();
+        if (std::isfinite(distance)) global_all_distance.push_back(distance);
+        if (point_camera[2] <= 0.0) continue;
+        ++last_visual_map_supply.global_in_front;
+
+        const V2D pixel = snapPixelForDeterminism(new_frame_->w2c(pt->pos_));
+        if (!new_frame_->cam_->isInFrame(pixel.cast<int>(), 0)) continue;
+        ++last_visual_map_supply.global_inside_image;
+        if (!new_frame_->cam_->isInFrame(pixel.cast<int>(), border)) continue;
+        ++last_visual_map_supply.global_border_valid;
+        if (!isPixelInUsableTile(pixel)) continue;
+        ++last_visual_map_supply.global_usable_tile;
+
+        if (std::isfinite(distance)) global_view_distance.push_back(distance);
+        const V3D normal_camera = new_frame_->T_f_w_.rotation_matrix() * pt->normal_;
+        if (distance > 1e-9 && normal_camera.norm() > 1e-9)
+        {
+          const double abs_cos = std::fabs(point_camera.normalized().dot(normal_camera.normalized()));
+          if (std::isfinite(abs_cos)) global_view_abs_cos.push_back(abs_cos);
+        }
+        if (pt->ref_patch != nullptr && pt->ref_patch->id_ >= 0)
+          global_view_reference_age.push_back(std::max(0, new_frame_->id_ - pt->ref_patch->id_));
+        int newest_frame_id = -1;
+        for (const Feature *observation : pt->obs_)
+          if (observation != nullptr) newest_frame_id = std::max(newest_frame_id, observation->id_);
+        if (newest_frame_id >= 0)
+          global_view_last_seen_age.push_back(std::max(0, new_frame_->id_ - newest_frame_id));
+        global_view_observation_count.push_back(pt->obs_.size());
+
+        const int grid_index = static_cast<int>(pixel[1] / grid_size) * grid_n_width +
+                               static_cast<int>(pixel[0] / grid_size);
+        if (grid_index >= 0 && grid_index < length) occupied_global_grids[grid_index] = 1;
+      }
+    }
+    last_visual_map_supply.global_grid_cells =
+        std::accumulate(occupied_global_grids.begin(), occupied_global_grids.end(), 0);
+  }
+
   // imshow("depth_img", depth_img);
   // printf("A1: %.6lf \n", omp_get_wtime() - ts1);
   // printf("A11. calculate pt position: %.6lf \n", t_position);
@@ -1496,6 +2270,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 
     if (corre_voxel != feat_map.end())
     {
+      if (visual_map_supply_diagnostics_en) ++last_visual_map_supply.spatial_voxels;
       bool voxel_in_fov = false;
       std::vector<VisualPoint *> &voxel_points = corre_voxel->second->voxel_points;
       int voxel_num = voxel_points.size();
@@ -1508,17 +2283,46 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 
         V3D norm_vec(new_frame_->T_f_w_.rotation_matrix() * pt->normal_);
         V3D dir(new_frame_->T_f_w_ * pt->pos_);
+        if (visual_map_supply_diagnostics_en)
+        {
+          ++last_visual_map_supply.spatial_map_points;
+          const double distance = dir.norm();
+          if (std::isfinite(distance)) spatial_all_distance.push_back(distance);
+        }
         if (dir[2] < 0) continue;
         ++last_visual_projected_candidates;
+        if (visual_map_supply_diagnostics_en) ++last_visual_map_supply.spatial_in_front;
         // dir.normalize();
         // if (dir.dot(norm_vec) <= 0.17) continue; // 0.34 70 degree  0.17 80 degree 0.08 85 degree
 
         V2D pc = snapPixelForDeterminism(new_frame_->w2c(pt->pos_));
+        if (visual_map_supply_diagnostics_en && new_frame_->cam_->isInFrame(pc.cast<int>(), 0))
+          ++last_visual_map_supply.spatial_inside_image;
         if (new_frame_->cam_->isInFrame(pc.cast<int>(), border))
         {
           ++last_visual_inside_image_candidates;
+          if (visual_map_supply_diagnostics_en) ++last_visual_map_supply.spatial_border_valid;
           if (!isPixelInUsableTile(pc)) continue;
           ++last_visual_good_tile_candidates;
+          if (visual_map_supply_diagnostics_en) ++last_visual_map_supply.spatial_usable_tile;
+          if (visual_map_supply_diagnostics_en)
+          {
+            const double distance = dir.norm();
+            if (std::isfinite(distance)) spatial_view_distance.push_back(distance);
+            if (distance > 1e-9 && norm_vec.norm() > 1e-9)
+            {
+              const double abs_cos = std::fabs(dir.normalized().dot(norm_vec.normalized()));
+              if (std::isfinite(abs_cos)) spatial_view_abs_cos.push_back(abs_cos);
+            }
+            if (pt->ref_patch != nullptr && pt->ref_patch->id_ >= 0)
+              spatial_view_reference_age.push_back(std::max(0, new_frame_->id_ - pt->ref_patch->id_));
+            int newest_frame_id = -1;
+            for (const Feature *observation : pt->obs_)
+              if (observation != nullptr) newest_frame_id = std::max(newest_frame_id, observation->id_);
+            if (newest_frame_id >= 0)
+              spatial_view_last_seen_age.push_back(std::max(0, new_frame_->id_ - newest_frame_id));
+            spatial_view_observation_count.push_back(pt->obs_.size());
+          }
           // cv::circle(img_cp, cv::Point2f(pc[0], pc[1]), 3, cv::Scalar(0, 255, 255), -1, 8);
           voxel_in_fov = true;
           int index = static_cast<int>(pc[1] / grid_size) * grid_n_width + static_cast<int>(pc[0] / grid_size);
@@ -1654,6 +2458,94 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
     sub_feat_map.erase(key);
   }
 
+  int spatial_grid_candidates = 0;
+  for (int i = 0; i < length; ++i)
+    spatial_grid_candidates += grid_num[i] == TYPE_MAP;
+  if (visual_map_supply_diagnostics_en)
+    last_visual_map_supply.spatial_grid_cells = spatial_grid_candidates;
+
+  if (visual_map_fov_fallback_en && spatial_grid_candidates < min_retrieve_points)
+  {
+    std::vector<VisualPoint *> fallback_points(length, nullptr);
+    std::vector<float> fallback_distances(length, std::numeric_limits<float>::max());
+    std::vector<VOXEL_LOCATION> ordered_visual_keys;
+    ordered_visual_keys.reserve(feat_map.size());
+    for (const auto &entry : feat_map) ordered_visual_keys.push_back(entry.first);
+    if (deterministic_visual_voxel_key_sort_en)
+      std::sort(ordered_visual_keys.begin(), ordered_visual_keys.end(), voxelLocationLess);
+
+    for (const VOXEL_LOCATION &key : ordered_visual_keys)
+    {
+      const auto voxel_it = feat_map.find(key);
+      if (voxel_it == feat_map.end() || voxel_it->second == nullptr) continue;
+      for (VisualPoint *pt : voxel_it->second->voxel_points)
+      {
+        if (pt == nullptr || pt->obs_.empty()) continue;
+        const V3D point_camera = new_frame_->w2f(pt->pos_);
+        if (point_camera[2] < 0.0) continue;
+        const V2D pixel = snapPixelForDeterminism(new_frame_->w2c(pt->pos_));
+        if (!new_frame_->cam_->isInFrame(pixel.cast<int>(), border) ||
+            !isPixelInUsableTile(pixel))
+          continue;
+        const int grid_index = static_cast<int>(pixel[1] / grid_size) * grid_n_width +
+                               static_cast<int>(pixel[0] / grid_size);
+        if (grid_index < 0 || grid_index >= length || grid_num[grid_index] == TYPE_MAP) continue;
+        const float distance = static_cast<float>((new_frame_->pos() - pt->pos_).norm());
+        if (fallback_points[grid_index] == nullptr ||
+            shouldReplaceGridPoint(-distance, pt->pos_, -fallback_distances[grid_index],
+                                   fallback_points[grid_index]->pos_))
+        {
+          fallback_points[grid_index] = pt;
+          fallback_distances[grid_index] = distance;
+        }
+      }
+    }
+
+    std::vector<int> fallback_grids;
+    fallback_grids.reserve(length);
+    for (int i = 0; i < length; ++i)
+      if (fallback_points[i] != nullptr) fallback_grids.push_back(i);
+    std::sort(fallback_grids.begin(), fallback_grids.end(),
+              [&](int a, int b)
+              {
+                if (std::fabs(fallback_distances[a] - fallback_distances[b]) > 1e-6f)
+                  return fallback_distances[a] < fallback_distances[b];
+                return a < b;
+              });
+
+    const int target = std::max(min_retrieve_points, visual_map_fov_fallback_target_grid_candidates);
+    const int add_limit = std::max(0, target - spatial_grid_candidates);
+    const int add_count = std::min(add_limit, static_cast<int>(fallback_grids.size()));
+    for (int i = 0; i < add_count; ++i)
+    {
+      const int grid_index = fallback_grids[i];
+      grid_num[grid_index] = TYPE_MAP;
+      retrieve_voxel_points[grid_index] = fallback_points[grid_index];
+      retrieve_voxel_from_fov_fallback[grid_index] = 1;
+      map_dist[grid_index] = fallback_distances[grid_index];
+    }
+    last_visual_fov_fallback_added_grid_candidates = add_count;
+    last_visual_projected_candidates += add_count;
+    last_visual_inside_image_candidates += add_count;
+    last_visual_good_tile_candidates += add_count;
+  }
+
+  if (visual_map_supply_diagnostics_en)
+  {
+    last_visual_map_supply.global_all_distance = summarizeVisualScalars(std::move(global_all_distance));
+    last_visual_map_supply.global_view_distance = summarizeVisualScalars(std::move(global_view_distance));
+    last_visual_map_supply.spatial_all_distance = summarizeVisualScalars(std::move(spatial_all_distance));
+    last_visual_map_supply.spatial_view_distance = summarizeVisualScalars(std::move(spatial_view_distance));
+    last_visual_map_supply.global_view_abs_cos = summarizeVisualScalars(std::move(global_view_abs_cos));
+    last_visual_map_supply.spatial_view_abs_cos = summarizeVisualScalars(std::move(spatial_view_abs_cos));
+    last_visual_map_supply.global_view_reference_age = summarizeVisualScalars(std::move(global_view_reference_age));
+    last_visual_map_supply.spatial_view_reference_age = summarizeVisualScalars(std::move(spatial_view_reference_age));
+    last_visual_map_supply.global_view_last_seen_age = summarizeVisualScalars(std::move(global_view_last_seen_age));
+    last_visual_map_supply.spatial_view_last_seen_age = summarizeVisualScalars(std::move(spatial_view_last_seen_age));
+    last_visual_map_supply.global_view_observation_count = summarizeVisualScalars(std::move(global_view_observation_count));
+    last_visual_map_supply.spatial_view_observation_count = summarizeVisualScalars(std::move(spatial_view_observation_count));
+  }
+
   // double t2 = omp_get_wtime();
 
   // cout<<"B. feat_map.find: "<<t2-t1<<endl;
@@ -1697,7 +2589,11 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
         }
         if (depth_continous) break;
       }
-      if (depth_continous) continue;
+      if (depth_continous)
+      {
+        ++last_visual_depth_discontinuity_rejects;
+        continue;
+      }
 
       // t_2 += omp_get_wtime() - t_1;
 
@@ -1708,7 +2604,11 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
       int search_level;
       Matrix2d A_cur_ref_zero;
 
-      if (!pt->is_normal_initialized_) continue;
+      if (!pt->is_normal_initialized_)
+      {
+        ++last_visual_normal_uninitialized_rejects;
+        continue;
+      }
 
       if (normal_en)
       {
@@ -1717,8 +2617,11 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
         if (pt->obs_.size() == 1)
         {
           ref_ftr = *pt->obs_.begin();
-          pt->ref_patch = ref_ftr;
-          pt->has_ref_patch_ = true;
+          if (!current_visual_tracking_only_dry_run)
+          {
+            pt->ref_patch = ref_ftr;
+            pt->has_ref_patch_ = true;
+          }
         }
         else if (!pt->has_ref_patch_)
         {
@@ -1748,8 +2651,11 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
               ref_ftr = ref_patch_temp;
             }
           }
-          pt->ref_patch = ref_ftr;
-          pt->has_ref_patch_ = true;
+          if (!current_visual_tracking_only_dry_run)
+          {
+            pt->ref_patch = ref_ftr;
+            pt->has_ref_patch_ = true;
+          }
         }
         else { ref_ftr = pt->ref_patch; }
       }
@@ -1790,8 +2696,11 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 
           search_level = getBestSearchLevel(A_cur_ref_zero, 2);
 
-          Warp *ot = new Warp(search_level, A_cur_ref_zero);
-          warp_map[ref_ftr->id_] = ot;
+          if (!current_visual_tracking_only_dry_run)
+          {
+            Warp *ot = new Warp(search_level, A_cur_ref_zero);
+            warp_map[ref_ftr->id_] = ot;
+          }
         }
       }
       // t_4 += omp_get_wtime() - t_1;
@@ -1804,16 +2713,102 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
       }
 
       getImagePatch(img, pc, patch_buffer.data(), 0);
+      float *current_patch = patch_buffer.data();
 
+      const int ref_age = std::max(0, new_frame_->id_ - ref_ftr->id_);
+      const double warp_determinant = A_cur_ref_zero.determinant();
+      const bool warp_valid = A_cur_ref_zero.allFinite() &&
+                              std::isfinite(warp_determinant) &&
+                              std::fabs(warp_determinant) > 1e-12;
+      current_visual_candidate_diagnostics = VisualCandidateDiagnostics();
+      current_visual_candidate_diagnostics.observation_count = static_cast<int>(pt->obs_.size());
+      int newest_observation_id = -1;
+      for (const Feature *observation : pt->obs_)
+        if (observation != nullptr) newest_observation_id = std::max(newest_observation_id, observation->id_);
+      current_visual_candidate_diagnostics.last_seen_age = newest_observation_id >= 0
+          ? std::max(0, new_frame_->id_ - newest_observation_id) : ref_age;
+      current_visual_candidate_diagnostics.reference_level = ref_ftr->level_;
+      current_visual_candidate_diagnostics.grid_index = i;
+      current_visual_candidate_diagnostics.from_fov_fallback =
+          i < static_cast<int>(retrieve_voxel_from_fov_fallback.size()) &&
+          retrieve_voxel_from_fov_fallback[i] != 0;
+      V3D current_view_direction = pt->pos_ - new_frame_->pos();
+      V3D reference_view_direction = pt->pos_ - ref_ftr->pos();
+      if (current_view_direction.norm() > 1e-9) current_view_direction.normalize();
+      if (reference_view_direction.norm() > 1e-9) reference_view_direction.normalize();
+      current_visual_candidate_diagnostics.current_view_direction = current_view_direction;
+      current_visual_candidate_diagnostics.reference_view_direction = reference_view_direction;
+      const double view_cos = std::min(1.0, std::max(-1.0,
+          current_view_direction.dot(reference_view_direction)));
+      current_visual_candidate_diagnostics.view_angle_deg = std::acos(view_cos) * 180.0 / M_PI;
+      const double warp_frobenius_sq = A_cur_ref_zero.squaredNorm();
+      const double warp_discriminant = std::sqrt(std::max(
+          0.0, warp_frobenius_sq * warp_frobenius_sq -
+                   4.0 * warp_determinant * warp_determinant));
+      const double warp_max_singular = std::sqrt(std::max(
+          0.0, 0.5 * (warp_frobenius_sq + warp_discriminant)));
+      const double warp_min_singular = std::sqrt(std::max(
+          0.0, 0.5 * (warp_frobenius_sq - warp_discriminant)));
+      current_visual_candidate_diagnostics.warp_condition = warp_min_singular > 1e-12
+          ? warp_max_singular / warp_min_singular : std::numeric_limits<double>::infinity();
+      current_visual_candidate_diagnostics.warp_frobenius = std::sqrt(std::max(0.0, warp_frobenius_sq));
+      current_visual_candidate_diagnostics.warp_max_singular = warp_max_singular;
+      current_visual_candidate_diagnostics.depth_z = pt_cam[2];
+      current_visual_candidate_diagnostics.range_m = pt_cam.norm();
+      current_visual_candidate_diagnostics.image_u = pc[0];
+      current_visual_candidate_diagnostics.image_v = pc[1];
+      if (!warp_valid) ++last_visual_warp_invalid_candidates;
       if (visual_patch_quality_gate_en)
       {
         const int sat_threshold = std::min(255, std::max(0, image_quality_saturated_pixel_value));
-        if (!isPatchPhotometricallyUsable(patch_buffer.data(), patch_size_total, sat_threshold,
-                                          visual_patch_max_saturated_fraction, visual_patch_min_intensity_std) ||
-            !isPatchPhotometricallyUsable(patch_wrap.data(), patch_size_total, sat_threshold,
-                                          visual_patch_max_saturated_fraction, visual_patch_min_intensity_std))
+        const char *patch_reject_reason = "none";
+        bool current_patch_usable = isPatchPhotometricallyUsable(
+            current_patch, patch_size_total, sat_threshold,
+            visual_patch_max_saturated_fraction, visual_patch_min_intensity_std,
+            &patch_reject_reason);
+        if (!current_patch_usable && visual_search_level_low_contrast_retry_en &&
+            search_level > 0 && std::string(patch_reject_reason) == "low_contrast")
+        {
+          ++last_visual_search_level_low_contrast_retries;
+          getImagePatch(img, pc, patch_buffer.data(), search_level);
+          float *search_level_patch = patch_buffer.data() + patch_size_total * search_level;
+          const char *retry_reject_reason = "none";
+          if (isPatchPhotometricallyUsable(
+                  search_level_patch, patch_size_total, sat_threshold,
+                  visual_patch_max_saturated_fraction, visual_patch_min_intensity_std,
+                  &retry_reject_reason))
+          {
+            current_patch = search_level_patch;
+            current_patch_usable = true;
+            ++last_visual_search_level_low_contrast_recovered;
+          }
+          else
+          {
+            patch_reject_reason = retry_reject_reason;
+          }
+        }
+        if (!current_patch_usable)
         {
           ++last_visual_patch_quality_rejects;
+          const std::string decision = std::string("patch_current_") + patch_reject_reason;
+          logVisualPatchQuality(std::numeric_limits<double>::quiet_NaN(),
+                                std::numeric_limits<double>::quiet_NaN(),
+                                decision.c_str(), ref_age, search_level,
+                                warp_determinant, warp_valid,
+                                ref_ftr->inv_expo_time_, state->inv_expo_time);
+          continue;
+        }
+        if (!isPatchPhotometricallyUsable(patch_wrap.data(), patch_size_total, sat_threshold,
+                                          visual_patch_max_saturated_fraction, visual_patch_min_intensity_std,
+                                          &patch_reject_reason))
+        {
+          ++last_visual_patch_quality_rejects;
+          const std::string decision = std::string("patch_reference_") + patch_reject_reason;
+          logVisualPatchQuality(std::numeric_limits<double>::quiet_NaN(),
+                                std::numeric_limits<double>::quiet_NaN(),
+                                decision.c_str(), ref_age, search_level,
+                                warp_determinant, warp_valid,
+                                ref_ftr->inv_expo_time_, state->inv_expo_time);
           continue;
         }
       }
@@ -1821,22 +2816,23 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
       float error = 0.0;
       for (int ind = 0; ind < patch_size_total; ind++)
       {
-        error += (ref_ftr->inv_expo_time_ * patch_wrap[ind] - state->inv_expo_time * patch_buffer[ind]) *
-                 (ref_ftr->inv_expo_time_ * patch_wrap[ind] - state->inv_expo_time * patch_buffer[ind]);
+        error += (ref_ftr->inv_expo_time_ * patch_wrap[ind] - state->inv_expo_time * current_patch[ind]) *
+                 (ref_ftr->inv_expo_time_ * patch_wrap[ind] - state->inv_expo_time * current_patch[ind]);
       }
 
       ++last_visual_candidate_patches;
-      const int ref_age = std::max(0, new_frame_->id_ - ref_ftr->id_);
       ++last_visual_ref_age_count;
       last_visual_ref_age_sum += ref_age;
       last_visual_ref_age_max = std::max(last_visual_ref_age_max, ref_age);
       last_visual_converged_ref_candidates += pt->is_converged_;
       const double photometric_mse = error / std::max(1, patch_size_total);
-      const double ncc = calculateNCC(patch_wrap.data(), patch_buffer.data(), patch_size_total);
+      const double ncc = calculateNCC(patch_wrap.data(), current_patch, patch_size_total);
       if (ncc_en && ncc < ncc_thre)
       {
         ++last_visual_ncc_rejects;
-        logVisualPatchQuality(photometric_mse, ncc, "ncc_reject");
+        logVisualPatchQuality(photometric_mse, ncc, "ncc_reject", ref_age,
+                              search_level, warp_determinant, warp_valid,
+                              ref_ftr->inv_expo_time_, state->inv_expo_time);
         continue;
       }
 
@@ -1847,17 +2843,24 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
       if (photometric_mse > outlier_threshold)
       {
         ++last_visual_photometric_rejects;
-        logVisualPatchQuality(photometric_mse, ncc, "photometric_reject");
+        logVisualPatchQuality(photometric_mse, ncc, "photometric_reject", ref_age,
+                              search_level, warp_determinant, warp_valid,
+                              ref_ftr->inv_expo_time_, state->inv_expo_time);
         continue;
       }
       ++last_visual_tracked_ref_age_count;
       last_visual_tracked_ref_age_sum += ref_age;
       last_visual_tracked_ref_age_max = std::max(last_visual_tracked_ref_age_max, ref_age);
-      logVisualPatchQuality(photometric_mse, ncc, "accepted_preliminary");
+      logVisualPatchQuality(photometric_mse, ncc, "accepted_preliminary", ref_age,
+                            search_level, warp_determinant, warp_valid,
+                            ref_ftr->inv_expo_time_, state->inv_expo_time);
 
       visual_submap->voxel_points.push_back(pt);
       visual_submap->propa_errors.push_back(error);
       visual_submap->search_levels.push_back(search_level);
+      visual_submap->ncc_scores.push_back(ncc);
+      visual_submap->photometric_mses.push_back(photometric_mse);
+      visual_submap->depths.push_back(current_visual_candidate_diagnostics.depth_z);
       visual_submap->errors.push_back(error);
       visual_submap->warp_patch.push_back(patch_wrap);
       visual_submap->inv_expo_list.push_back(ref_ftr->inv_expo_time_);
@@ -1866,6 +2869,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
     }
   }
   total_points = visual_submap->voxel_points.size();
+  assert(visual_submap->depths.size() == visual_submap->voxel_points.size());
 
   // double t3 = omp_get_wtime();
   // cout<<"C. addSubSparseMap: "<<t3-t2<<endl;
@@ -2736,8 +3740,11 @@ bool VIOManager::updateStateInverse(cv::Mat img, int level)
       last_error = error;
 
       applyPatchRobustWeights(z, H_sub);
+      recordHuberMeasurementInformation(H_sub);
+      applyVisualAdaptiveCovarianceWhitening(z, H_sub);
       if (!applyPoseObservabilityGate(H_sub))
       {
+        last_visual_observability_rejected = true;
         (*state) = old_state;
         EKF_end = true;
         break;
@@ -2955,8 +3962,11 @@ bool VIOManager::updateState(cv::Mat img, int level)
       last_error = error;
 
       applyPatchRobustWeights(z, H_sub);
+      recordHuberMeasurementInformation(H_sub);
+      applyVisualAdaptiveCovarianceWhitening(z, H_sub);
       if (!applyPoseObservabilityGate(H_sub))
       {
+        last_visual_observability_rejected = true;
         (*state) = old_state;
         EKF_end = true;
         break;
@@ -3886,11 +4896,28 @@ void VIOManager::updateStateWithBoardObservation()
   updateFrameState(*state);
 }
 
-void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map, double img_time)
+void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg,
+                              const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map,
+                              double img_time, bool tracking_only_dry_run)
 {
+  current_visual_process_begin_wall_time = omp_get_wtime();
+  last_visual_map_supply = VisualMapSupplyDiagnostics();
+  last_visual_adaptive_covariance_shadow = VisualAdaptiveCovarianceShadowDiagnostics();
   const StatesGroup state_before_frame = *state;
+  const size_t map_points_before_frame = getVisualPointCount();
+  const size_t map_voxels_before_frame = this->feat_map.size();
+  const size_t warp_cache_before_frame = warp_map.size();
+  const int frame_counter_before_frame = Frame::frame_counter_;
+  const int processed_frame_count_before_frame = frame_count;
+  const double guard_time_before_frame = last_visual_guard_time;
+  const bool guard_pos_valid_before_frame = has_last_visual_guard_pos;
+  const V3D guard_pos_before_frame = last_visual_guard_pos;
+  current_visual_tracking_only_dry_run = tracking_only_dry_run;
+  current_visual_frame_mode = tracking_only_dry_run
+      ? "TRACKING_ONLY_DRY_RUN" : "NORMAL_LIDAR_SUPPORTED";
   current_visual_time = img_time;
   last_visual_nis_rejected = false;
+  last_visual_observability_rejected = false;
   last_visual_measurement_dof = 0;
   last_visual_total_nis = std::numeric_limits<double>::quiet_NaN();
   last_visual_normalized_nis = std::numeric_limits<double>::quiet_NaN();
@@ -3901,8 +4928,17 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   last_visual_translation_max_eigenvalue = std::numeric_limits<double>::quiet_NaN();
   last_visual_translation_condition = std::numeric_limits<double>::quiet_NaN();
   last_visual_observability_suppressed_directions = 0;
+  last_visual_pose_observability = VisualPoseObservabilityDiagnostics();
+  last_visual_huber_pose_information_trace = std::numeric_limits<double>::quiet_NaN();
+  last_visual_weighted_pose_information_trace = std::numeric_limits<double>::quiet_NaN();
+  last_visual_suppressed_pose_information_trace = std::numeric_limits<double>::quiet_NaN();
   last_visual_candidate_patches = 0;
   last_visual_patch_quality_rejects = 0;
+  last_visual_search_level_low_contrast_retries = 0;
+  last_visual_search_level_low_contrast_recovered = 0;
+  last_visual_depth_discontinuity_rejects = 0;
+  last_visual_normal_uninitialized_rejects = 0;
+  last_visual_warp_invalid_candidates = 0;
   last_visual_ncc_rejects = 0;
   last_visual_photometric_rejects = 0;
   last_visual_ref_age_count = 0;
@@ -3931,6 +4967,7 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   last_visual_inside_image_candidates = 0;
   last_visual_good_tile_candidates = 0;
   last_visual_grid_candidates = 0;
+  last_visual_fov_fallback_added_grid_candidates = 0;
   last_visual_occupied_good_tiles = 0;
   last_visual_occupied_tile_ratio = 0.0;
   last_visual_horizontal_coverage = 0.0;
@@ -3938,6 +4975,15 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   last_visual_tracked_gate_pass = false;
   last_visual_relaxed_track_gate_pass = false;
   last_visual_degeneracy_relaxed_track_gate_pass = false;
+  last_visual_adaptive_covariance_relaxed_candidate = false;
+  last_visual_adaptive_covariance_relaxed_gate_pass = false;
+  current_visual_adaptive_covariance_relaxed_update = false;
+  current_visual_adaptive_point_scales.clear();
+  last_visual_adaptive_scale_distribution = VisualScalarDistribution();
+  last_visual_adaptive_ncc_distribution = VisualScalarDistribution();
+  last_visual_adaptive_photo_distribution = VisualScalarDistribution();
+  last_visual_adaptive_depth_distribution = VisualScalarDistribution();
+  last_visual_adaptive_search_level_hist = {{0, 0, 0}};
   last_visual_degeneracy_constrained_step_m = 0.0;
   last_image_quality_reject_reason = "none";
   auto rememberVisualGuardPose = [&]()
@@ -3975,7 +5021,43 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   }
 
   new_frame_.reset(new Frame(cam, img));
+  if (tracking_only_dry_run)
+  {
+    // ponytail: dry-run frames intentionally reuse the next normal frame id;
+    // no observation survives this call, so normal reference ages stay exact.
+    Frame::frame_counter_ = frame_counter_before_frame;
+  }
   updateFrameState(*state);
+
+  auto assert_tracking_only_invariants = [&]()
+  {
+    if (!tracking_only_dry_run) return;
+    const double state_delta = ((*state) - state_before_frame).norm();
+    const double covariance_delta = (state->cov - state_before_frame.cov).cwiseAbs().maxCoeff();
+    const double guard_position_delta = (last_visual_guard_pos - guard_pos_before_frame).norm();
+    const bool unchanged =
+        state_delta == 0.0 && covariance_delta == 0.0 &&
+        getVisualPointCount() == map_points_before_frame &&
+        this->feat_map.size() == map_voxels_before_frame &&
+        warp_map.size() == warp_cache_before_frame &&
+        Frame::frame_counter_ == frame_counter_before_frame &&
+        frame_count == processed_frame_count_before_frame &&
+        last_visual_guard_time == guard_time_before_frame &&
+        has_last_visual_guard_pos == guard_pos_valid_before_frame &&
+        guard_position_delta == 0.0;
+    if (unchanged) return;
+    std::ostringstream error;
+    error << "tracking-only dry-run mutated persistent state: state=" << state_delta
+          << " cov=" << covariance_delta
+          << " map_points=" << map_points_before_frame << "->" << getVisualPointCount()
+          << " map_voxels=" << map_voxels_before_frame << "->" << this->feat_map.size()
+          << " warp_cache=" << warp_cache_before_frame << "->" << warp_map.size()
+          << " frame_counter=" << frame_counter_before_frame << "->" << Frame::frame_counter_
+          << " processed_frames=" << processed_frame_count_before_frame << "->" << frame_count
+          << " guard_position=" << guard_position_delta;
+    ROS_FATAL_STREAM(error.str());
+    throw std::runtime_error(error.str());
+  };
 
   const double t_quality_begin = omp_get_wtime();
   bool image_quality_reject = false;
@@ -4111,6 +5193,14 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 
   if (image_quality_reject)
   {
+    if (tracking_only_dry_run)
+    {
+      last_visual_map_total_points_after = getVisualPointCount();
+      last_visual_map_voxels_after = this->feat_map.size();
+      logVisualFunnel("tracking_only_dry_run_bad_image_quality", false, false, false);
+      assert_tracking_only_invariants();
+      return;
+    }
     resetGrid();
     current_board_observations_.clear();
     aruco_time_detect_markers = 0.0;
@@ -4176,7 +5266,18 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
 
   retrieveFromVisualSparseMap(img, pg, feat_map);
   updateTrackedSpatialCoverage();
+  if (!tracking_only_dry_run && visual_adaptive_covariance_shadow_en)
+    evaluateVisualAdaptiveCovarianceShadow(img);
   const double t_retrieve = omp_get_wtime() - t1;
+
+  if (tracking_only_dry_run)
+  {
+    last_visual_map_total_points_after = getVisualPointCount();
+    last_visual_map_voxels_after = this->feat_map.size();
+    logVisualFunnel("tracking_only_dry_run", false, false, false);
+    assert_tracking_only_invariants();
+    return;
+  }
 
   const bool run_aruco_this_frame = aruco_landmarks_en && (aruco_process_stride <= 1 || (frame_count % aruco_process_stride == 0));
   if (run_aruco_this_frame)
@@ -4201,6 +5302,20 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
       total_points >= low_track_force_min_points &&
       (frame_count % low_track_force_update_stride == 0);
   const bool normal_track_gate_pass = total_points >= min_retrieve_points;
+  last_visual_adaptive_covariance_relaxed_candidate =
+      visual_adaptive_covariance_relaxed_en && !normal_track_gate_pass &&
+      total_points >= visual_adaptive_covariance_relaxed_min_points &&
+      total_points < min_retrieve_points;
+  last_visual_adaptive_covariance_relaxed_gate_pass =
+      last_visual_adaptive_covariance_relaxed_candidate &&
+      last_visual_occupied_good_tiles >= relaxed_min_occupied_good_tiles &&
+      last_visual_horizontal_coverage >= relaxed_min_horizontal_coverage &&
+      last_visual_vertical_coverage >= relaxed_min_vertical_coverage;
+  current_visual_adaptive_covariance_relaxed_update =
+      last_visual_adaptive_covariance_relaxed_gate_pass;
+  if (total_points >= 15)
+    prepareVisualAdaptiveCovarianceDiagnostics(
+        current_visual_adaptive_covariance_relaxed_update);
   const bool regular_relaxed_track_gate_pass =
       visual_spatial_coverage_gate_en && !normal_track_gate_pass &&
       total_points >= relaxed_min_retrieve_points &&
@@ -4216,14 +5331,17 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
       last_visual_horizontal_coverage >= degeneracy_relaxed_min_horizontal_coverage &&
       last_visual_vertical_coverage >= degeneracy_relaxed_min_vertical_coverage;
   last_visual_relaxed_track_gate_pass =
-      regular_relaxed_track_gate_pass || last_visual_degeneracy_relaxed_track_gate_pass;
+      regular_relaxed_track_gate_pass || last_visual_degeneracy_relaxed_track_gate_pass ||
+      last_visual_adaptive_covariance_relaxed_gate_pass;
   last_visual_tracked_gate_pass = normal_track_gate_pass || last_visual_relaxed_track_gate_pass;
   const bool skip_visual_ekf = !last_visual_tracked_gate_pass && !low_track_force_update;
   const bool print_console =
       console_timing_print_en &&
       ((frame_count % std::max(1, console_timing_print_stride)) == 0);
   const std::string track_gate_skip_reason =
-      visual_spatial_coverage_gate_en && total_points >= relaxed_min_retrieve_points ?
+      ((visual_adaptive_covariance_relaxed_en &&
+        total_points >= visual_adaptive_covariance_relaxed_min_points) ||
+       (visual_spatial_coverage_gate_en && total_points >= relaxed_min_retrieve_points)) ?
           "insufficient_tracked_spatial_coverage" : "low_tracked_points";
   double t2 = omp_get_wtime();
 
@@ -4457,6 +5575,9 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
                    aruco_update_ran);
     logVisualFunnel(aruco_update_ran ? "direct_low_tracks_aruco_only" : track_gate_skip_reason,
                     false, false, aruco_update_ran);
+    logVisualAdaptiveCovarianceRelaxed(
+        aruco_update_ran ? "direct_low_tracks_aruco_only" : track_gate_skip_reason,
+        false, false, false, false, state_before_visual_update, *state);
 
     rememberVisualGuardPose();
     return;
@@ -4638,6 +5759,9 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
       }
 
       logVisualFunnel(visual_update_reject_reason, true, true, false);
+      logVisualAdaptiveCovarianceRelaxed(
+          visual_update_reject_reason, true, false, true, true,
+          state_before_visual_update, attempted_state);
       rememberVisualGuardPose();
       return;
     }
@@ -4832,5 +5956,12 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg, const unor
   logVisualFunnel(visual_ekf_updated ? "none" :
                       (last_visual_nis_rejected ? "normalized_nis" : "ekf_no_valid_measurement"),
                   true, false, visual_ekf_updated);
+  logVisualAdaptiveCovarianceRelaxed(
+      visual_ekf_updated ? "none" :
+          (last_visual_nis_rejected ? "normalized_nis" :
+           (last_visual_observability_rejected ? "observability_reject" :
+            "ekf_no_valid_measurement")),
+      true, visual_ekf_updated, false, false,
+      state_before_visual_update, *state);
   rememberVisualGuardPose();
 }
