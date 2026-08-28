@@ -12,6 +12,7 @@ This file is part of FAST-LIVO2: Fast, Direct LiDAR-Inertial-Visual Odometry.
 
 #include <Eigen/Core>
 #include <fast_livo/GnssStatus.h>
+#include <geometry_msgs/PoseWithCovarianceStamped.h>
 #include <gnss_comm/GnssPVTSolnMsg.h>
 #include <gnss_serial_driver/GnssPvtStamped.h>
 #include <nav_msgs/Odometry.h>
@@ -35,6 +36,9 @@ struct GnssAdapterConfig
   std::string output_odom_topic = "/gnss/enu_odom";
   std::string output_status_topic = "/gnss/status";
   bool publish_local_enu_odometry = true;
+  int pose_input_quality = static_cast<int>(GnssQuality::RTK_FLOAT);
+  int pose_input_num_sv = 0;
+  bool gnss_pose_covariance_authoritative = false;
 
   std::string origin_mode = "first_fixed";
   Eigen::Vector3d origin_lla = Eigen::Vector3d::Zero();
@@ -104,6 +108,9 @@ public:
                             const ros::Time &callback_time);
   GnssAdapterResult process(const gnss_serial_driver::GnssPvtStamped &message,
                             const ros::Time &callback_time);
+  GnssAdapterResult process(
+      const geometry_msgs::PoseWithCovarianceStamped &message,
+      const ros::Time &callback_time);
 
 private:
   enum class TrackingState
@@ -120,6 +127,8 @@ private:
   void legacyPvtCallback(const gnss_comm::GnssPVTSolnMsgConstPtr &message);
   void stampedLocalPvtCallback(
       const gnss_serial_driver::GnssPvtStampedConstPtr &message);
+  void poseWithCovarianceCallback(
+      const geometry_msgs::PoseWithCovarianceStampedConstPtr &message);
   GnssAdapterResult processPvt(const gnss_comm::GnssPVTSolnMsg &message,
                                const ros::Time &measurement_stamp,
                                bool local_measurement_time_valid,
@@ -156,6 +165,8 @@ private:
   void logResult(const gnss_comm::GnssPVTSolnMsg &message,
                  const ros::Time &callback_time,
                  const GnssAdapterResult &result) const;
+  void logPoseResult(const ros::Time &callback_time,
+                     const GnssAdapterResult &result) const;
 
   GnssAdapterConfig config_;
   ros::Subscriber pvt_subscriber_;

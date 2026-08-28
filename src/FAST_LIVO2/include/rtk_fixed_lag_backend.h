@@ -217,6 +217,7 @@ class RtkFixedLagBackend {
     double quality_sigma_scale = 1.0;
     double satellite_sigma_scale = 1.0;
     double recovery_sigma_scale = 1.0;
+    bool covariance_authoritative = false;
   };
 
   struct UwbMeasurement {
@@ -266,6 +267,12 @@ class RtkFixedLagBackend {
   bool gnssQualityAccepted(std::uint8_t quality) const;
   double gnssQualitySigmaScale(const fast_livo::GnssStatus &status,
                                double *satellite_scale) const;
+  gtsam::Vector3 clampGnssSigmas(const gtsam::Vector3 &sigmas,
+                                 double sigma_scale) const;
+  gtsam::Vector3 gnssBaseSigmas(const gtsam::Vector3 &reported_sigmas,
+                                const fast_livo::GnssStatus &status,
+                                double *quality_scale,
+                                double *satellite_scale) const;
   double updateGnssRecoverySigmaScale(const ros::Time &stamp);
   bool gnssRecoveryFloatFactorRateLimited(
       const GnssMeasurement &measurement) const;

@@ -128,6 +128,11 @@ bool GnssAdapter::initialize(ros::NodeHandle &nh)
     pvt_subscriber_ = nh.subscribe(config_.input_topic, kSubscriberQueueSize,
                                    &GnssAdapter::stampedLocalPvtCallback, this);
   }
+  else if (config_.input_mode == "pose_with_covariance_stamped")
+  {
+    pvt_subscriber_ = nh.subscribe(config_.input_topic, kSubscriberQueueSize,
+                                   &GnssAdapter::poseWithCovarianceCallback, this);
+  }
   else
   {
     pvt_subscriber_ = nh.subscribe(config_.input_topic, kSubscriberQueueSize,
@@ -158,6 +163,13 @@ bool GnssAdapter::loadConfig(ros::NodeHandle &nh, GnssAdapterConfig &config) con
   params.param<std::string>("output_status_topic", config.output_status_topic, config.output_status_topic);
   params.param<bool>("publish_local_enu_odometry", config.publish_local_enu_odometry,
                      config.publish_local_enu_odometry);
+  params.param<int>("pose_input_quality", config.pose_input_quality,
+                    config.pose_input_quality);
+  params.param<int>("pose_input_num_sv", config.pose_input_num_sv,
+                    config.pose_input_num_sv);
+  params.param<bool>("gnss_pose_covariance_authoritative",
+                     config.gnss_pose_covariance_authoritative,
+                     config.gnss_pose_covariance_authoritative);
 
   params.param<std::string>("origin_mode", config.origin_mode, config.origin_mode);
   if (!loadVector3(params, "origin_lla", config.origin_lla)) return false;
@@ -205,9 +217,23 @@ bool GnssAdapter::loadConfig(ros::NodeHandle &nh, GnssAdapterConfig &config) con
 bool GnssAdapter::validateConfig(const GnssAdapterConfig &config) const
 {
   if (config.input_mode != "legacy_gnss_comm" &&
-      config.input_mode != "stamped_local")
+      config.input_mode != "stamped_local" &&
+      config.input_mode != "pose_with_covariance_stamped")
   {
-    ROS_ERROR("[GNSS_ADAPTER] input_mode must be legacy_gnss_comm or stamped_local.");
+    ROS_ERROR("[GNSS_ADAPTER] input_mode must be legacy_gnss_comm, stamped_local, or pose_with_covariance_stamped.");
+    return false;
+  }
+  if (config.pose_input_quality < static_cast<int>(GnssQuality::SINGLE) ||
+      config.pose_input_quality > static_cast<int>(GnssQuality::RTK_FIXED) ||
+      config.pose_input_num_sv < 0 || config.pose_input_num_sv > 255)
+  {
+    ROS_ERROR("[GNSS_ADAPTER] pose_input_quality must be 1..4 and pose_input_num_sv must be 0..255.");
+    return false;
+  }
+  if (config.input_mode == "pose_with_covariance_stamped" &&
+      !config.publish_local_enu_odometry)
+  {
+    ROS_ERROR("[GNSS_ADAPTER] pose_with_covariance_stamped requires publish_local_enu_odometry=true.");
     return false;
   }
   if (config.origin_mode != "manual" && config.origin_mode != "first_fixed" &&
@@ -301,6 +327,16 @@ void GnssAdapter::stampedLocalPvtCallback(
   status_publisher_.publish(result.status);
   if (result.publish_odometry) odom_publisher_.publish(result.odometry);
   logResult(message->pvt, callback_time, result);
+}
+
+void GnssAdapter::poseWithCovarianceCallback(
+    const geometry_msgs::PoseWithCovarianceStampedConstPtr &message)
+{
+  const ros::Time callback_time = ros::Time::now();
+  const GnssAdapterResult result = process(*message, callback_time);
+  status_publisher_.publish(result.status);
+  if (result.publish_odometry) odom_publisher_.publish(result.odometry);
+  logPoseResult(callback_time, result);
 }
 
 bool GnssAdapter::convertGpsToUtc(uint32_t week, double tow, ros::Time &stamp) const
@@ -658,6 +694,93 @@ GnssAdapterResult GnssAdapter::process(
                     message.local_measurement_time_valid,
                     message.valid_for_fusion, true, message.session_id,
                     message.writer_epoch, callback_time);
+}
+
+GnssAdapterResult GnssAdapter::process(
+    const geometry_msgs::PoseWithCovarianceStamped &message,
+    const ros::Time &callback_time)
+{
+  (void)callback_time;
+  std::lock_guard<std::mutex> lock(mutex_);
+  GnssAdapterResult result;
+  fast_livo::GnssStatus &status = result.status;
+  status.header.stamp = message.header.stamp;
+  status.header.frame_id = config_.frame_id;
+  status.num_sv = static_cast<uint8_t>(config_.pose_input_num_sv);
+  status.origin_initialized = true;
+  status.covariance_authoritative =
+      config_.gnss_pose_covariance_authoritative;
+
+  const auto reject = [&](const std::string &reason) {
+    status.raw_quality = static_cast<uint8_t>(GnssQuality::INVALID);
+    status.filtered_quality = static_cast<uint8_t>(GnssQuality::INVALID);
+    status.valid_fix = false;
+    status.accepted = false;
+    status.reject_reason = reason;
+    return result;
+  };
+  if (!config_.enable) return reject("ADAPTER_DISABLED");
+  if (message.header.stamp.isZero()) return reject("ZERO_MEASUREMENT_TIMESTAMP");
+
+  const geometry_msgs::Point &position = message.pose.pose.position;
+  const double covariance_x = message.pose.covariance[0];
+  const double covariance_y = message.pose.covariance[7];
+  const double covariance_z = message.pose.covariance[14];
+  if (!std::isfinite(position.x) || !std::isfinite(position.y) ||
+      !std::isfinite(position.z))
+    return reject("INVALID_ENU_POSITION");
+  if (!std::isfinite(covariance_x) || !std::isfinite(covariance_y) ||
+      !std::isfinite(covariance_z) || covariance_x <= 0.0 ||
+      covariance_y <= 0.0 || covariance_z <= 0.0)
+    return reject("INVALID_POSITION_COVARIANCE");
+
+  const std::int64_t measurement_time_ns =
+      static_cast<std::int64_t>(message.header.stamp.toNSec());
+  if (have_last_measurement_time_)
+  {
+    const std::int64_t delta_ns = measurement_time_ns - last_measurement_time_ns_;
+    if (std::abs(delta_ns) <= kTimestampEqualityToleranceNs)
+      return reject("DUPLICATE_GNSS_TIME");
+    if (delta_ns < 0 && config_.require_monotonic_time)
+      return reject("NON_MONOTONIC_TIME");
+  }
+  have_last_measurement_time_ = true;
+  last_measurement_time_ns_ = measurement_time_ns;
+
+  // ponytail: this wire format omits per-epoch solution metadata; use one
+  // explicit configured quality instead of inventing a hidden heuristic.
+  const GnssQuality quality =
+      static_cast<GnssQuality>(config_.pose_input_quality);
+  status.raw_quality = static_cast<uint8_t>(quality);
+  status.filtered_quality = static_cast<uint8_t>(quality);
+  status.valid_fix = true;
+  status.diff_soln = quality != GnssQuality::SINGLE;
+  status.fix_type = 3;
+  status.carr_soln = quality == GnssQuality::RTK_FIXED
+                         ? 2
+                         : (quality == GnssQuality::RTK_FLOAT ? 1 : 0);
+  status.h_acc = std::sqrt(std::max(covariance_x, covariance_y));
+  status.v_acc = std::sqrt(covariance_z);
+  status.accepted = qualityAccepted(quality);
+  if (!status.accepted)
+  {
+    status.reject_reason = "QUALITY_NOT_ENABLED";
+    return result;
+  }
+
+  result.odometry.header.stamp = message.header.stamp;
+  result.odometry.header.frame_id = config_.frame_id;
+  result.odometry.child_frame_id = config_.child_frame_id;
+  result.odometry.pose = message.pose;
+  result.odometry.pose.pose.orientation.x = 0.0;
+  result.odometry.pose.pose.orientation.y = 0.0;
+  result.odometry.pose.pose.orientation.z = 0.0;
+  result.odometry.pose.pose.orientation.w = 1.0;
+  result.odometry.twist.covariance[21] = kUnknownOrientationVariance;
+  result.odometry.twist.covariance[28] = kUnknownOrientationVariance;
+  result.odometry.twist.covariance[35] = kUnknownOrientationVariance;
+  result.publish_odometry = true;
+  return result;
 }
 
 GnssAdapterResult GnssAdapter::processPvt(
@@ -1066,4 +1189,34 @@ void GnssAdapter::logResult(const gnss_comm::GnssPVTSolnMsg &message,
       << " stamp=" << result.status.header.stamp.toSec()
       << " callback_time=" << callback_time.toSec()
       << " time_delta=" << time_delta_s);
+}
+
+void GnssAdapter::logPoseResult(const ros::Time &callback_time,
+                                const GnssAdapterResult &result) const
+{
+  const double time_delta_s =
+      callback_time.toSec() - result.status.header.stamp.toSec();
+  if (!result.status.accepted)
+  {
+    ROS_WARN_STREAM_THROTTLE(
+        config_.log_interval_s,
+        "[GNSS_ADAPTER_REJECT] mode=pose_with_covariance_stamped reason="
+            << result.status.reject_reason
+            << " stamp=" << std::setprecision(15)
+            << result.status.header.stamp.toSec());
+    return;
+  }
+  const geometry_msgs::Point &position = result.odometry.pose.pose.position;
+  ROS_INFO_STREAM_THROTTLE(
+      config_.log_interval_s,
+      "[GNSS_ADAPTER] mode=pose_with_covariance_stamped quality="
+          << qualityName(static_cast<GnssQuality>(result.status.raw_quality))
+          << " quality_source=configured_no_per_epoch_metadata"
+          << " covariance_authoritative="
+          << (result.status.covariance_authoritative ? 1 : 0)
+          << " local_enu=[" << position.x << " " << position.y << " "
+          << position.z << "] stamp=" << std::setprecision(15)
+          << result.status.header.stamp.toSec()
+          << " callback_time=" << callback_time.toSec()
+          << " time_delta=" << time_delta_s);
 }

@@ -35,6 +35,17 @@ struct RtkFixedLagBackendSelfTestAccess {
     bool recovery_float_rate_applied_after_fade = false;
   };
 
+  struct AuthoritativeCovarianceResult {
+    gtsam::Vector3 legacy_sigmas = gtsam::Vector3::Zero();
+    gtsam::Vector3 fixed_like_sigmas = gtsam::Vector3::Zero();
+    gtsam::Vector3 float_like_sigmas = gtsam::Vector3::Zero();
+    gtsam::Vector3 clamped_sigmas = gtsam::Vector3::Zero();
+    gtsam::Vector3 recovery_sigmas = gtsam::Vector3::Zero();
+    double authoritative_quality_scale = 0.0;
+    double authoritative_satellite_scale = 0.0;
+    double recovery_scale = 0.0;
+  };
+
   struct BoundaryResult {
     bool alignment_ready = false;
     std::set<std::int64_t> factor_stamps;
@@ -335,6 +346,49 @@ struct RtkFixedLagBackendSelfTestAccess {
     return result;
   }
 
+  static AuthoritativeCovarianceResult runAuthoritativeCovarianceCheck() {
+    RtkFixedLagBackend backend;
+    backend.config_.min_gnss_sigma_xy_m = 0.03;
+    backend.config_.min_gnss_sigma_z_m = 0.05;
+    backend.config_.max_gnss_sigma_xy_m = 2.0;
+    backend.config_.max_gnss_sigma_z_m = 3.0;
+    backend.config_.rtk_float_sigma_scale = 3.0;
+    backend.config_.rtk_float_reference_satellites = 10;
+    backend.config_.rtk_float_satellite_sigma_scale_max = 1.5;
+    backend.config_.gnss_recovery_gap_threshold_s = 5.0;
+    backend.config_.gnss_recovery_ramp_duration_s = 10.0;
+    backend.config_.gnss_recovery_initial_sigma_scale = 4.0;
+
+    fast_livo::GnssStatus status;
+    status.raw_quality = fast_livo::GnssStatus::RTK_FLOAT;
+    status.num_sv = 7;
+    double quality_scale = 0.0;
+    double satellite_scale = 0.0;
+    AuthoritativeCovarianceResult result;
+    result.legacy_sigmas = backend.gnssBaseSigmas(
+        gtsam::Vector3(0.25, 0.25, 0.5), status, &quality_scale,
+        &satellite_scale);
+
+    status.covariance_authoritative = true;
+    result.fixed_like_sigmas = backend.gnssBaseSigmas(
+        gtsam::Vector3(0.25, 0.25, 0.5), status,
+        &result.authoritative_quality_scale,
+        &result.authoritative_satellite_scale);
+    result.float_like_sigmas = backend.gnssBaseSigmas(
+        gtsam::Vector3(1.5, 1.5, 2.5), status, &quality_scale,
+        &satellite_scale);
+    result.clamped_sigmas = backend.gnssBaseSigmas(
+        gtsam::Vector3(5.0, 4.0, 8.0), status, &quality_scale,
+        &satellite_scale);
+
+    backend.last_added_gnss_factor_stamp_ns_ = 1'000'000'000LL;
+    result.recovery_scale =
+        backend.updateGnssRecoverySigmaScale(ros::Time(11, 0));
+    result.recovery_sigmas = backend.clampGnssSigmas(
+        result.fixed_like_sigmas, result.recovery_scale);
+    return result;
+  }
+
   static gtsam::Pose3 runResultReferenceCheck() {
     const gtsam::Pose3 body_pose(gtsam::Rot3::Rz(M_PI_2),
                                  gtsam::Point3(1.0, 2.0, 3.0));
@@ -612,6 +666,32 @@ void testGnssWeightingAndRecoveryRamp() {
           "GNSS recovery must hold Float weak until stable Fixed factors");
 }
 
+void testAuthoritativeGnssCovariance() {
+  const auto result = fast_livo_backend::RtkFixedLagBackendSelfTestAccess::
+      runAuthoritativeCovarianceCheck();
+  const double legacy_scale = 3.0 * std::sqrt(10.0 / 7.0);
+  require((result.legacy_sigmas -
+           gtsam::Vector3(0.25 * legacy_scale, 0.25 * legacy_scale,
+                          0.5 * legacy_scale))
+                  .norm() < 1e-12,
+          "non-authoritative Pose/legacy covariance behavior changed");
+  require((result.fixed_like_sigmas - gtsam::Vector3(0.25, 0.25, 0.5))
+                  .norm() < 1e-12 &&
+              std::abs(result.authoritative_quality_scale - 1.0) < 1e-12 &&
+              std::abs(result.authoritative_satellite_scale - 1.0) < 1e-12,
+          "authoritative Fixed-like covariance was inflated again");
+  require((result.float_like_sigmas - gtsam::Vector3(1.5, 1.5, 2.5))
+                  .norm() < 1e-12,
+          "authoritative Float-like covariance was inflated again");
+  require((result.clamped_sigmas - gtsam::Vector3(2.0, 2.0, 3.0)).norm() <
+              1e-12,
+          "authoritative covariance did not retain configured max clamps");
+  require(std::abs(result.recovery_scale - 4.0) < 1e-12 &&
+              (result.recovery_sigmas - gtsam::Vector3(1.0, 1.0, 2.0))
+                      .norm() < 1e-12,
+          "authoritative covariance bypassed the existing recovery scale");
+}
+
 void testResultReferenceLeverArm() {
   const gtsam::Pose3 result =
       fast_livo_backend::RtkFixedLagBackendSelfTestAccess::
@@ -674,6 +754,7 @@ int main() {
     testFilteredFixedDoesNotResetAlignment();
     testGnssQualityPolicy();
     testGnssWeightingAndRecoveryRamp();
+    testAuthoritativeGnssCovariance();
     testResultReferenceLeverArm();
     testTrueFixedLagMarginalization();
     testStandardFixedLagMarginalization();

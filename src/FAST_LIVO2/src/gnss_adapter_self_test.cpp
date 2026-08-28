@@ -82,6 +82,63 @@ gnss_serial_driver::GnssPvtStamped stampedFixed(std::uint64_t stamp_ns)
   return message;
 }
 
+geometry_msgs::PoseWithCovarianceStamped poseMeasurement(
+    std::uint64_t stamp_ns)
+{
+  geometry_msgs::PoseWithCovarianceStamped message;
+  message.header.stamp.fromNSec(stamp_ns);
+  message.header.frame_id = "gnss_enu";
+  message.pose.pose.position.x = 12.0;
+  message.pose.pose.position.y = -3.0;
+  message.pose.pose.position.z = 0.5;
+  message.pose.pose.orientation.w = 1.0;
+  message.pose.covariance[0] = 0.25;
+  message.pose.covariance[7] = 0.36;
+  message.pose.covariance[14] = 1.0;
+  return message;
+}
+
+void testPoseWithCovarianceInput()
+{
+  GnssAdapterConfig config = manualConfig();
+  config.input_mode = "pose_with_covariance_stamped";
+  config.pose_input_quality = static_cast<int>(GnssQuality::RTK_FLOAT);
+  config.accept_rtk_float = true;
+  config.gnss_pose_covariance_authoritative = true;
+  GnssAdapter adapter(config);
+  const std::uint64_t stamp_ns = 1785900504400000000ULL;
+  const GnssAdapterResult result =
+      adapter.process(poseMeasurement(stamp_ns), ros::Time(9, 0));
+  check(result.status.accepted && result.publish_odometry,
+        "valid pose-with-covariance GNSS must publish paired status/odometry");
+  check(result.status.header.stamp.toNSec() == stamp_ns &&
+        result.odometry.header.stamp.toNSec() == stamp_ns,
+        "pose-with-covariance input must preserve its measurement timestamp");
+  check(result.status.raw_quality == fast_livo::GnssStatus::RTK_FLOAT &&
+        result.status.num_sv == 0 &&
+        result.status.covariance_authoritative,
+        "pose input must expose configured quality without inventing satellites");
+  check(near(result.odometry.pose.pose.position.x, 12.0) &&
+        near(result.odometry.pose.pose.position.y, -3.0) &&
+        near(result.odometry.pose.pose.position.z, 0.5) &&
+        near(result.odometry.pose.covariance[0], 0.25) &&
+        near(result.odometry.pose.covariance[7], 0.36) &&
+        near(result.odometry.pose.covariance[14], 1.0),
+        "pose input ENU and covariance must pass through unchanged");
+
+  auto invalid = poseMeasurement(stamp_ns + 100000000ULL);
+  invalid.pose.covariance[14] = 0.0;
+  check(adapter.process(invalid, ros::Time(9, 0)).status.reject_reason ==
+            "INVALID_POSITION_COVARIANCE",
+        "non-positive pose covariance must be rejected");
+
+  config.gnss_pose_covariance_authoritative = false;
+  GnssAdapter legacy_pose_adapter(config);
+  check(!legacy_pose_adapter.process(poseMeasurement(stamp_ns), ros::Time(9, 0))
+             .status.covariance_authoritative,
+        "Pose authoritative covariance must remain opt-in");
+}
+
 void testStampedLocalTimeAndMetadataGates()
 {
   GnssAdapter adapter(manualConfig());
@@ -514,6 +571,7 @@ int main()
 {
   try
   {
+    testPoseWithCovarianceInput();
     testStampedLocalTimeAndMetadataGates();
     testStampedLocalLossAndRecovery();
     testFixedStateIgnoresUnavailableAccuracyRecord();

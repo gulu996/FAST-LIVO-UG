@@ -23,6 +23,9 @@ float64 vel_acc
 
 bool origin_initialized
 bool accepted
+# True only when the source position covariance is the complete uncertainty
+# model and downstream quality/satellite inflation must not be applied again.
+bool covariance_authoritative
 
 uint32 consecutive_fixed_count
 uint32 consecutive_lost_count

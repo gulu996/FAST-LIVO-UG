@@ -1,12 +1,18 @@
 gnss_adapter:
   enable: true
-  input_mode: "stamped_local"
-  input_topic: "/gnss/pvt_local"
-  output_odom_topic: "/gnss_fusion/enu_odom"
+  # New offline solution bag: precomputed BASE-origin ENU with 6x6 pose
+  # covariance. The message does not contain per-epoch RTK quality/satellite
+  # metadata, so classify it conservatively as Float and keep num_sv unknown.
+  input_mode: "pose_with_covariance_stamped"
+  input_topic: "/tiaozhanbei/gnss/pose"
+  output_odom_topic: "/gnss/enu_odom"
   output_status_topic: "/gnss_fusion/status"
-  # The bag carries BASE-RINEX-origin ENU on /gnss/enu_odom. Keep this adapter
-  # only for the existing Fixed/Float state machine and quality gates.
-  publish_local_enu_odometry: false
+  publish_local_enu_odometry: true
+  pose_input_quality: 3  # GnssStatus.RTK_FLOAT; source message has no quality.
+  pose_input_num_sv: 0   # Unknown; do not invent a satellite count.
+  # The producer already encodes its complete Fixed/Float uncertainty policy
+  # in pose.covariance. Do not apply backend quality/satellite inflation again.
+  gnss_pose_covariance_authoritative: true
 
   # Unused in status-only mode; retained as valid defaults for the shared adapter.
   origin_mode: "average_fixed"

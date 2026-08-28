@@ -1195,6 +1195,30 @@ double RtkFixedLagBackend::gnssQualitySigmaScale(
   return config_.rtk_float_sigma_scale;
 }
 
+gtsam::Vector3 RtkFixedLagBackend::clampGnssSigmas(
+    const gtsam::Vector3 &sigmas, double sigma_scale) const {
+  return gtsam::Vector3(
+      clamp(std::max(sigmas.x(), config_.min_gnss_sigma_xy_m) * sigma_scale,
+            config_.min_gnss_sigma_xy_m, config_.max_gnss_sigma_xy_m),
+      clamp(std::max(sigmas.y(), config_.min_gnss_sigma_xy_m) * sigma_scale,
+            config_.min_gnss_sigma_xy_m, config_.max_gnss_sigma_xy_m),
+      clamp(std::max(sigmas.z(), config_.min_gnss_sigma_z_m) * sigma_scale,
+            config_.min_gnss_sigma_z_m, config_.max_gnss_sigma_z_m));
+}
+
+gtsam::Vector3 RtkFixedLagBackend::gnssBaseSigmas(
+    const gtsam::Vector3 &reported_sigmas,
+    const fast_livo::GnssStatus &status, double *quality_scale,
+    double *satellite_scale) const {
+  *quality_scale = 1.0;
+  *satellite_scale = 1.0;
+  if (!status.covariance_authoritative) {
+    *quality_scale = gnssQualitySigmaScale(status, satellite_scale);
+  }
+  return clampGnssSigmas(reported_sigmas,
+                         *quality_scale * *satellite_scale);
+}
+
 double RtkFixedLagBackend::updateGnssRecoverySigmaScale(
     const ros::Time &stamp) {
   const std::int64_t stamp_ns = stampNanoseconds(stamp);
@@ -1428,23 +1452,10 @@ void RtkFixedLagBackend::processAcceptedGnss(
   measurement.raw_quality = status.raw_quality;
   measurement.filtered_quality = status.filtered_quality;
   measurement.num_sv = status.num_sv;
-  measurement.quality_sigma_scale =
-      gnssQualitySigmaScale(status, &measurement.satellite_sigma_scale);
-  const double total_scale = measurement.quality_sigma_scale *
-                             measurement.satellite_sigma_scale;
-  measurement.sigmas = gtsam::Vector3(
-      clamp(std::max(measurement.reported_sigmas.x(),
-                     config_.min_gnss_sigma_xy_m) *
-                total_scale,
-            config_.min_gnss_sigma_xy_m, config_.max_gnss_sigma_xy_m),
-      clamp(std::max(measurement.reported_sigmas.y(),
-                     config_.min_gnss_sigma_xy_m) *
-                total_scale,
-            config_.min_gnss_sigma_xy_m, config_.max_gnss_sigma_xy_m),
-      clamp(std::max(measurement.reported_sigmas.z(),
-                     config_.min_gnss_sigma_z_m) *
-                total_scale,
-            config_.min_gnss_sigma_z_m, config_.max_gnss_sigma_z_m));
+  measurement.covariance_authoritative = status.covariance_authoritative;
+  measurement.sigmas = gnssBaseSigmas(
+      measurement.reported_sigmas, status, &measurement.quality_sigma_scale,
+      &measurement.satellite_sigma_scale);
   last_enqueued_gnss_stamp_ns_ = stamp_ns;
 
   if (!alignment_.valid) {
@@ -2002,16 +2013,8 @@ bool RtkFixedLagBackend::addGnssFactor(
   GnssMeasurement effective_measurement = measurement;
   effective_measurement.recovery_sigma_scale =
       updateGnssRecoverySigmaScale(measurement.stamp);
-  effective_measurement.sigmas = gtsam::Vector3(
-      clamp(measurement.sigmas.x() *
-                effective_measurement.recovery_sigma_scale,
-            config_.min_gnss_sigma_xy_m, config_.max_gnss_sigma_xy_m),
-      clamp(measurement.sigmas.y() *
-                effective_measurement.recovery_sigma_scale,
-            config_.min_gnss_sigma_xy_m, config_.max_gnss_sigma_xy_m),
-      clamp(measurement.sigmas.z() *
-                effective_measurement.recovery_sigma_scale,
-            config_.min_gnss_sigma_z_m, config_.max_gnss_sigma_z_m));
+  effective_measurement.sigmas = clampGnssSigmas(
+      measurement.sigmas, effective_measurement.recovery_sigma_scale);
   const bool starts_recovery =
       last_added_gnss_factor_stamp_ns_ >= 0 &&
       static_cast<double>(measurement_stamp_ns -
@@ -2128,11 +2131,16 @@ bool RtkFixedLagBackend::addGnssFactor(
          << " filtered_quality="
          << gnssQualityName(effective_measurement.filtered_quality)
          << " satellites=" << static_cast<int>(effective_measurement.num_sv)
+         << " covariance_authoritative="
+         << effective_measurement.covariance_authoritative
+         << " quality_metadata_available="
+         << !effective_measurement.covariance_authoritative
          << " reported_sigmas=["
          << effective_measurement.reported_sigmas.transpose()
          << "] quality_scale=" << effective_measurement.quality_sigma_scale
          << " satellite_scale="
          << effective_measurement.satellite_sigma_scale
+         << " base_sigmas=[" << measurement.sigmas.transpose() << "]"
          << " recovery_scale="
          << effective_measurement.recovery_sigma_scale
          << " recovery_fixed_factors="
