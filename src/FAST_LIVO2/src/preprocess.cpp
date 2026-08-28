@@ -12,8 +12,61 @@ which is included as part of this source code package.
 
 #include "preprocess.h"
 
+#include <iomanip>
+
 #define RETURN0 0x00
 #define RETURN0AND1 0x10
+
+namespace
+{
+const sensor_msgs::PointField *findPointField(
+    const sensor_msgs::PointCloud2 &message, const std::string &name)
+{
+  for (const auto &field : message.fields)
+    if (field.name == name) return &field;
+  return nullptr;
+}
+
+bool isFloat64Scalar(const sensor_msgs::PointField *field)
+{
+  return field != nullptr && field->datatype == sensor_msgs::PointField::FLOAT64 &&
+         field->count == 1;
+}
+
+template <typename PointT, typename RelativeTime>
+void appendXyzirtSurface(const pcl::PointCloud<PointT> &input,
+                         int point_filter_num, double blind_sqr,
+                         RelativeTime relative_time,
+                         PointCloudXYZI &output)
+{
+  output.reserve(input.size());
+  for (std::size_t i = 0; i < input.size(); ++i)
+  {
+    if (i % point_filter_num != 0) continue;
+
+    const auto &pt = input.points[i];
+    const double point_time_s = relative_time(pt);
+    const double dist_sqr = static_cast<double>(pt.x) * pt.x +
+                            static_cast<double>(pt.y) * pt.y +
+                            static_cast<double>(pt.z) * pt.z;
+    if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z) ||
+        !std::isfinite(point_time_s) || point_time_s < 0.0 ||
+        dist_sqr < blind_sqr)
+      continue;
+
+    PointType added_pt;
+    added_pt.x = pt.x;
+    added_pt.y = pt.y;
+    added_pt.z = pt.z;
+    added_pt.intensity = pt.intensity;
+    added_pt.normal_x = 0;
+    added_pt.normal_y = 0;
+    added_pt.normal_z = 0;
+    added_pt.curvature = point_time_s * 1000.0;
+    output.push_back(added_pt);
+  }
+}
+} // namespace
 
 Preprocess::Preprocess() : feature_enabled(0), lidar_type(AVIA), blind(0.01), point_filter_num(1)
 {
@@ -753,41 +806,83 @@ void Preprocess::xyzirt_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
   pl_corn.clear();
   pl_full.clear();
 
-  pcl::PointCloud<xyzirt_ros::Point> pl_orig;
-  pcl::fromROSMsg(*msg, pl_orig);
-  pl_surf.reserve(pl_orig.size());
+  const sensor_msgs::PointField *offset_time_field =
+      findPointField(*msg, "offset_time");
+  const sensor_msgs::PointField *time_field = findPointField(*msg, "time");
+  const bool use_offset_time = offset_time_field != nullptr;
+  const sensor_msgs::PointField *selected_time_field =
+      use_offset_time ? offset_time_field : time_field;
+  const char *selected_time_name = use_offset_time ? "offset_time" : "time";
+  if (selected_time_field == nullptr)
+  {
+    ROS_ERROR_ONCE("XYZIRT PointCloud2 has neither offset_time nor time; "
+                   "refusing silent zero-time deskew.");
+    return;
+  }
+  if (!isFloat64Scalar(selected_time_field))
+  {
+    ROS_ERROR_ONCE("XYZIRT PointCloud2 field '%s' must be FLOAT64 seconds "
+                   "relative to scan start (datatype=%u count=%u).",
+                   selected_time_name,
+                   static_cast<unsigned>(selected_time_field->datatype),
+                   static_cast<unsigned>(selected_time_field->count));
+    return;
+  }
 
   // ponytail: this dataset path only needs timestamp-preserving surface points;
   // add ring-wise feature extraction here if XYZIRT feature mode is ever needed.
   if (feature_enabled) ROS_WARN_ONCE("XYZIRT feature extraction is not implemented; using all filtered points.");
 
-  for (size_t i = 0; i < pl_orig.size(); ++i)
+  if (use_offset_time)
   {
-    if (i % point_filter_num != 0) continue;
-
-    const auto &pt = pl_orig.points[i];
-    const double dist_sqr = static_cast<double>(pt.x) * pt.x +
-                            static_cast<double>(pt.y) * pt.y +
-                            static_cast<double>(pt.z) * pt.z;
-    if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z) ||
-        !std::isfinite(pt.offset_time) || pt.offset_time < 0.0 || dist_sqr < blind_sqr)
-      continue;
-
-    PointType added_pt;
-    added_pt.x = pt.x;
-    added_pt.y = pt.y;
-    added_pt.z = pt.z;
-    added_pt.intensity = pt.intensity;
-    added_pt.normal_x = 0;
-    added_pt.normal_y = 0;
-    added_pt.normal_z = 0;
-    added_pt.curvature = pt.offset_time * 1000.0; // FAST-LIVO2 stores point time in ms.
-    pl_surf.push_back(added_pt);
+    pcl::PointCloud<xyzirt_ros::Point> input;
+    pcl::fromROSMsg(*msg, input);
+    appendXyzirtSurface(input, point_filter_num, blind_sqr,
+                        [](const xyzirt_ros::Point &point) {
+                          return point.offset_time;
+                        },
+                        pl_surf);
+  }
+  else
+  {
+    pcl::PointCloud<xyzirt_time_ros::Point> input;
+    pcl::fromROSMsg(*msg, input);
+    appendXyzirtSurface(input, point_filter_num, blind_sqr,
+                        [](const xyzirt_time_ros::Point &point) {
+                          return point.time;
+                        },
+                        pl_surf);
   }
 
   std::sort(pl_surf.points.begin(), pl_surf.points.end(), [](const PointType &a, const PointType &b) {
     return a.curvature < b.curvature;
   });
+  if (xyzirt_time_diagnostic_frames_ < 3 && !pl_surf.empty())
+  {
+    std::size_t nonzero_count = 0;
+    std::size_t unique_count = 1;
+    for (std::size_t i = 0; i < pl_surf.size(); ++i)
+    {
+      if (pl_surf.points[i].curvature > 0.0) ++nonzero_count;
+      if (i > 0 && pl_surf.points[i].curvature !=
+                       pl_surf.points[i - 1].curvature)
+        ++unique_count;
+    }
+    ROS_INFO_STREAM("[XYZIRT_TIME] source=" << selected_time_name
+                    << " header_scan_start=" << std::setprecision(15)
+                    << msg->header.stamp.toSec()
+                    << " relative_time_s_min="
+                    << pl_surf.front().curvature / 1000.0
+                    << " relative_time_s_max="
+                    << pl_surf.back().curvature / 1000.0
+                    << " curvature_ms_min=" << pl_surf.front().curvature
+                    << " curvature_ms_max=" << pl_surf.back().curvature
+                    << " nonzero_count=" << nonzero_count
+                    << " unique_count=" << unique_count
+                    << " scan_duration_s="
+                    << pl_surf.back().curvature / 1000.0);
+    ++xyzirt_time_diagnostic_frames_;
+  }
 }
 
 void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &types)

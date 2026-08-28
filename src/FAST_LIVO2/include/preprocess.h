@@ -161,6 +161,20 @@ struct EIGEN_ALIGN16 Point
 } // namespace xyzirt_ros
 POINT_CLOUD_REGISTER_POINT_STRUCT(xyzirt_ros::Point,
                                   (float, x, x)(float, y, y)(float, z, z)(float, intensity, intensity)(double, offset_time, offset_time)(std::uint16_t, ring, ring))
+
+namespace xyzirt_time_ros
+{
+struct EIGEN_ALIGN16 Point
+{
+  PCL_ADD_POINT4D;
+  float intensity;
+  double time;
+  std::uint16_t ring;
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+};
+} // namespace xyzirt_time_ros
+POINT_CLOUD_REGISTER_POINT_STRUCT(xyzirt_time_ros::Point,
+                                  (float, x, x)(float, y, y)(float, z, z)(float, intensity, intensity)(double, time, time)(std::uint16_t, ring, ring))
 /*****************/
 
 class Preprocess
@@ -209,6 +223,7 @@ private:
   double edgea, edgeb;
   double smallp_intersect, smallp_ratio;
   double vx, vy, vz;
+  std::size_t xyzirt_time_diagnostic_frames_ = 0;
 };
 typedef std::shared_ptr<Preprocess> PreprocessPtr;
 
