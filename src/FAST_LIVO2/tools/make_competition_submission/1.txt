@@ -1,8 +1,2 @@
-
-python3 make_competition_submission_v2.py \
-    ~/data/2026-08-23-202045 \
-    
-使用final作为评估（默认online）
-python3 make_competition_submission_v2.py \
-    ~/data/2026-08-23-202045 \
-    --use-final
+请按 README.md 使用。Stage 6B 正式源固定为 G4 Online，输出 reference 为
+person-ground；比赛时刻通过 --schedule-file 输入，不再提供 Final 择优选项。
