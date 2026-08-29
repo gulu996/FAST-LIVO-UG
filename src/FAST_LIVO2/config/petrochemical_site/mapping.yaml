@@ -1,16 +1,16 @@
 common:
   img_topic: "/petrochemical/camera/left/image_raw"
-  lid_topic: "/petrochemical/lidar"
-  imu_topic: "/petrochemical/imu"
+  lid_topic: "/tiaozhanbei/lidar"
+  imu_topic: "/tiaozhanbei/imu"
   img_en: 1
   lidar_en: 1
   ros_driver_bug_fix: false
   sub_lidar_queue_size: 64
   sub_imu_queue_size: 3000
   sub_img_queue_size: 64
-  max_lidar_buffer_size: 32
+  max_lidar_buffer_size: 64
   max_imu_buffer_size: 3000
-  max_img_buffer_size: 32
+  max_img_buffer_size: 128
   max_prop_imu_buffer_size: 3000
   sync_img_buffer_min_size: 5
   sync_img_lookahead_time: 0.12
@@ -69,13 +69,15 @@ vio:
   visual_map_supply_diagnostics_en: true
   visual_map_fov_fallback_en: true
   visual_tracking_only_dry_run_en: false
+  visual_reference_refresh_en: false
+  visual_observability_relative_eigen_threshold: 0.02
   # Stage 3C-A: read-only first-level EKF linearization diagnostics. This never
   # applies a Kalman update and does not relax the existing 30-track gate.
   visual_adaptive_covariance_shadow_en: true
   # Stage 3C-B. Code defaults remain disabled; the petrochemical launch exposes
   # enable/min-points overrides for BASELINE, TEST-20 and TEST-15 replays.
   visual_adaptive_covariance_relaxed_en: false
-  visual_adaptive_covariance_relaxed_min_points: 20
+  visual_adaptive_covariance_relaxed_min_points: 30
   visual_adaptive_covariance_k_ncc: 1.0
   visual_adaptive_covariance_k_level: 1.0
   visual_adaptive_covariance_k_photo: 0.5
@@ -138,10 +140,14 @@ lio:
   layer_init_num: [5, 5, 5, 5, 5]
 
 lio_degeneracy:
-  # Stage 4B: six counterfactual solves share the real final-iteration H/R/P,
-  # but their state/covariance candidates are diagnostic-only and never applied.
-  directional_shadow_enable: true
+  enable_state_intervention: false
+  # Stage 4B's six counterfactual solves are retained for diagnostics, but the
+  # frozen production profile avoids their unnecessary runtime overhead.
+  directional_shadow_enable: false
   directional_shadow_relative_thresholds: [0.02, 0.05, 0.08, 0.10, 0.15, 0.20]
+
+lio_map_guard:
+  mode: "off"
 
 local_map:
   map_sliding_en: true
@@ -201,3 +207,10 @@ aruco_landmarks:
 pos_output:
   enable_timestamp: true
   format: "timestamp_xyz_quat"
+
+camera_aligned_neu:
+  enable: true
+  max_raw_interp_gap_s: 0.25
+  buffer_seconds: 5.0
+  write_csv: true
+  write_txt: true

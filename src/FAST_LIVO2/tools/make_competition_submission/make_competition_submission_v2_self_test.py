@@ -2,6 +2,7 @@
 """No-bag synthetic checks for the Stage 6 competition output chain."""
 
 import argparse
+import json
 import subprocess
 import sys
 import tempfile
@@ -26,7 +27,9 @@ def main():
         m.DEFAULT_SCHEDULE_PATH
     )
     assert schedule_path == m.DEFAULT_SCHEDULE_PATH.resolve()
-    assert [pid for pid, _ in score_times] == [f"P{i:02d}" for i in range(1, 11)]
+    assert [pid for pid, _ in score_times] == [
+        f"P{i:02d}" for i in range(1, len(score_times) + 1)
+    ]
     assert [name for name, _, _ in dynamic_windows] == ["01", "02", "03"]
     assert sanity == (1785900626.0, 1074, 271830.0)
 
@@ -116,54 +119,94 @@ def main():
     assert combined.pose(1785900590.0)[2] == "ONLINE_INTERPOLATED"
     assert_close(combined.pose(1785900590.0)[0], [7, 8, 9])
 
-    # 9) Three inclusive 20 s windows each generate exactly 201 strict-format rows.
+    # 9) Point count follows the schedule (20 here); dynamic files remain strict 10 Hz.
     with tempfile.TemporaryDirectory() as td:
         out = Path(td)
-        points = m.write_position_points(out / "position_points.txt", combined)
-        assert points[0][5] == "ALIGNED_RAW_FALLBACK"
-        for name, start, end in m.DYNAMIC_WINDOWS:
-            rows, sources = m.write_dynamic(
-                out / f"position_dynamic_{name}.txt", combined, start, end
-            )
-            assert len(rows) == 201
-            assert sources == {"ONLINE_INTERPOLATED": 201}
-        checks = m.validate_output_files(out)
-        assert len(checks) == 5
-        hash_path = m.write_submission_hashes(out)
-        hash_lines = hash_path.read_text(encoding="ascii").splitlines()
-        assert len(hash_lines) == 4
-        assert [line.split("  ", 1)[1] for line in hash_lines] == [
-            "position_points.txt",
-            "position_dynamic_01.txt",
-            "position_dynamic_02.txt",
-            "position_dynamic_03.txt",
-        ]
-
-        validate_proc = subprocess.run(
-            [
-                sys.executable,
-                str(Path(m.__file__).resolve()),
-                "--schedule-file",
-                str(m.DEFAULT_SCHEDULE_PATH),
-                "--validate-only",
-                str(out),
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+        test_schedule = out / "schedule_20_points.json"
+        test_schedule.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "score_times": [
+                        {
+                            "id": f"P{i:02d}",
+                            "unix_utc": 1785900562.0 if i == 1 else 1785900589.0 + i,
+                        }
+                        for i in range(1, 21)
+                    ],
+                    "dynamic_windows": [
+                        {
+                            "id": name,
+                            "start_unix_utc": start,
+                            "end_unix_utc": end,
+                        }
+                        for name, start, end in dynamic_windows
+                    ],
+                    "bds_sanity": {
+                        "unix_utc": sanity[0],
+                        "week": sanity[1],
+                        "sow": sanity[2],
+                    },
+                }
+            ),
+            encoding="utf-8",
         )
-        assert validate_proc.returncode == 0, validate_proc.stderr
-        assert "PASS: strict submission format validation" in validate_proc.stdout
+        loaded = m.load_schedule(test_schedule)
+        assert [pid for pid, _ in loaded[1]] == [f"P{i:02d}" for i in range(1, 21)]
 
-        # CRLF/BOM/trailing-space detection is part of the same strict reader.
-        point_path = out / "position_points.txt"
-        original = point_path.read_bytes()
-        point_path.write_bytes(original.replace(b"\n", b"\r\n"))
+        original_schedule = (m.SCHEDULE_PATH, m.SCORE_TIMES, m.DYNAMIC_WINDOWS, m.BDS_SANITY)
+        m.SCHEDULE_PATH, m.SCORE_TIMES, m.DYNAMIC_WINDOWS, m.BDS_SANITY = loaded
         try:
-            m.validate_output_files(out)
-            raise AssertionError("CRLF output was accepted")
-        except RuntimeError as exc:
-            assert "CR/CRLF" in str(exc)
+            points = m.write_position_points(out / "position_points.txt", combined)
+            assert len(points) == 20
+            assert points[0][5] == "ALIGNED_RAW_FALLBACK"
+            for name, start, end in m.DYNAMIC_WINDOWS:
+                rows, sources = m.write_dynamic(
+                    out / f"position_dynamic_{name}.txt", combined, start, end
+                )
+                assert len(rows) == 201
+                assert sources == {"ONLINE_INTERPOLATED": 201}
+            checks = m.validate_output_files(out)
+            assert len(checks) == 5
+            assert checks[0].startswith("position_points: 20 lines, P01..P20")
+            hash_path = m.write_submission_hashes(out)
+            hash_lines = hash_path.read_text(encoding="ascii").splitlines()
+            assert len(hash_lines) == 4
+            assert [line.split("  ", 1)[1] for line in hash_lines] == [
+                "position_points.txt",
+                "position_dynamic_01.txt",
+                "position_dynamic_02.txt",
+                "position_dynamic_03.txt",
+            ]
+
+            validate_proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(m.__file__).resolve()),
+                    "--schedule-file",
+                    str(test_schedule),
+                    "--validate-only",
+                    str(out),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            assert validate_proc.returncode == 0, validate_proc.stderr
+            assert "position_points: 20 lines, P01..P20" in validate_proc.stdout
+            assert "PASS: strict submission format validation" in validate_proc.stdout
+
+            # CRLF/BOM/trailing-space detection is part of the same strict reader.
+            point_path = out / "position_points.txt"
+            original = point_path.read_bytes()
+            point_path.write_bytes(original.replace(b"\n", b"\r\n"))
+            try:
+                m.validate_output_files(out)
+                raise AssertionError("CRLF output was accepted")
+            except RuntimeError as exc:
+                assert "CR/CRLF" in str(exc)
+        finally:
+            m.SCHEDULE_PATH, m.SCORE_TIMES, m.DYNAMIC_WINDOWS, m.BDS_SANITY = original_schedule
 
     # 13) person_ground without d_base is rejected before any run/bag access.
     proc = subprocess.run(

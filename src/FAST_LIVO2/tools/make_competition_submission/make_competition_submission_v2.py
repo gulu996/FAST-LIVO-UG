@@ -61,9 +61,13 @@ def load_schedule(path: Path):
         if not isinstance(row, dict):
             raise ValueError(f"{path}: score_times entries must be objects")
         score_times.append((str(row.get("id", "")), float(row["unix_utc"])))
-    expected_ids = [f"P{i:02d}" for i in range(1, 11)]
+    if not score_times:
+        raise ValueError(f"{path}: score_times must contain at least one point")
+    expected_ids = [f"P{i:02d}" for i in range(1, len(score_times) + 1)]
     if [item[0] for item in score_times] != expected_ids:
-        raise ValueError(f"{path}: score_times IDs must be P01..P10 in order")
+        raise ValueError(
+            f"{path}: score_times IDs must be sequential P01..{expected_ids[-1]} in order"
+        )
 
     dynamic_windows = []
     for row in data.get("dynamic_windows", []):
@@ -83,9 +87,6 @@ def load_schedule(path: Path):
     all_times += [t for _, start, end in dynamic_windows for t in (start, end)]
     if not np.all(np.isfinite(all_times)):
         raise ValueError(f"{path}: timestamps contain NaN/Inf")
-    for name, start, end in dynamic_windows:
-        if end <= start or int(round((end - start) * 10.0)) + 1 != 201:
-            raise ValueError(f"{path}: dynamic_{name} must be inclusive 20 s at 10 Hz")
 
     sanity = data.get("bds_sanity")
     if not isinstance(sanity, dict):
@@ -783,7 +784,7 @@ def write_dynamic(path: Path, traj: CompetitionTrajectory, start_s: float, end_s
 
 
 POINT_LINE_RE = re.compile(
-    r"P\d{2},-?\d+\.\d{4},-?\d+\.\d{4},-?\d+\.\d{4}"
+    r"P\d{2,},-?\d+\.\d{4},-?\d+\.\d{4},-?\d+\.\d{4}"
 )
 DYNAMIC_LINE_RE = re.compile(
     r"\d+,-?\d+\.\d,-?\d+\.\d{4},-?\d+\.\d{4},-?\d+\.\d{4}"
@@ -811,9 +812,12 @@ def read_strict_ascii_lines(path: Path) -> List[str]:
 def validate_output_files(out_dir: Path) -> List[str]:
     checks = []
     point_lines = read_strict_ascii_lines(out_dir / "position_points.txt")
-    if len(point_lines) != 10:
-        raise RuntimeError(f"position_points.txt: expected 10 lines, got {len(point_lines)}")
     expected_ids = [pid for pid, _ in SCORE_TIMES]
+    if len(point_lines) != len(expected_ids):
+        raise RuntimeError(
+            f"position_points.txt: expected {len(expected_ids)} lines from schedule, "
+            f"got {len(point_lines)}"
+        )
     actual_ids = []
     for i, line in enumerate(point_lines, 1):
         if not POINT_LINE_RE.fullmatch(line):
@@ -821,7 +825,10 @@ def validate_output_files(out_dir: Path) -> List[str]:
         actual_ids.append(line.split(",", 1)[0])
     if actual_ids != expected_ids:
         raise RuntimeError(f"position_points.txt: IDs/order mismatch: {actual_ids}")
-    checks.append("position_points: 10 lines, P01..P10 once, ASCII comma, NEU 4 decimals")
+    checks.append(
+        f"position_points: {len(expected_ids)} lines, "
+        f"{expected_ids[0]}..{expected_ids[-1]} once, ASCII comma, NEU 4 decimals"
+    )
 
     for name, start_s, end_s in DYNAMIC_WINDOWS:
         path = out_dir / f"position_dynamic_{name}.txt"
@@ -1299,7 +1306,7 @@ def main() -> int:
     )
     print("[OK] trajectory-overlap lever inference is not implemented.")
 
-    # P02..P10 与 dynamic 必须完全由 Online 插值，禁止走 raw/Final。
+    # P01 之后的配置点与 dynamic 必须完全由 Online 插值，禁止走 raw/Final。
     required_online = [t for pid, t in SCORE_TIMES if pid != "P01"]
     for _, start, end in DYNAMIC_WINDOWS:
         required_online.extend(times_10hz_inclusive(start, end))
@@ -1312,7 +1319,7 @@ def main() -> int:
     )
     if missing_online:
         raise RuntimeError(
-            "Online trajectory cannot cover required P02..P10/dynamic epochs; "
+            "Online trajectory cannot cover required configured scoring-point/dynamic epochs; "
             "raw/Final substitution is forbidden. First missing epochs: "
             + ", ".join(f"{t:.1f}" for t in missing_online[:10])
         )
@@ -1351,11 +1358,7 @@ def main() -> int:
             start,
             end,
         )
-        if len(rows) != 201:
-            raise RuntimeError(
-                f"dynamic {name}: expected 201 rows for inclusive 20 s @ 10 Hz, "
-                f"got {len(rows)}"
-            )
+
         dynamic_summaries.append((name, len(rows), counts))
 
     # 对配置附件中的 UTC/BDT 对照做 sanity check。

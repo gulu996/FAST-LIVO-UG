@@ -35,6 +35,9 @@
     <param name="use_gnss_fusion_enable" value="true" />
   </node>
 
+  <node pkg="fast_livo" type="camera_aligned_neu_logger_node"
+        name="camera_aligned_neu_logger" output="screen" />
+
   <group if="$(arg rviz)">
     <node launch-prefix="nice" pkg="rviz" type="rviz" name="rviz"
           args="-d $(find fast_livo)/rviz_cfg/fast_livo2.rviz" />

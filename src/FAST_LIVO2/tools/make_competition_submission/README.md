@@ -35,7 +35,7 @@ and is not rotated. ENU to NEU is performed exactly once.
 - P01 is before backend initialization. It uses `livo_raw_online.tum` transformed
   by the run's actual `ALIGNMENT_SUCCESS` yaw/translation from `rtk_backend.log`,
   then applies the person-ground lever. Its source is `ALIGNED_RAW_FALLBACK`.
-- P02 through P10 use `SINGLE_TIMESTAMP`: exact Online position interpolation and
+- Every configured point after P01 uses `SINGLE_TIMESTAMP`: exact Online position interpolation and
   quaternion SLERP, followed by the per-epoch person-ground transform.
 - Dynamic outputs use Online at inclusive 10 Hz with the same interpolation,
   SLERP, and person-ground conversion.
@@ -43,9 +43,11 @@ and is not rotated. ENU to NEU is performed exactly once.
   truth fitting, and trajectory-overlap lever estimation are forbidden.
 
 Competition epochs are not hard-coded in Python. They come from
-`petrochemical_stage6b_schedule.json`, supplied with `--schedule-file`. Replace
-that JSON when a new official attachment defines different point times or dynamic
-windows; do not edit algorithm code. The current schedule also records the
+`petrochemical_stage6b_schedule.json`, supplied with `--schedule-file`. Its
+`score_times` list accepts sequential IDs (`P01..Pnn`); output line count is
+derived from that list. Replace that JSON when a new official
+attachment defines different point times, point count, or dynamic windows; do not
+edit algorithm code. The current schedule also records the
 independent UTC/BDT sanity pair:
 
 ```text
@@ -99,8 +101,8 @@ epochs, wrong week/SOW conversion, non-10-Hz steps, and wrong row counts.
 
 Outputs:
 
-- `position_points.txt`: exactly 10 lines, `P01..P10,N,E,U`, four decimals,
-  no header.
+- `position_points.txt`: exactly one line per configured `score_times` entry,
+  sequential `P01..Pnn,N,E,U`, four decimals, no header.
 - `position_dynamic_01/02/03.txt`: exactly 201 lines each,
   `BDS_WEEK,BDS_SOW,N,E,U`; SOW one decimal and NEU four decimals.
 - `submission_stage6b_sha256.txt`: SHA-256 of the four formal position files.

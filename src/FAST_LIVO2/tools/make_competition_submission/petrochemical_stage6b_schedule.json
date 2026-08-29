@@ -1,21 +1,14 @@
 {
   "schema_version": 1,
   "score_times": [
-    {"id": "P01", "unix_utc": 1785900562.0},
-    {"id": "P02", "unix_utc": 1785900591.0},
-    {"id": "P03", "unix_utc": 1785900626.0},
-    {"id": "P04", "unix_utc": 1785900645.0},
-    {"id": "P05", "unix_utc": 1785900672.0},
-    {"id": "P06", "unix_utc": 1785900700.0},
-    {"id": "P07", "unix_utc": 1785900720.0},
-    {"id": "P08", "unix_utc": 1785900741.0},
-    {"id": "P09", "unix_utc": 1785900773.0},
-    {"id": "P10", "unix_utc": 1785900796.0}
+    {"id": "P01", "unix_utc": 1785915203.0},
+    {"id": "P02", "unix_utc": 1785915233.0}
+
   ],
   "dynamic_windows": [
-    {"id": "01", "start_unix_utc": 1785900626.0, "end_unix_utc": 1785900646.0},
-    {"id": "02", "start_unix_utc": 1785900675.0, "end_unix_utc": 1785900695.0},
-    {"id": "03", "start_unix_utc": 1785900748.0, "end_unix_utc": 1785900768.0}
+    {"id": "01", "start_unix_utc": 1785915203.0, "end_unix_utc": 1785915213.0},
+    {"id": "02", "start_unix_utc": 1785915203.0, "end_unix_utc": 1785915213.0},
+    {"id": "03", "start_unix_utc": 1785915203.0, "end_unix_utc": 1785915213.0}
   ],
   "bds_sanity": {"unix_utc": 1785900626.0, "week": 1074, "sow": 271830.0}
 }

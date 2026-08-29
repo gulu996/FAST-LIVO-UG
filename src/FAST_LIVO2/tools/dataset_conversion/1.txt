@@ -24,3 +24,7 @@ python3 tools/dataset_conversion/convert_petrochemical_to_bag.py \
   
   
   
+  
+build_rosbag.sh --dataset /path/to/output-root --zip /path/to/1.zip --password
+  
+~/catkin_ws/src/FAST_LIVO2/tools/build_rosbag.sh --dataset "/media/gulu/一只沙糖桔/BaiduNetdiskDownload/测试数据/融合定位"

@@ -196,6 +196,7 @@ add_library(gnss src/gnss_manager.cpp)
 add_library(gnss_adapter src/gnss_adapter.cpp)
 add_library(gnss_fault_injector src/gnss_fault_injector.cpp)
 add_library(rtk_fixed_lag_backend src/rtk_fixed_lag_backend.cpp)
+add_library(camera_aligned_neu_logger src/camera_aligned_neu_logger.cpp)
 add_library(laser_mapping src/LIVMapper.cpp)
 
 add_dependencies(gnss ${catkin_EXPORTED_TARGETS})
@@ -213,6 +214,8 @@ add_executable(gnss_fault_injector_node src/gnss_fault_injector_node.cpp)
 add_executable(gnss_fault_injector_self_test src/gnss_fault_injector_self_test.cpp)
 add_executable(rtk_fixed_lag_backend_node src/rtk_fixed_lag_backend_node.cpp)
 add_executable(rtk_fixed_lag_backend_self_test src/rtk_fixed_lag_backend_self_test.cpp)
+add_executable(camera_aligned_neu_logger_node src/camera_aligned_neu_logger_node.cpp)
+add_executable(camera_aligned_neu_logger_self_test src/camera_aligned_neu_logger_self_test.cpp)
 add_executable(voxel_filter_self_test src/voxel_filter_self_test.cpp)
 add_executable(lio_degeneracy_self_test src/lio_degeneracy_self_test.cpp)
 add_executable(preprocess_xyzirt_self_test src/preprocess_xyzirt_self_test.cpp)
@@ -232,6 +235,9 @@ add_dependencies(gnss_fault_injector_self_test ${${PROJECT_NAME}_EXPORTED_TARGET
 add_dependencies(rtk_fixed_lag_backend ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 add_dependencies(rtk_fixed_lag_backend_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 add_dependencies(rtk_fixed_lag_backend_self_test ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+add_dependencies(camera_aligned_neu_logger ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+add_dependencies(camera_aligned_neu_logger_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+add_dependencies(camera_aligned_neu_logger_self_test ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
 target_link_libraries(gnss_adapter ${catkin_LIBRARIES})
 target_link_libraries(gnss_fault_injector ${catkin_LIBRARIES})
@@ -310,6 +316,20 @@ target_link_libraries(rtk_fixed_lag_backend_self_test
   ${catkin_LIBRARIES}
   gtsam
   ${GTSAM_UNSTABLE_LIBRARY}
+)
+
+target_link_libraries(camera_aligned_neu_logger
+  ${catkin_LIBRARIES}
+)
+
+target_link_libraries(camera_aligned_neu_logger_node
+  camera_aligned_neu_logger
+  ${catkin_LIBRARIES}
+)
+
+target_link_libraries(camera_aligned_neu_logger_self_test
+  camera_aligned_neu_logger
+  ${catkin_LIBRARIES}
 )
 
 target_link_libraries(voxel_filter_self_test
