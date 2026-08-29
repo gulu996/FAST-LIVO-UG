@@ -1,7 +1,7 @@
 common:
   img_topic: "/petrochemical/camera/left/image_raw"
-  lid_topic: "/petrochemical/lidar"
-  imu_topic: "/petrochemical/imu"
+  lid_topic: "/tiaozhanbei/lidar"
+  imu_topic: "/tiaozhanbei/imu"
   img_en: 1
   lidar_en: 1
   ros_driver_bug_fix: false
@@ -69,6 +69,8 @@ vio:
   visual_map_supply_diagnostics_en: true
   visual_map_fov_fallback_en: true
   visual_tracking_only_dry_run_en: false
+  visual_reference_refresh_en: false
+  visual_observability_relative_eigen_threshold: 0.02
   # Stage 3C-A: read-only first-level EKF linearization diagnostics. This never
   # applies a Kalman update and does not relax the existing 30-track gate.
   visual_adaptive_covariance_shadow_en: true
@@ -138,10 +140,14 @@ lio:
   layer_init_num: [5, 5, 5, 5, 5]
 
 lio_degeneracy:
-  # Stage 4B: six counterfactual solves share the real final-iteration H/R/P,
-  # but their state/covariance candidates are diagnostic-only and never applied.
-  directional_shadow_enable: true
+  enable_state_intervention: false
+  # Stage 4B's six counterfactual solves are retained for diagnostics, but the
+  # frozen production profile avoids their unnecessary runtime overhead.
+  directional_shadow_enable: false
   directional_shadow_relative_thresholds: [0.02, 0.05, 0.08, 0.10, 0.15, 0.20]
+
+lio_map_guard:
+  mode: "off"
 
 local_map:
   map_sliding_en: true

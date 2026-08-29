@@ -73,6 +73,9 @@ rtk_backend:
   livo_lateral_vertical_sigma_m: 0.001
   livo_rotation_sigma_rad: 0.01
   livo_uwb_rotation_sigma_rad: 0.0003
+  # test1.bag has no UWB input; keep the backend range-factor path dormant.
+  uwb_factor_backend_en: false
+  uwb_range_topic: "/uwb/backend_ranges"
   prior_translation_sigma_m: 0.10
   prior_roll_pitch_sigma_rad: 0.05
   prior_yaw_sigma_rad: 0.20
