@@ -287,7 +287,7 @@ public:
   vector<double> extrinR;
   vector<double> cameraextrinT;
   vector<double> cameraextrinR;
-  double IMG_POINT_COV = 100.0;
+  double IMG_POINT_COV = 500.0;
 
   PointCloudXYZI::Ptr visual_sub_map;
   PointCloudXYZI::Ptr feats_undistort;

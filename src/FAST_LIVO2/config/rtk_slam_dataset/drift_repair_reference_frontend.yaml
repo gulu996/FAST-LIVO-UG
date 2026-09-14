@@ -1,0 +1,26 @@
+# Trial03: reuse the frontend sampling/noise/frame/map preset from the sealed
+# successful FAST-LIVO2 run 2026-09-03-220923-full. No checkpoint parameter fit.
+# Ours' guarded VIO, corrected sensor model and GNSS fixed-lag backend remain.
+preprocess:
+  point_filter_num: 1
+  filter_size_surf: 0.10
+vio:
+  img_point_cov: 100.0
+uav:
+  gravity_align_en: false
+local_map:
+  sliding_thresh: 8.0
+
+rtk_backend:
+  gnss_reacquisition_en: true
+  gnss_reacquisition_consistency_m: 0.5
+  gnss_recovery_gap_threshold_s: 5.0
+  gnss_recovery_fixed_confirm_factors: 5
+  gnss_recovery_fixed_max_gap_s: 0.5
+  gnss_recovery_ramp_duration_s: 0.0
+  gnss_recovery_initial_sigma_scale: 1.0
+
+pcd_save:
+  save_log_en: true
+diagnostics:
+  csv_flush_interval_rows: 100

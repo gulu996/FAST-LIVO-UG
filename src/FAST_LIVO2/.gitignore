@@ -1,2 +1,5 @@
 Log/*
 build/*
+/artifacts/
+/CMakeFiles/
+/fullBa.png

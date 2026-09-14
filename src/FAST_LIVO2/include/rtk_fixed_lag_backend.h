@@ -131,6 +131,8 @@ struct BackendConfig {
   int gnss_recovery_fixed_confirm_factors = 1;
   double gnss_recovery_fixed_max_gap_s = 0.5;
   double gnss_recovery_float_factor_rate_hz = 0.0;
+  bool gnss_reacquisition_en = false;
+  double gnss_reacquisition_consistency_m = 0.5;
   double max_gnss_residual_m = 3.0;
   double max_gnss_nis = 11.34;
   std::string robust_kernel = "huber";
@@ -142,6 +144,8 @@ struct BackendConfig {
   double prior_translation_sigma_m = 0.10;
   double prior_roll_pitch_sigma_rad = 0.05;
   double prior_yaw_sigma_rad = 0.20;
+  bool livo_gravity_consistency_en = false;
+  bool raw_odom_gravity_aligned = false;
   double uwb_initial_prior_translation_sigma_m = 0.001;
   double uwb_initial_prior_rotation_sigma_rad = 0.001;
   bool uwb_factor_backend_en = false;
@@ -277,6 +281,8 @@ class RtkFixedLagBackend {
   bool gnssRecoveryFloatFactorRateLimited(
       const GnssMeasurement &measurement) const;
   void commitGnssRecoveryAcceptedFactor(const GnssMeasurement &measurement);
+  bool confirmGnssReacquisition(const GnssMeasurement &measurement,
+                               const gtsam::Vector3 &residual, double nis);
   void uwbRangeCallback(
       const uwb_serial_driver::UwbRangeArrayConstPtr &message);
   void statusTimerCallback(const ros::TimerEvent &);
@@ -292,11 +298,15 @@ class RtkFixedLagBackend {
   void resetAlignmentCollection(const std::string &reason);
   bool tryFinishAlignment();
   bool initializeGraph(const RawOdomSample &sample);
+  void appendGravityConsistencyFactor(gtsam::Key key,
+                                       const gtsam::Pose3 &raw_pose,
+                                       gtsam::NonlinearFactorGraph &factors) const;
   bool createGraphNode(const RawOdomSample &sample,
                        const std::string &trigger,
                        gtsam::Key *created_key);
   void maybeAddKeyframe(const RawOdomSample &sample);
   void processPendingGnss();
+  void finalizePendingGraphGnss();
   bool interpolateRawPose(const ros::Time &stamp, gtsam::Pose3 *pose,
                           double *interval_s, std::string *reason) const;
   Keyframe *findReusableKeyframe(const ros::Time &stamp,
@@ -393,6 +403,7 @@ class RtkFixedLagBackend {
   std::uint64_t marginalized_nodes_ = 0;
   std::size_t active_factors_ = 0;
   std::size_t active_livo_factors_ = 0;
+  std::size_t active_gravity_factors_ = 0;
   std::size_t active_gnss_factors_ = 0;
   std::size_t active_uwb_factors_ = 0;
   std::size_t active_uwb_anchor_count_ = 0;
@@ -412,6 +423,7 @@ class RtkFixedLagBackend {
   std::uint64_t gnss_rejected_ = 0;
   std::uint64_t gnss_factor_count_ = 0;
   std::uint64_t livo_factor_count_ = 0;
+  std::uint64_t gravity_factor_count_ = 0;
   std::uint64_t gnss_quality_rejected_ = 0;
   std::uint64_t gnss_time_rejected_ = 0;
   std::uint64_t gnss_too_old_ = 0;
@@ -433,6 +445,9 @@ class RtkFixedLagBackend {
   std::int64_t gnss_recovery_last_fixed_stamp_ns_ = -1;
   std::int64_t last_added_recovery_float_factor_stamp_ns_ = -1;
   std::uint32_t gnss_recovery_consecutive_fixed_factors_ = 0;
+  std::int64_t gnss_reacquisition_last_stamp_ns_ = -1;
+  std::uint32_t gnss_reacquisition_candidate_count_ = 0;
+  gtsam::Vector3 gnss_reacquisition_last_residual_ = gtsam::Vector3::Zero();
   std::int64_t last_processed_gnss_stamp_ns_ = -1;
   std::int64_t alignment_last_used_gnss_stamp_ns_ = -1;
   std::int64_t last_gnss_triggered_node_stamp_ns_ = -1;

@@ -1,0 +1,34 @@
+# Same frontend/quality/lag preset as the 2026-09-06 buffered repair.
+# Candidate 2026-09-09: correct visual association defects and preserve the
+# gravity-aligned frontend's vertical direction in the Pose3 backend.
+# No ground height, surveyed checkpoint, new GNSS covariance scale or GT tuning.
+common:
+  max_img_buffer_size: 128
+  max_lidar_buffer_size: 128
+  max_imu_buffer_size: 12000
+preprocess:
+  point_filter_num: 1
+  filter_size_surf: 0.10
+vio:
+  img_point_cov: 100.0
+uav:
+  gravity_align_en: true
+local_map:
+  sliding_thresh: 8.0
+rtk_backend:
+  gnss_reacquisition_en: true
+  gnss_reacquisition_consistency_m: 0.5
+  gnss_recovery_gap_threshold_s: 5.0
+  gnss_recovery_fixed_confirm_factors: 5
+  gnss_recovery_fixed_max_gap_s: 0.5
+  gnss_recovery_ramp_duration_s: 0.0
+  gnss_recovery_initial_sigma_scale: 1.0
+  livo_gravity_consistency_en: true
+  raw_odom_gravity_aligned: true
+  # Reuse the existing roll/pitch prior scale. This is a declared soft
+  # consistency assumption, not a covariance reported by the raw odometry.
+  prior_roll_pitch_sigma_rad: 0.05
+pcd_save:
+  save_log_en: true
+diagnostics:
+  csv_flush_interval_rows: 100

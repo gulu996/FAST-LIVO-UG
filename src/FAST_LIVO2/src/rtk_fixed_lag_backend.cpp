@@ -3,6 +3,7 @@
 
 #include <geometry_msgs/PoseStamped.h>
 #include <gtsam/inference/Symbol.h>
+#include <gtsam/navigation/AttitudeFactor.h>
 #include <gtsam/nonlinear/LinearContainerFactor.h>
 #include <gtsam/nonlinear/NonlinearFactorGraph.h>
 #include <gtsam/nonlinear/Values.h>
@@ -33,6 +34,8 @@ constexpr std::size_t kMaximumAlignmentPairs = 2000;
 constexpr std::size_t kAlignmentPairsToDropAtCapacity = 1000;
 
 constexpr char kWaitingForRawOdom[] = "WAITING_FOR_RAW_ODOM";
+constexpr char kNoRawOdomBracketAtEndOfStream[] =
+    "GNSS_NO_RAW_ODOM_BRACKET_AT_END_OF_STREAM";
 constexpr char kGnssTooOldForBuffer[] = "GNSS_TOO_OLD_FOR_BUFFER";
 constexpr char kInterpolationGapTooLarge[] =
     "RAW_ODOM_INTERPOLATION_GAP_TOO_LARGE";
@@ -248,6 +251,9 @@ RtkFixedLagBackend::RtkFixedLagBackend(ros::NodeHandle &nh) {
       << "s max_active_states=" << config_.max_active_states
       << " gnss_factors=" << gnss_factor_enabled_
       << " uwb_factors=" << config_.uwb_factor_backend_en
+      << " livo_gravity_consistency=" << config_.livo_gravity_consistency_en
+      << " raw_odom_gravity_aligned=" << config_.raw_odom_gravity_aligned
+      << " gravity_consistency_sigma_rad=" << config_.prior_roll_pitch_sigma_rad
       << " output_directory=" << config_.output_directory);
   ROS_INFO_STREAM(
       "[RTK_BACKEND_GNSS_WEIGHT] float_sigma_scale="
@@ -268,6 +274,9 @@ RtkFixedLagBackend::RtkFixedLagBackend(ros::NodeHandle &nh) {
       << config_.gnss_recovery_fixed_max_gap_s
       << " recovery_float_factor_rate_hz="
       << config_.gnss_recovery_float_factor_rate_hz
+      << " reacquisition_en=" << config_.gnss_reacquisition_en
+      << " reacquisition_consistency_m="
+      << config_.gnss_reacquisition_consistency_m
       << " result_pose_lever_arm_body_m=["
       << config_.result_pose_lever_arm_body_m.transpose() << "]");
   ROS_INFO_STREAM(
@@ -310,21 +319,20 @@ RtkFixedLagBackend::~RtkFixedLagBackend() {
   FileBatch batch;
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
-    archiveActiveStates();
-    const std::size_t waiting_graph = pending_factor_gnss_.size();
-    const std::size_t waiting_alignment = pending_alignment_gnss_.size();
-    const std::size_t waiting_status = pending_status_.size();
-    const std::size_t waiting_odom = pending_gnss_odom_.size();
-    const std::size_t waiting_uwb = pending_uwb_.size();
-    if (waiting_graph + waiting_alignment + waiting_status + waiting_odom +
-            waiting_uwb !=
+    const std::size_t prefinal_graph = pending_factor_gnss_.size();
+    const std::size_t prefinal_alignment = pending_alignment_gnss_.size();
+    const std::size_t prefinal_status = pending_status_.size();
+    const std::size_t prefinal_odom = pending_gnss_odom_.size();
+    const std::size_t prefinal_uwb = pending_uwb_.size();
+    if (prefinal_graph + prefinal_alignment + prefinal_status + prefinal_odom +
+            prefinal_uwb !=
         0) {
       std::ostringstream waiting_detail;
-      waiting_detail << "graph=" << waiting_graph
-                     << " alignment=" << waiting_alignment
-                     << " status=" << waiting_status
-                     << " odom_unpaired=" << waiting_odom
-                     << " uwb=" << waiting_uwb;
+      waiting_detail << "graph=" << prefinal_graph
+                     << " alignment=" << prefinal_alignment
+                     << " status=" << prefinal_status
+                     << " odom_unpaired=" << prefinal_odom
+                     << " uwb=" << prefinal_uwb;
       if (!pending_factor_gnss_.empty()) {
         waiting_detail
             << " graph_first_stamp_ns="
@@ -334,6 +342,13 @@ RtkFixedLagBackend::~RtkFixedLagBackend() {
       }
       queueTextEvent("GNSS_WAITING_AT_END_OF_STREAM", waiting_detail.str());
     }
+    finalizePendingGraphGnss();
+    archiveActiveStates();
+    const std::size_t waiting_graph = pending_factor_gnss_.size();
+    const std::size_t waiting_alignment = pending_alignment_gnss_.size();
+    const std::size_t waiting_status = pending_status_.size();
+    const std::size_t waiting_odom = pending_gnss_odom_.size();
+    const std::size_t waiting_uwb = pending_uwb_.size();
     const std::int64_t conservation_delta = gnssConservationDelta();
     const std::uint64_t silent_drop_count = gnssSilentDropCount();
     if (conservation_delta != 0) {
@@ -351,6 +366,7 @@ RtkFixedLagBackend::~RtkFixedLagBackend() {
     detail << "total_nodes=" << total_nodes_created_
            << " marginalized_nodes=" << marginalized_nodes_
            << " total_livo_factors=" << livo_factor_count_
+           << " total_gravity_factors=" << gravity_factor_count_
            << " total_gnss_factors=" << gnss_factor_count_
            << " total_uwb_factors=" << uwb_factor_count_
            << " total_uwb_received=" << uwb_received_
@@ -495,6 +511,11 @@ void RtkFixedLagBackend::loadParameters(ros::NodeHandle &nh) {
   params.param("gnss_recovery_float_factor_rate_hz",
                config_.gnss_recovery_float_factor_rate_hz,
                config_.gnss_recovery_float_factor_rate_hz);
+  params.param("gnss_reacquisition_en", config_.gnss_reacquisition_en,
+               config_.gnss_reacquisition_en);
+  params.param("gnss_reacquisition_consistency_m",
+               config_.gnss_reacquisition_consistency_m,
+               config_.gnss_reacquisition_consistency_m);
   params.param("max_gnss_residual_m", config_.max_gnss_residual_m,
                config_.max_gnss_residual_m);
   params.param("max_gnss_nis", config_.max_gnss_nis,
@@ -521,6 +542,15 @@ void RtkFixedLagBackend::loadParameters(ros::NodeHandle &nh) {
                config_.prior_roll_pitch_sigma_rad);
   params.param("prior_yaw_sigma_rad", config_.prior_yaw_sigma_rad,
                config_.prior_yaw_sigma_rad);
+  params.param("livo_gravity_consistency_en", config_.livo_gravity_consistency_en,
+               config_.livo_gravity_consistency_en);
+  params.param("raw_odom_gravity_aligned", config_.raw_odom_gravity_aligned,
+               config_.raw_odom_gravity_aligned);
+  bool frontend_gravity_aligned = false;
+  nh.param("uav/gravity_align_en", frontend_gravity_aligned, false);
+  if (config_.livo_gravity_consistency_en && !frontend_gravity_aligned)
+    throw std::invalid_argument(
+        "LIVO gravity consistency requires uav/gravity_align_en=true");
   params.param("uwb_initial_prior_translation_sigma_m",
                config_.uwb_initial_prior_translation_sigma_m,
                config_.uwb_initial_prior_translation_sigma_m);
@@ -668,6 +698,14 @@ void RtkFixedLagBackend::loadParameters(ros::NodeHandle &nh) {
 }
 
 void RtkFixedLagBackend::validateParameters() const {
+  if (config_.livo_gravity_consistency_en &&
+      (!config_.raw_odom_gravity_aligned ||
+       !std::isfinite(config_.prior_roll_pitch_sigma_rad) ||
+       config_.prior_roll_pitch_sigma_rad <= 0.0)) {
+    throw std::invalid_argument(
+        "LIVO gravity consistency requires declared gravity-aligned raw odometry "
+        "and a finite positive prior_roll_pitch_sigma_rad");
+  }
   if (!config_.antenna_lever_arm_body_m.allFinite() ||
       !config_.result_pose_lever_arm_body_m.allFinite()) {
     throw std::invalid_argument(
@@ -711,6 +749,17 @@ void RtkFixedLagBackend::validateParameters() const {
       config_.uwb_initial_prior_rotation_sigma_rad <= 0.0 ||
       config_.flush_interval_s <= 0.0) {
     throw std::invalid_argument("invalid non-positive rtk_backend parameter");
+  }
+  if (!std::isfinite(config_.gnss_reacquisition_consistency_m) ||
+      config_.gnss_reacquisition_consistency_m <= 0.0 ||
+      (config_.gnss_reacquisition_en &&
+       (!std::isfinite(config_.gnss_recovery_gap_threshold_s) ||
+        config_.gnss_recovery_gap_threshold_s <= 0.0 ||
+        config_.gnss_recovery_fixed_confirm_factors < 2 ||
+        !std::isfinite(config_.gnss_recovery_fixed_max_gap_s)))) {
+    throw std::invalid_argument(
+        "GNSS reacquisition requires a positive gap, at least two Fixed "
+        "candidates, and finite positive consistency/time bounds");
   }
   if (config_.raw_odom_buffer_seconds <
       config_.max_raw_odom_interpolation_gap_s) {
@@ -887,7 +936,8 @@ void RtkFixedLagBackend::initializeResultFiles() {
            "uwb_residual_rejected,last_uwb_dt,last_uwb_residual,"
            "last_uwb_nis,uwb_geometry_eigenvalue_0,"
            "uwb_geometry_eigenvalue_1,uwb_geometry_eigenvalue_2,"
-           "uwb_geometry_rank,uwb_geometry_condition\n";
+           "uwb_geometry_rank,uwb_geometry_condition,"
+           "active_gravity_factors,total_gravity_factors\n";
   }
 }
 
@@ -1136,6 +1186,8 @@ void RtkFixedLagBackend::gnssStatusCallback(
   ++gnss_received_;
   const bool quality_enabled = gnssQualityAccepted(message->filtered_quality);
   const bool usable = message->accepted && quality_enabled;
+  if (!usable || message->raw_quality != fast_livo::GnssStatus::RTK_FIXED)
+    gnss_reacquisition_candidate_count_ = 0;
   if (!usable) {
     if (!alignment_.valid && !quality_enabled) {
       resetAlignmentCollection(message->reject_reason.empty()
@@ -1311,6 +1363,39 @@ void RtkFixedLagBackend::commitGnssRecoveryAcceptedFactor(
   queueTextEvent("GNSS_COVARIANCE_RECOVERY_FIXED_STABLE", detail.str());
 }
 
+bool RtkFixedLagBackend::confirmGnssReacquisition(
+    const GnssMeasurement &measurement, const gtsam::Vector3 &residual,
+    double nis) {
+  const std::int64_t stamp_ns = stampNanoseconds(measurement.stamp);
+  const double accepted_gap_s =
+      static_cast<double>(stamp_ns - last_added_gnss_factor_stamp_ns_) / 1e9;
+  if (!config_.gnss_reacquisition_en ||
+      last_added_gnss_factor_stamp_ns_ < 0 ||
+      accepted_gap_s <= config_.gnss_recovery_gap_threshold_s ||
+      measurement.raw_quality != fast_livo::GnssStatus::RTK_FIXED ||
+      !residual.allFinite() || residual.norm() <= config_.max_gnss_residual_m ||
+      !std::isfinite(nis) || nis < 0.0 || nis > config_.max_gnss_nis) {
+    gnss_reacquisition_candidate_count_ = 0;
+    return false;
+  }
+
+  const double candidate_gap_s =
+      static_cast<double>(stamp_ns - gnss_reacquisition_last_stamp_ns_) / 1e9;
+  const bool consistent =
+      gnss_reacquisition_candidate_count_ > 0 && candidate_gap_s > 0.0 &&
+      candidate_gap_s <= config_.gnss_recovery_fixed_max_gap_s &&
+      (residual - gnss_reacquisition_last_residual_).norm() <=
+          config_.gnss_reacquisition_consistency_m;
+  gnss_reacquisition_candidate_count_ =
+      consistent ? gnss_reacquisition_candidate_count_ + 1 : 1;
+  gnss_reacquisition_last_stamp_ns_ = stamp_ns;
+  gnss_reacquisition_last_residual_ = residual;
+  // ponytail: adjacent innovation consistency rejects isolated spikes, not a
+  // persistent common GNSS bias; detecting that needs another absolute source.
+  return gnss_reacquisition_candidate_count_ >=
+         static_cast<std::uint32_t>(config_.gnss_recovery_fixed_confirm_factors);
+}
+
 void RtkFixedLagBackend::gnssOdomCallback(
     const nav_msgs::OdometryConstPtr &message) {
   std::lock_guard<std::mutex> lock(state_mutex_);
@@ -1438,6 +1523,7 @@ void RtkFixedLagBackend::processAcceptedGnss(
       covariance_y <= 0.0 || covariance_z <= 0.0 ||
       !std::isfinite(position.x) || !std::isfinite(position.y) ||
       !std::isfinite(position.z)) {
+    gnss_reacquisition_candidate_count_ = 0;
     rejectGnss("INVALID_COVARIANCE_OR_POSITION", 0.0, 0.0,
                &odometry.header.stamp);
     return;
@@ -1725,6 +1811,28 @@ bool RtkFixedLagBackend::tryFinishAlignment() {
   return true;
 }
 
+void RtkFixedLagBackend::appendGravityConsistencyFactor(
+    gtsam::Key key, const gtsam::Pose3 &raw_pose,
+    gtsam::NonlinearFactorGraph &factors) const {
+  if (!config_.livo_gravity_consistency_en) return;
+  const gtsam::Matrix3 rotation = raw_pose.rotation().matrix();
+  if (!config_.raw_odom_gravity_aligned || !poseIsFinite(raw_pose) ||
+      (rotation.transpose() * rotation - gtsam::Matrix3::Identity()).norm() > 1e-6 ||
+      std::abs(rotation.determinant() - 1.0) > 1e-6) {
+    throw std::invalid_argument("invalid gravity-aligned raw LIVO pose");
+  }
+  // ponytail: preserve the frontend's observed vertical direction, not a flat
+  // path or a full attitude prior. This is a correlated LIVO consistency term,
+  // not independent IMU evidence; reuse the conservative initial tilt sigma
+  // until the raw-odometry interface carries calibrated attitude uncertainty.
+  const gtsam::Unit3 up(0.0, 0.0, 1.0);
+  const gtsam::Unit3 body_up(raw_pose.rotation().unrotate(up.unitVector()));
+  factors.add(gtsam::Pose3AttitudeFactor(
+      key, up,
+      gtsam::noiseModel::Isotropic::Sigma(2, config_.prior_roll_pitch_sigma_rad),
+      body_up));
+}
+
 bool RtkFixedLagBackend::initializeGraph(const RawOdomSample &sample) {
   gtsam::ISAM2Params parameters;
   parameters.findUnusedFactorSlots = true;
@@ -1751,6 +1859,7 @@ bool RtkFixedLagBackend::initializeGraph(const RawOdomSample &sample) {
 
   gtsam::NonlinearFactorGraph factors;
   factors.add(gtsam::PriorFactor<gtsam::Pose3>(key, map_pose, noise));
+  appendGravityConsistencyFactor(key, sample.pose, factors);
   gtsam::Values values;
   values.insert(key, map_pose);
   gtsam::FixedLagSmoother::KeyTimestampMap timestamps;
@@ -1764,6 +1873,7 @@ bool RtkFixedLagBackend::initializeGraph(const RawOdomSample &sample) {
                                 sample.pose, map_pose, false});
   ++next_keyframe_id_;
   ++total_nodes_created_;
+  if (config_.livo_gravity_consistency_en) ++gravity_factor_count_;
   initialized_ = true;
   queueTextEvent("NODE_CREATED", "id=0 type=prior");
   if (config_.uwb_factor_backend_en)
@@ -1806,6 +1916,7 @@ bool RtkFixedLagBackend::createGraphNode(const RawOdomSample &sample,
   gtsam::NonlinearFactorGraph factors;
   factors.add(gtsam::BetweenFactor<gtsam::Pose3>(previous.key, key, relative,
                                                  noise));
+  appendGravityConsistencyFactor(key, sample.pose, factors);
   gtsam::Values values;
   values.insert(key, initial);
   gtsam::FixedLagSmoother::KeyTimestampMap timestamps;
@@ -1817,6 +1928,7 @@ bool RtkFixedLagBackend::createGraphNode(const RawOdomSample &sample,
   ++next_keyframe_id_;
   ++total_nodes_created_;
   ++livo_factor_count_;
+  if (config_.livo_gravity_consistency_en) ++gravity_factor_count_;
   if (created_key) *created_key = key;
   std::ostringstream detail;
   detail << "id=" << (next_keyframe_id_ - 1)
@@ -1996,6 +2108,21 @@ void RtkFixedLagBackend::processPendingGnss() {
   }
 }
 
+void RtkFixedLagBackend::finalizePendingGraphGnss() {
+  for (auto measurement = pending_factor_gnss_.begin();
+       measurement != pending_factor_gnss_.end();) {
+    if (!raw_odom_buffer_.empty() &&
+        measurement->stamp <= raw_odom_buffer_.back().stamp) {
+      ++measurement;
+      continue;
+    }
+    rejectGnss(kNoRawOdomBracketAtEndOfStream, 0.0, 0.0,
+               &measurement->stamp);
+    last_processed_gnss_stamp_ns_ = stampNanoseconds(measurement->stamp);
+    measurement = pending_factor_gnss_.erase(measurement);
+  }
+}
+
 bool RtkFixedLagBackend::addGnssFactor(
     const GnssMeasurement &measurement, const Keyframe &keyframe) {
   const std::int64_t measurement_stamp_ns =
@@ -2049,19 +2176,23 @@ bool RtkFixedLagBackend::addGnssFactor(
       effective_measurement.sigmas.array().square().matrix();
   const Eigen::LDLT<gtsam::Matrix3> decomposition(innovation_covariance);
   if (decomposition.info() != Eigen::Success) {
+    gnss_reacquisition_candidate_count_ = 0;
     rejectGnss("INVALID_INNOVATION_COVARIANCE", residual_m, 0.0,
                &measurement.stamp);
     return false;
   }
   const double nis = residual.dot(decomposition.solve(residual));
   if (!std::isfinite(nis) || nis < 0.0) {
+    gnss_reacquisition_candidate_count_ = 0;
     rejectGnss("INVALID_INNOVATION_COVARIANCE", residual_m, nis,
                &measurement.stamp);
     return false;
   }
   last_gnss_residual_m_ = residual_m;
   last_gnss_nis_ = nis;
-  if (residual_m > config_.max_gnss_residual_m) {
+  const bool reacquisition_confirmed =
+      confirmGnssReacquisition(measurement, residual, nis);
+  if (residual_m > config_.max_gnss_residual_m && !reacquisition_confirmed) {
     rejectGnss("GNSS_RESIDUAL_TOO_LARGE", residual_m, nis,
                &measurement.stamp);
     return false;
@@ -2092,6 +2223,18 @@ bool RtkFixedLagBackend::addGnssFactor(
 
   ++gnss_accepted_;
   ++gnss_factor_count_;
+  if (reacquisition_confirmed) {
+    std::ostringstream detail;
+    detail << "stamp=" << std::setprecision(15) << measurement.stamp.toSec()
+           << " accepted_factor_gap_s=" << accepted_factor_gap_s
+           << " consistent_fixed_candidates="
+           << gnss_reacquisition_candidate_count_
+           << " residual=" << residual_m << " nis=" << nis
+           << " absolute_gate_bypassed=1 nis_gate_bypassed=0";
+    queueTextEvent("GNSS_REACQUISITION_CONFIRMED", detail.str());
+    ROS_INFO_STREAM("[RTK_BACKEND_GNSS_REACQUISITION] " << detail.str());
+  }
+  gnss_reacquisition_candidate_count_ = 0;
   if (starts_recovery) {
     gnss_recovery_start_stamp_ns_ = measurement_stamp_ns;
     gnss_recovery_fade_start_stamp_ns_ = -1;
@@ -2499,6 +2642,7 @@ void RtkFixedLagBackend::refreshEstimateAndPublish(bool publish_current) {
 
   active_factors_ = 0;
   active_livo_factors_ = 0;
+  active_gravity_factors_ = 0;
   active_gnss_factors_ = 0;
   active_uwb_factors_ = 0;
   for (const auto &factor : smoother_->getFactors()) {
@@ -2511,6 +2655,8 @@ void RtkFixedLagBackend::refreshEstimateAndPublish(bool publish_current) {
       ++active_gnss_factors_;
     } else if (boost::dynamic_pointer_cast<UwbRangeFactor>(factor)) {
       ++active_uwb_factors_;
+    } else if (boost::dynamic_pointer_cast<gtsam::Pose3AttitudeFactor>(factor)) {
+      ++active_gravity_factors_;
     }
   }
   updateUwbGeometryDiagnostics(estimate);
@@ -2523,7 +2669,7 @@ void RtkFixedLagBackend::refreshEstimateAndPublish(bool publish_current) {
                      << " active=" << keyframes_.size()
                      << " limit=" << config_.max_active_states);
   }
-  if (!publish_current) return;
+  if (!publish_current || !config_.enable) return;
 
   const Keyframe &current = keyframes_.back();
   nav_msgs::Odometry optimized;
@@ -2650,6 +2796,8 @@ void RtkFixedLagBackend::rejectGnss(const std::string &reason,
     ++gnss_time_rejected_;
   } else if (reason == kInterpolationInvalid) {
     ++gnss_interpolation_invalid_;
+    ++gnss_time_rejected_;
+  } else if (reason == kNoRawOdomBracketAtEndOfStream) {
     ++gnss_time_rejected_;
   } else if (reason == kGnssLateOutOfOrder) {
     ++gnss_late_out_of_order_;
@@ -3047,7 +3195,8 @@ void RtkFixedLagBackend::queueStatusCsv() {
        << last_uwb_nis_ << "," << uwb_geometry_eigenvalues_(0) << ","
        << uwb_geometry_eigenvalues_(1) << ","
        << uwb_geometry_eigenvalues_(2) << "," << uwb_geometry_rank_ << ","
-       << uwb_geometry_condition_;
+       << uwb_geometry_condition_ << "," << active_gravity_factors_
+       << "," << gravity_factor_count_;
   pending_file_batch_.status_lines.push_back(line.str());
 }
 

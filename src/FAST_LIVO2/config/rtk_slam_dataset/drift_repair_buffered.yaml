@@ -1,0 +1,30 @@
+# Same estimator as Trial04; finite replay queues absorb its observed brief
+# compute burst. No rate, timestamp, calibration or accuracy-parameter change.
+common:
+  max_img_buffer_size: 128
+  max_lidar_buffer_size: 128
+  max_imu_buffer_size: 12000
+
+preprocess:
+  point_filter_num: 1
+  filter_size_surf: 0.10
+vio:
+  img_point_cov: 100.0
+uav:
+  gravity_align_en: true
+local_map:
+  sliding_thresh: 8.0
+
+rtk_backend:
+  gnss_reacquisition_en: true
+  gnss_reacquisition_consistency_m: 0.5
+  gnss_recovery_gap_threshold_s: 5.0
+  gnss_recovery_fixed_confirm_factors: 5
+  gnss_recovery_fixed_max_gap_s: 0.5
+  gnss_recovery_ramp_duration_s: 0.0
+  gnss_recovery_initial_sigma_scale: 1.0
+
+pcd_save:
+  save_log_en: true
+diagnostics:
+  csv_flush_interval_rows: 100

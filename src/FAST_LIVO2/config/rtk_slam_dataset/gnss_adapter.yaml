@@ -1,0 +1,59 @@
+# Source: RTK-SLAM Dataset ROS1 NavSatFix and official rtk.txt status audit
+# Converted for: Ours GNSS adapter
+# Do not tune against ground truth.
+
+gnss_adapter:
+  enable: true
+  # The external dataset adapter converts accepted NavSatFix measurements to
+  # origin-local ENU, preserves header time, and rotates (without scaling) the
+  # full covariance from fix-local ENU axes into origin-local ENU axes.
+  input_mode: "pose_with_covariance_stamped"
+  input_topic: "/rtk_slam/gnss/enu_pose"
+  output_odom_topic: "/gnss_fusion/enu_odom"
+  output_status_topic: "/gnss_fusion/status"
+  publish_local_enu_odometry: true
+
+  # Full-dataset exact timestamp audit: NavSatFix status==0 iff released
+  # rtk.txt status==4 for all four sequences. The external adapter must publish
+  # only those status==0 rows. PoseWithCovarianceStamped has no quality field,
+  # so this is one explicit, dataset-specific RTK_FIXED classification.
+  pose_input_quality: 4
+  pose_input_num_sv: 0
+  gnss_pose_covariance_authoritative: true
+
+  # The Pose input is already ENU. These origin settings only satisfy the
+  # shared config validator; no second LLA-to-ENU conversion occurs here.
+  origin_mode: "first_fixed"
+  origin_lla: [0.0, 0.0, 0.0]
+  origin_average_count: 1
+  origin_average_max_gap_s: 2.0
+
+  # PVT-only gates are inactive in Pose mode but are kept permissive and valid.
+  min_num_sv: 0
+  max_num_sv: 255
+  max_pdop: 1000000.0
+  max_h_acc_m: 1000000.0
+  max_v_acc_m: 1000000.0
+  max_vel_acc_mps: 1000000.0
+  reject_nonpositive_pdop: false
+  reject_nonpositive_vel_acc: false
+  min_sigma_xy_m: 0.000001
+  min_sigma_z_m: 0.000001
+  max_sigma_xy_m: 1000000.0
+  max_sigma_z_m: 1000000.0
+  min_sigma_vel_mps: 0.000001
+
+  fixed_confirm_count: 1
+  fixed_lost_count: 1
+  recovery_confirm_count: 1
+  max_time_gap_s: 1.0
+  require_monotonic_time: true
+
+  accept_rtk_fixed: true
+  accept_rtk_float: false
+  accept_differential: false
+  accept_single: false
+
+  frame_id: "map"
+  child_frame_id: "gnss_antenna"
+  log_interval_s: 5.0

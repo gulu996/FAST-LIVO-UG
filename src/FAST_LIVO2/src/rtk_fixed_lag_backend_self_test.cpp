@@ -2,6 +2,8 @@
 
 #include <gtsam/inference/Symbol.h>
 #include <gtsam/base/numericalDerivative.h>
+#include <gtsam/navigation/AttitudeFactor.h>
+#include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
 #include <gtsam/slam/BetweenFactor.h>
 #include <gtsam/slam/PriorFactor.h>
 
@@ -63,6 +65,21 @@ struct RtkFixedLagBackendSelfTestAccess {
     std::int64_t conservation_delta = 0;
   };
 
+  struct EndOfStreamResult {
+    std::size_t graph_pending = 0;
+    std::size_t processable_graph_pending = 0;
+    std::uint64_t live_rejected = 0;
+    std::uint64_t rejected = 0;
+    std::uint64_t time_rejected = 0;
+    std::uint64_t factors = 0;
+    std::int64_t last_processed_stamp_ns = -1;
+    std::int64_t conservation_delta = 0;
+    std::int64_t processable_conservation_delta = 0;
+    std::uint64_t silent_drop_count = 0;
+    std::uint64_t processable_silent_drop_count = 0;
+    std::string last_reject_reason;
+  };
+
   static bool rejectsNonFiniteLeverArm() {
     RtkFixedLagBackend backend;
     backend.config_.save_results = false;
@@ -77,9 +94,116 @@ struct RtkFixedLagBackendSelfTestAccess {
     return false;
   }
 
+  static bool runGravityConsistencyCheck() {
+    const auto check = [](bool condition, const char *message) {
+      if (!condition) throw std::runtime_error(message);
+    };
+    RtkFixedLagBackend backend;
+    backend.config_.enable = false;
+    backend.config_.save_results = false;
+    backend.config_.save_text_log = false;
+    backend.config_.livo_gravity_consistency_en = true;
+    bool rejected = false;
+    try { backend.validateParameters(); }
+    catch (const std::invalid_argument &) { rejected = true; }
+    check(rejected, "gravity consistency accepted an undeclared raw frame");
+    backend.config_.raw_odom_gravity_aligned = true;
+    backend.validateParameters();
+    backend.config_.prior_roll_pitch_sigma_rad = std::nan("");
+    rejected = false;
+    try { backend.validateParameters(); }
+    catch (const std::invalid_argument &) { rejected = true; }
+    check(rejected, "gravity consistency accepted a non-finite sigma");
+    backend.config_.prior_roll_pitch_sigma_rad = 0.05;
+
+    const gtsam::Key key = gtsam::Symbol('x', 0);
+    const gtsam::Pose3 raw(gtsam::Rot3::RzRyRx(0.2, -0.1, 0.5),
+                           gtsam::Point3(1.0, 2.0, 3.0));
+    gtsam::NonlinearFactorGraph factors;
+    rejected = false;
+    try {
+      backend.appendGravityConsistencyFactor(
+          key, gtsam::Pose3(gtsam::Rot3(), gtsam::Point3(std::nan(""), 0, 0)),
+          factors);
+    } catch (const std::invalid_argument &) { rejected = true; }
+    check(rejected && factors.empty(), "invalid raw pose inserted a gravity factor");
+    backend.appendGravityConsistencyFactor(key, raw, factors);
+    const auto factor = boost::dynamic_pointer_cast<gtsam::Pose3AttitudeFactor>(
+        factors.at(0));
+    check(bool(factor), "gravity consistency did not use the native attitude factor");
+    const gtsam::Pose3 yaw_and_translation(
+        gtsam::Rot3::Rz(1.1).compose(raw.rotation()),
+        gtsam::Point3(-10.0, 20.0, 9.0));
+    gtsam::Matrix analytical;
+    check(factor->evaluateError(yaw_and_translation, analytical).norm() < 1e-12,
+          "gravity factor constrained yaw or actual height");
+    const auto evaluate = [&](const gtsam::Pose3 &pose) -> gtsam::Vector2 {
+      return factor->evaluateError(pose);
+    };
+    const gtsam::Matrix numerical =
+        gtsam::numericalDerivative11<gtsam::Vector2, gtsam::Pose3>(
+            evaluate, yaw_and_translation, 1e-6);
+    check((analytical - numerical).norm() < 1e-6 &&
+              analytical.rightCols(3).norm() < 1e-12,
+          "gravity factor Jacobian or zero translation sensitivity is wrong");
+    const gtsam::Pose3 tilted(
+        gtsam::Rot3::Rx(0.15).compose(yaw_and_translation.rotation()),
+        yaw_and_translation.translation());
+    check(factor->evaluateError(tilted).norm() > 0.1,
+          "gravity factor did not observe roll/pitch inconsistency");
+
+    // Real graph insertion paths, with changing body tilt and non-flat height.
+    for (const bool enabled : {false, true}) {
+      RtkFixedLagBackend graph_backend;
+      graph_backend.config_.enable = false;
+      graph_backend.config_.save_results = false;
+      graph_backend.config_.save_text_log = false;
+      graph_backend.config_.livo_gravity_consistency_en = enabled;
+      graph_backend.config_.raw_odom_gravity_aligned = true;
+      graph_backend.initial_map_to_odom_ = gtsam::Pose3(
+          gtsam::Rot3::Rz(0.4), gtsam::Point3(10.0, -3.0, 5.0));
+      check(graph_backend.initializeGraph({ros::Time(1, 0), raw}),
+            "actual initial graph insertion failed");
+      const std::vector<std::string> triggers{"motion", "gnss", "uwb"};
+      for (std::size_t i = 0; i < triggers.size(); ++i) {
+        const gtsam::Pose3 next(
+            gtsam::Rot3::RzRyRx(0.2 + 0.01 * i, -0.1, 0.6 + 0.1 * i),
+            gtsam::Point3(2.0 + i, 2.0, 3.0 + std::sin(i + 1.0)));
+        check(graph_backend.createGraphNode(
+                  {ros::Time(static_cast<uint32_t>(i + 2), 0), next},
+                  triggers[i], nullptr),
+              "actual shared motion/GNSS/UWB node insertion failed");
+        const auto estimated = graph_backend.keyframes_.back().optimized_pose;
+        check(estimated.equals(graph_backend.initial_map_to_odom_.compose(next), 1e-8),
+              "gravity consistency flattened height or changed an exact raw motion");
+      }
+      check(graph_backend.gravity_factor_count_ == (enabled ? 4u : 0u) &&
+                graph_backend.active_gravity_factors_ == (enabled ? 4u : 0u),
+            "gravity factor accounting differs from actual node insertions");
+    }
+
+    // A soft inconsistent attitude prior must not overwhelm observed vertical.
+    gtsam::NonlinearFactorGraph graph;
+    const gtsam::Pose3 identity_raw(gtsam::Rot3(), gtsam::Point3(0, 0, 3));
+    backend.appendGravityConsistencyFactor(key, identity_raw, graph);
+    const gtsam::Pose3 initial(gtsam::Rot3::RzRyRx(0.2, 0.1, 0.5),
+                               gtsam::Point3(4, -2, 3));
+    graph.add(gtsam::PriorFactor<gtsam::Pose3>(
+        key, initial, gtsam::noiseModel::Isotropic::Sigma(6, 1.0)));
+    gtsam::Values values;
+    values.insert(key, initial);
+    const auto result = gtsam::LevenbergMarquardtOptimizer(graph, values)
+                            .optimize().at<gtsam::Pose3>(key);
+    check(std::acos(result.rotation().matrix()(2, 2)) < 0.01 &&
+              (result.translation() - initial.translation()).norm() < 1e-8,
+          "soft gravity consistency failed to suppress tilt or constrained height");
+    return true;
+  }
+
   static void initializeTestGraph(
       RtkFixedLagBackend &backend,
-      const RtkFixedLagBackend::RawOdomSample &sample) {
+      const RtkFixedLagBackend::RawOdomSample &sample,
+      double prior_sigma = 0.1) {
     gtsam::ISAM2Params parameters;
     parameters.findUnusedFactorSlots = true;
     backend.smoother_.reset(new gtsam::IncrementalFixedLagSmoother(
@@ -89,7 +213,7 @@ struct RtkFixedLagBackendSelfTestAccess {
     const gtsam::Pose3 map_pose =
         backend.initial_map_to_odom_.compose(sample.pose);
     gtsam::Vector6 sigmas;
-    sigmas.setConstant(0.1);
+    sigmas.setConstant(prior_sigma);
     const auto noise = gtsam::noiseModel::Diagonal::Sigmas(sigmas);
     gtsam::NonlinearFactorGraph factors;
     factors.add(gtsam::PriorFactor<gtsam::Pose3>(key, map_pose, noise));
@@ -105,6 +229,74 @@ struct RtkFixedLagBackendSelfTestAccess {
     backend.next_keyframe_id_ = 1;
     backend.total_nodes_created_ = 1;
     backend.initialized_ = true;
+  }
+
+  static bool runGnssReacquisitionCheck() {
+    RtkFixedLagBackend backend;
+    backend.config_.enable = false;
+    backend.config_.save_results = false;
+    backend.config_.save_text_log = false;
+    backend.config_.gnss_recovery_gap_threshold_s = 5.0;
+    backend.config_.gnss_recovery_fixed_confirm_factors = 3;
+    backend.config_.gnss_recovery_fixed_max_gap_s = 0.5;
+    backend.config_.gnss_reacquisition_consistency_m = 0.5;
+    backend.last_added_gnss_factor_stamp_ns_ = 1'000'000'000LL;
+    RtkFixedLagBackend::GnssMeasurement measurement;
+    measurement.raw_quality = fast_livo::GnssStatus::RTK_FIXED;
+    const auto candidate = [&](double stamp, double offset, double nis = 1.0) {
+      measurement.stamp.fromSec(stamp);
+      return backend.confirmGnssReacquisition(
+          measurement, gtsam::Vector3(offset, 0.0, 0.0), nis);
+    };
+    const auto check = [](bool condition, const char *message) {
+      if (!condition) throw std::runtime_error(message);
+    };
+    check(!candidate(10.0, 6.0) && !candidate(10.2, 6.0) &&
+              !candidate(10.4, 6.0),
+          "disabled reacquisition changed the old absolute gate");
+    backend.config_.gnss_reacquisition_en = true;
+    check(!candidate(4.0, 6.0), "reacquisition started without an outage");
+    check(!candidate(10.0, 6.0) && !candidate(10.2, 6.1) &&
+              candidate(10.4, 6.2),
+          "consistent Fixed return did not confirm");
+    check(!candidate(10.6, 20.0) && !candidate(10.8, 6.0) &&
+              !candidate(11.0, 6.0) && candidate(11.2, 6.0),
+          "isolated Fixed spike was accepted or failed to reset candidates");
+    check(!candidate(11.4, 6.0, 20.0) && !candidate(11.6, 6.0) &&
+              !candidate(11.8, 6.0) && candidate(12.0, 6.0),
+          "NIS failure bypassed the gate or failed to reset candidates");
+    check(!candidate(13.0, 6.0) && !candidate(13.2, 6.0) &&
+              candidate(13.4, 6.0),
+          "a long candidate gap failed to reset confirmation");
+    measurement.raw_quality = fast_livo::GnssStatus::RTK_FLOAT;
+    check(!candidate(13.6, 6.0), "Float triggered Fixed reacquisition");
+    measurement.raw_quality = fast_livo::GnssStatus::RTK_FIXED;
+    check(!candidate(13.8, 6.0) && !candidate(14.0, 6.0) &&
+              candidate(14.2, 6.0),
+          "Float did not break the Fixed candidate streak");
+    check(!candidate(14.2, 6.0) && !candidate(14.4, 6.0),
+          "duplicate candidate time did not reset confirmation");
+
+    // Exercise the real factor insertion, not only the candidate helper.
+    backend.gnss_reacquisition_candidate_count_ = 0;
+    initializeTestGraph(backend,
+                        {ros::Time(20, 0), gtsam::Pose3()}, 10.0);
+    measurement.position = gtsam::Point3(6.0, 0.0, 0.0);
+    measurement.sigmas = gtsam::Vector3::Constant(0.1);
+    for (int i = 0; i < 3; ++i) {
+      measurement.stamp.fromSec(20.0 + 0.2 * i);
+      const bool added = backend.addGnssFactor(measurement,
+                                               backend.keyframes_.front());
+      check(added == (i == 2),
+            "the real graph accepted an unconfirmed return or rejected a confirmed one");
+    }
+    const auto pose = backend.smoother_->calculateEstimate<gtsam::Pose3>(
+        backend.keyframes_.front().key);
+    check(backend.gnss_factor_count_ == 1 &&
+              backend.gnss_reacquisition_candidate_count_ == 0 &&
+              (pose.translation() - measurement.position).norm() < 0.1,
+          "confirmed reacquisition did not correct the graph or clear candidates");
+    return true;
   }
 
   static BoundaryResult runAlignmentBoundaryOrder(bool gnss_first) {
@@ -207,6 +399,46 @@ struct RtkFixedLagBackendSelfTestAccess {
         backend.alignment_last_used_gnss_stamp_ns_;
     result.conservation_delta = backend.gnssConservationDelta();
     return result;
+  }
+
+  static EndOfStreamResult runEndOfStreamGnssCheck() {
+    RtkFixedLagBackend backend;
+    backend.config_.enable = false;
+    backend.config_.save_results = false;
+    backend.config_.save_text_log = false;
+    backend.alignment_.valid = true;
+    gtsam::Vector3 sigmas;
+    sigmas.setConstant(0.1);
+    backend.raw_odom_buffer_.push_back(RtkFixedLagBackend::RawOdomSample{
+        ros::Time(10, 252913237), gtsam::Pose3()});
+    backend.pending_factor_gnss_.push_back(
+        RtkFixedLagBackend::GnssMeasurement{
+            ros::Time(10, 300000000), gtsam::Point3(), sigmas});
+    backend.gnss_received_ = 1;
+    backend.processPendingGnss();
+    const std::uint64_t live_rejected = backend.gnss_rejected_;
+    backend.finalizePendingGraphGnss();
+
+    RtkFixedLagBackend processable;
+    processable.config_.enable = false;
+    processable.config_.save_results = false;
+    processable.config_.save_text_log = false;
+    processable.raw_odom_buffer_.push_back(RtkFixedLagBackend::RawOdomSample{
+        ros::Time(10, 400000000), gtsam::Pose3()});
+    processable.pending_factor_gnss_.push_back(
+        RtkFixedLagBackend::GnssMeasurement{
+            ros::Time(10, 300000000), gtsam::Point3(), sigmas});
+    processable.gnss_received_ = 1;
+    processable.finalizePendingGraphGnss();
+    return EndOfStreamResult{
+        backend.pending_factor_gnss_.size(),
+        processable.pending_factor_gnss_.size(), live_rejected,
+        backend.gnss_rejected_, backend.gnss_time_rejected_,
+        backend.gnss_factor_count_,
+        backend.last_processed_gnss_stamp_ns_, backend.gnssConservationDelta(),
+        processable.gnssConservationDelta(), backend.gnssSilentDropCount(),
+        processable.gnssSilentDropCount(),
+        backend.last_reject_reason_};
   }
 
   static std::pair<bool, bool> runFilteredFixedAlignmentResetCheck() {
@@ -625,6 +857,25 @@ void testAlignmentBoundaryTransition() {
           "duplicate_factor_count must be zero");
 }
 
+void testEndOfStreamGnssRejection() {
+  const auto result = fast_livo_backend::RtkFixedLagBackendSelfTestAccess::
+      runEndOfStreamGnssCheck();
+  require(result.live_rejected == 0 && result.graph_pending == 0 &&
+              result.rejected == 1 && result.time_rejected == 1 &&
+              result.factors == 0,
+          "future GNSS must wait live, then be rejected at end of stream");
+  require(result.processable_graph_pending == 1,
+          "end-of-stream handling must not hide a processable graph backlog");
+  require(result.last_processed_stamp_ns == 10300000000LL &&
+              result.conservation_delta == 0 &&
+              result.processable_conservation_delta == 0 &&
+              result.silent_drop_count == 0 &&
+              result.processable_silent_drop_count == 0 &&
+              result.last_reject_reason ==
+                  "GNSS_NO_RAW_ODOM_BRACKET_AT_END_OF_STREAM",
+          "end-of-stream GNSS rejection lost its stamp, reason, or accounting");
+}
+
 void testFilteredFixedDoesNotResetAlignment() {
   const auto result = fast_livo_backend::RtkFixedLagBackendSelfTestAccess::
       runFilteredFixedAlignmentResetCheck();
@@ -751,10 +1002,17 @@ int main() {
     testUwbRangeFactorJacobian();
     testRawPoseInterpolation();
     testAlignmentBoundaryTransition();
+    testEndOfStreamGnssRejection();
     testFilteredFixedDoesNotResetAlignment();
     testGnssQualityPolicy();
     testGnssWeightingAndRecoveryRamp();
+    require(fast_livo_backend::RtkFixedLagBackendSelfTestAccess::
+                runGnssReacquisitionCheck(),
+            "consistent Fixed reacquisition checks failed");
     testAuthoritativeGnssCovariance();
+    require(fast_livo_backend::RtkFixedLagBackendSelfTestAccess::
+                runGravityConsistencyCheck(),
+            "gravity consistency checks failed");
     testResultReferenceLeverArm();
     testTrueFixedLagMarginalization();
     testStandardFixedLagMarginalization();

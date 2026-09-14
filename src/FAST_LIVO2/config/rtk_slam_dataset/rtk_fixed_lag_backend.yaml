@@ -1,0 +1,97 @@
+# Source: RTK-SLAM Dataset official calibration and Ours backend defaults
+# Converted for: Ours fixed-lag RTK backend
+# Do not tune against ground truth.
+
+rtk_backend:
+  enable: true
+  uwb_factor_backend_en: false
+
+  accept_rtk_fixed: true
+  accept_rtk_float: false
+  accept_differential: false
+  accept_single: false
+
+  raw_odom_topic: "/backend/livo_odom_raw"
+  gnss_odom_topic: "/gnss_fusion/enu_odom"
+  gnss_status_topic: "/gnss_fusion/status"
+  optimized_odom_topic: "/rtk_backend/optimized_odom"
+  optimized_path_topic: "/rtk_backend/optimized_path"
+  map_to_odom_topic: "/rtk_backend/map_to_odom"
+  status_topic: "/rtk_backend/status"
+
+  # Native fixed-lag smoother. `optimized_online` is causal at emission;
+  # `optimized_final` contains the 20 s fixed-lag result after graceful exit.
+  lag_seconds: 20.0
+  keyframe_translation_m: 0.8
+  keyframe_rotation_deg: 8.0
+  keyframe_max_interval_s: 1.0
+  raw_odom_buffer_seconds: 5.0
+  max_raw_odom_interpolation_gap_s: 0.15
+  reuse_existing_node_time_diff_s: 0.02
+  gnss_node_min_interval_s: 0.20
+  # ponytail: this dataset reaches 394 states in one 20 s high-motion window;
+  # keep a 512-state fuse, and add a minimum keyframe interval for faster data.
+  max_active_states: 512
+
+  alignment_min_pairs: 20
+  alignment_min_baseline_m: 8.0
+  alignment_max_pair_time_diff_s: 0.05
+  alignment_max_rmse_m: 0.5
+
+  # Official offsets are expressed from the IMU/body state origin, in IMU axes.
+  antenna_lever_arm_body_m: [0.023, -0.023, 0.090]
+  result_pose_lever_arm_body_m: [-0.073, -0.023, -0.172]
+
+  # Preserve every accepted source diagonal variance: the observed Fixed
+  # sigmas are well inside these numerical safety bounds. Authoritative Pose
+  # covariance also bypasses quality/satellite re-inflation.
+  min_gnss_sigma_xy_m: 0.000001
+  min_gnss_sigma_z_m: 0.000001
+  max_gnss_sigma_xy_m: 10.0
+  max_gnss_sigma_z_m: 10.0
+  rtk_float_sigma_scale: 1.0
+  rtk_float_reference_satellites: 0
+  rtk_float_satellite_sigma_scale_max: 1.0
+
+  # No dataset-specific post-gap covariance policy is introduced.
+  gnss_recovery_gap_threshold_s: 0.0
+  gnss_recovery_ramp_duration_s: 0.0
+  gnss_recovery_initial_sigma_scale: 1.0
+  gnss_recovery_fixed_confirm_factors: 1
+  gnss_recovery_fixed_max_gap_s: 0.5
+  gnss_recovery_float_factor_rate_hz: 0.0
+
+  max_gnss_residual_m: 3.0
+  max_gnss_nis: 11.34
+  robust_kernel: "huber"
+  huber_delta: 2.5
+
+  livo_translation_sigma_m: 0.05
+  livo_lateral_vertical_sigma_m: 0.001
+  livo_rotation_sigma_rad: 0.01
+  livo_uwb_rotation_sigma_rad: 0.0003
+  prior_translation_sigma_m: 0.10
+  prior_roll_pitch_sigma_rad: 0.05
+  prior_yaw_sigma_rad: 0.20
+  uwb_initial_prior_translation_sigma_m: 0.001
+  uwb_initial_prior_rotation_sigma_rad: 0.001
+
+  frame_id: "map"
+  odom_frame_id: "odom"
+  body_frame_id: "body"
+  log_interval_s: 5.0
+
+  save_results: true
+  # Required launch arg `run_dir` overrides this value before node startup.
+  output_directory: ""
+  raw_online_file: "livo_raw_online.tum"
+  optimized_online_file: "rtk_optimized_online.tum"
+  optimized_final_file: "rtk_optimized_final.tum"
+  gnss_file: "gnss_enu.tum"
+  # The current backend couples this empty/header-only UWB CSV to save_results.
+  uwb_status_csv_file: "uwb_backend_measurements.csv"
+  status_csv_file: "rtk_backend_status.csv"
+  flush_interval_s: 1.0
+  # stdout/stderr is captured by the common runner; avoid a duplicate text log.
+  save_text_log: false
+  text_log_file: "rtk_backend.log"

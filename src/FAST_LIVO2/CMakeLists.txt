@@ -219,6 +219,12 @@ add_executable(camera_aligned_neu_logger_self_test src/camera_aligned_neu_logger
 add_executable(voxel_filter_self_test src/voxel_filter_self_test.cpp)
 add_executable(lio_degeneracy_self_test src/lio_degeneracy_self_test.cpp)
 add_executable(preprocess_xyzirt_self_test src/preprocess_xyzirt_self_test.cpp)
+add_executable(livo_point_time_split_self_test src/livo_point_time_split_self_test.cpp)
+target_compile_options(livo_point_time_split_self_test PRIVATE -UNDEBUG)
+add_executable(vio_update_transaction_self_test src/vio_update_transaction_self_test.cpp)
+target_link_libraries(vio_update_transaction_self_test
+  vio lio ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBRARIES}
+  ${Sophus_LIBRARIES} ${Boost_LIBRARIES})
 
 add_dependencies(fastlivo_mapping ${catkin_EXPORTED_TARGETS})
 add_dependencies(gnss_manager_self_test ${catkin_EXPORTED_TARGETS})
@@ -344,6 +350,7 @@ target_link_libraries(preprocess_xyzirt_self_test
 )
 
 if(OpenMP_CXX_FOUND)
+  target_link_libraries(vio_update_transaction_self_test ${OpenMP_CXX_FLAGS})
   target_link_libraries(gnss ${OpenMP_CXX_FLAGS})
   target_link_libraries(gnss_manager_self_test ${OpenMP_CXX_FLAGS})
   target_link_libraries(uwb_manager_self_test ${OpenMP_CXX_FLAGS})

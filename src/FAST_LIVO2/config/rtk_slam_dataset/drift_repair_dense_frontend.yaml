@@ -1,0 +1,26 @@
+# Restore the successful baseline's point sampling, visual noise and map
+# settings, but keep a gravity-aligned frame: our GNSS backend estimates yaw
+# and translation only, not the baseline odometry frame's roll and pitch.
+preprocess:
+  point_filter_num: 1
+  filter_size_surf: 0.10
+vio:
+  img_point_cov: 100.0
+uav:
+  gravity_align_en: true
+local_map:
+  sliding_thresh: 8.0
+
+rtk_backend:
+  gnss_reacquisition_en: true
+  gnss_reacquisition_consistency_m: 0.5
+  gnss_recovery_gap_threshold_s: 5.0
+  gnss_recovery_fixed_confirm_factors: 5
+  gnss_recovery_fixed_max_gap_s: 0.5
+  gnss_recovery_ramp_duration_s: 0.0
+  gnss_recovery_initial_sigma_scale: 1.0
+
+pcd_save:
+  save_log_en: true
+diagnostics:
+  csv_flush_interval_rows: 100

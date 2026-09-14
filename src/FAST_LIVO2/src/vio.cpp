@@ -27,6 +27,15 @@ namespace
 bool g_vio_pixel_snap_for_determinism_enabled = true;
 bool g_vio_camera_point_snap_for_determinism_enabled = true;
 
+bool finiteVisualState(const StatesGroup &value)
+{
+  return value.rot_end.allFinite() && value.pos_end.allFinite() &&
+      value.vel_end.allFinite() && value.bias_a.allFinite() &&
+      value.bias_g.allFinite() && value.gravity.allFinite() &&
+      value.cov.allFinite() && std::isfinite(value.inv_expo_time) &&
+      value.inv_expo_time > 0.0;
+}
+
 std::string formatLocalTime(const char *fmt)
 {
   const std::time_t now = std::time(nullptr);
@@ -470,7 +479,9 @@ void VIOManager::initializeVIO(ros::NodeHandle &nh)
   patch_size_total = patch_size * patch_size;
   patch_size_half = static_cast<int>(patch_size / 2);
   warp_len = patch_size_total * patch_pyrimid_level;
-  patch_buffer.resize(warp_len);
+  // ponytail: search levels are independently bounded to 0..2; even a
+  // one-level optimizer needs scratch space for the level-2 image patch.
+  patch_buffer.resize(patch_size_total * std::max(patch_pyrimid_level, 3));
   border = (patch_size_half + 1) * (1 << patch_pyrimid_level);
 
   retrieve_voxel_points.reserve(length);
@@ -1229,6 +1240,8 @@ void VIOManager::evaluateVisualAdaptiveCovarianceShadow(const cv::Mat &img)
     const float w_ref_bl = (1.0f - subpix_u_ref) * subpix_v_ref;
     const float w_ref_br = subpix_u_ref * subpix_v_ref;
     const double inv_ref_expo = visual_submap->inv_expo_list[i];
+    ExposurePhotometricModel photometry;
+    if (!photometry.initialize(shadow_state.inv_expo_time, inv_ref_expo)) return;
 
     for (int x = 0; x < patch_size; ++x)
     {
@@ -1255,7 +1268,7 @@ void VIOManager::evaluateVisualAdaptiveCovarianceShadow(const cv::Mat &img)
 
         MD(1, 2) image_jacobian;
         image_jacobian << du, dv;
-        image_jacobian *= shadow_state.inv_expo_time * inv_scale;
+        image_jacobian *= photometry.current_weight * inv_scale;
         const MD(1, 3) Jdphi = image_jacobian * projection_jacobian * camera_point_hat;
         const MD(1, 3) Jdp = -image_jacobian * projection_jacobian;
         const MD(1, 3) JdR = Jdphi * Jdphi_dR + Jdp * Jdp_dR;
@@ -1266,10 +1279,11 @@ void VIOManager::evaluateVisualAdaptiveCovarianceShadow(const cv::Mat &img)
             w_ref_bl * img_ptr[scale * img_step] +
             w_ref_br * img_ptr[scale * img_step + scale];
         const int row = i * patch_size_total + x * patch_size + y;
-        residuals[row] = shadow_state.inv_expo_time * current_value -
-                         inv_ref_expo * reference_patch[reference_offset + x * patch_size + y];
+        residuals[row] = photometry.residual(
+            current_value, reference_patch[reference_offset + x * patch_size + y]);
         if (exposure_estimate_en)
-          jacobian.block<1, 7>(row, 0) << JdR, Jdt, current_value;
+          jacobian.block<1, 7>(row, 0) << JdR, Jdt,
+              photometry.exposureJacobian(current_value, residuals[row]);
         else
           jacobian.block<1, 6>(row, 0) << JdR, Jdt;
         ++n_meas;
@@ -1602,16 +1616,28 @@ void VIOManager::resetGrid()
 
 void VIOManager::computeProjectionJacobian(V3D p, MD(2, 3) & J)
 {
-  const double x = p[0];
-  const double y = p[1];
-  const double z_inv = 1. / p[2];
-  const double z_inv_2 = z_inv * z_inv;
-  J(0, 0) = fx * z_inv;
-  J(0, 1) = 0.0;
-  J(0, 2) = -fx * x * z_inv_2;
-  J(1, 0) = 0.0;
-  J(1, 1) = fy * z_inv;
-  J(1, 2) = -fy * y * z_inv_2;
+  if (cam == nullptr || !p.allFinite())
+  {
+    J.setConstant(std::numeric_limits<double>::quiet_NaN());
+    return;
+  }
+  const double step = std::cbrt(std::numeric_limits<double>::epsilon()) *
+      p.cwiseAbs().maxCoeff();
+  if (!(step > 0.0) || !std::isfinite(step))
+  {
+    J.setConstant(std::numeric_limits<double>::quiet_NaN());
+    return;
+  }
+  // ponytail: AbstractCamera has no Jacobian API. Six projections per feature
+  // keep every camera model consistent; replace with a model-native API if added.
+  // Do not pixel-snap perturbations: that would differentiate quantization.
+  for (int axis = 0; axis < 3; ++axis)
+  {
+    V3D plus = p, minus = p;
+    plus[axis] += step;
+    minus[axis] -= step;
+    J.col(axis) = (cam->world2cam(plus) - cam->world2cam(minus)) / (2.0 * step);
+  }
 }
 
 void VIOManager::getImagePatch(cv::Mat img, V2D pc, float *patch_tmp, int level)
@@ -1646,6 +1672,23 @@ void VIOManager::getImagePatch(cv::Mat img, V2D pc, float *patch_tmp, int level)
   }
 }
 
+bool VIOManager::getVisualVoxelLocation(const V3D &point, VOXEL_LOCATION &location) const
+{
+  if (!point.allFinite() || !std::isfinite(visual_voxel_size) || visual_voxel_size <= 1e-6)
+    return false;
+  int64_t indices[3];
+  for (int axis = 0; axis < 3; ++axis)
+  {
+    const double index = std::floor(point[axis] / visual_voxel_size);
+    // The positive int64 limit rounds up in double, so it is exclusive.
+    const double minimum = static_cast<double>(std::numeric_limits<int64_t>::min());
+    if (!std::isfinite(index) || index < minimum || index >= -minimum) return false;
+    indices[axis] = static_cast<int64_t>(index);
+  }
+  location = VOXEL_LOCATION(indices[0], indices[1], indices[2]);
+  return true;
+}
+
 bool VIOManager::insertPointIntoVoxelMap(VisualPoint *pt_new)
 {
   if (pt_new == nullptr)
@@ -1669,14 +1712,13 @@ bool VIOManager::insertPointIntoVoxelMap(VisualPoint *pt_new)
     return false;
   }
 
-  const double voxel_size = visual_voxel_size;
-  float loc_xyz[3];
-  for (int j = 0; j < 3; j++)
+  VOXEL_LOCATION position;
+  if (!getVisualVoxelLocation(pt_w, position))
   {
-    loc_xyz[j] = pt_w[j] / voxel_size;
-    if (loc_xyz[j] < 0) { loc_xyz[j] -= 1.0; }
+    last_visual_map_insert_reject_invalid++;
+    delete pt_new;
+    return false;
   }
-  VOXEL_LOCATION position((int64_t)loc_xyz[0], (int64_t)loc_xyz[1], (int64_t)loc_xyz[2]);
   auto iter = feat_map.find(position);
   if (iter != feat_map.end())
   {
@@ -2157,12 +2199,8 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 
     V3D pt_w = pg[i].point_w;
 
-    for (int j = 0; j < 3; j++)
-    {
-      loc_xyz[j] = floor(pt_w[j] / voxel_size);
-      if (loc_xyz[j] < 0) { loc_xyz[j] -= 1.0; }
-    }
-    VOXEL_LOCATION position(loc_xyz[0], loc_xyz[1], loc_xyz[2]);
+    VOXEL_LOCATION position;
+    if (!getVisualVoxelLocation(pt_w, position)) continue;
 
     // t_position += omp_get_wtime()-t0;
     // double t1 = omp_get_wtime();
@@ -2369,7 +2407,8 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
           if (loc_xyz[j] < 0) { loc_xyz[j] -= 1.0; }
         }
 
-        VOXEL_LOCATION sample_pos(loc_xyz[0], loc_xyz[1], loc_xyz[2]);
+        VOXEL_LOCATION sample_pos;
+        if (!getVisualVoxelLocation(sample_point_w, sample_pos)) continue;
 
         auto corre_sub_feat_map = sub_feat_map.find(sample_pos);
         if (corre_sub_feat_map != sub_feat_map.end()) break;
@@ -2635,13 +2674,17 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
             {
               if ((*itm)->id_ == ref_patch_temp->id_) continue;
               float *patch_cache = (*itm)->patch_;
+              ExposurePhotometricModel photometry;
+              if (!photometry.initialize(ref_patch_temp->inv_expo_time_, (*itm)->inv_expo_time_)) continue;
 
               for (int ind = 0; ind < patch_size_total; ind++)
               {
-                phtometric_errors += (patch_temp[ind] - patch_cache[ind]) * (patch_temp[ind] - patch_cache[ind]);
+                const double residual = photometry.residual(patch_temp[ind], patch_cache[ind]);
+                phtometric_errors += residual * residual;
               }
               count++;
             }
+            if (count == 0) continue;
             phtometric_errors = phtometric_errors / count;
             if (phtometric_errors < phtometric_errors_min - 1e-6 ||
                 (std::fabs(phtometric_errors - phtometric_errors_min) <= 1e-6 &&
@@ -2663,6 +2706,7 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
       {
         if (!pt->getCloseViewObs(new_frame_->pos(), ref_ftr, pc)) continue;
       }
+      if (ref_ftr == nullptr) continue;
 
       if (normal_en)
       {
@@ -2712,8 +2756,10 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
         warpAffine(A_cur_ref_zero, ref_ftr->img_, ref_ftr->px_, ref_ftr->level_, search_level, pyramid_level, patch_size_half, patch_wrap.data());
       }
 
-      getImagePatch(img, pc, patch_buffer.data(), 0);
-      float *current_patch = patch_buffer.data();
+      // warp_patch[0] already uses the current search-level pixel spacing.
+      // Quality, NCC and photometric gates must compare that same footprint.
+      getImagePatch(img, pc, patch_buffer.data(), search_level);
+      float *current_patch = patch_buffer.data() + patch_size_total * search_level;
 
       const int ref_age = std::max(0, new_frame_->id_ - ref_ftr->id_);
       const double warp_determinant = A_cur_ref_zero.determinant();
@@ -2766,27 +2812,6 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
             current_patch, patch_size_total, sat_threshold,
             visual_patch_max_saturated_fraction, visual_patch_min_intensity_std,
             &patch_reject_reason);
-        if (!current_patch_usable && visual_search_level_low_contrast_retry_en &&
-            search_level > 0 && std::string(patch_reject_reason) == "low_contrast")
-        {
-          ++last_visual_search_level_low_contrast_retries;
-          getImagePatch(img, pc, patch_buffer.data(), search_level);
-          float *search_level_patch = patch_buffer.data() + patch_size_total * search_level;
-          const char *retry_reject_reason = "none";
-          if (isPatchPhotometricallyUsable(
-                  search_level_patch, patch_size_total, sat_threshold,
-                  visual_patch_max_saturated_fraction, visual_patch_min_intensity_std,
-                  &retry_reject_reason))
-          {
-            current_patch = search_level_patch;
-            current_patch_usable = true;
-            ++last_visual_search_level_low_contrast_recovered;
-          }
-          else
-          {
-            patch_reject_reason = retry_reject_reason;
-          }
-        }
         if (!current_patch_usable)
         {
           ++last_visual_patch_quality_rejects;
@@ -2813,11 +2838,22 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
         }
       }
 
+      ExposurePhotometricModel photometry;
+      if (!photometry.initialize(state->inv_expo_time, ref_ftr->inv_expo_time_))
+      {
+        ++last_visual_photometric_rejects;
+        logVisualPatchQuality(std::numeric_limits<double>::quiet_NaN(),
+                              std::numeric_limits<double>::quiet_NaN(),
+                              "invalid_exposure", ref_age, search_level,
+                              warp_determinant, warp_valid,
+                              ref_ftr->inv_expo_time_, state->inv_expo_time);
+        continue;
+      }
       float error = 0.0;
       for (int ind = 0; ind < patch_size_total; ind++)
       {
-        error += (ref_ftr->inv_expo_time_ * patch_wrap[ind] - state->inv_expo_time * current_patch[ind]) *
-                 (ref_ftr->inv_expo_time_ * patch_wrap[ind] - state->inv_expo_time * current_patch[ind]);
+        const double residual = photometry.residual(current_patch[ind], patch_wrap[ind]);
+        error += residual * residual;
       }
 
       ++last_visual_candidate_patches;
@@ -2884,6 +2920,9 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 bool VIOManager::computeJacobianAndUpdateEKF(cv::Mat img)
 {
   const StatesGroup state_before_ekf = *state;
+  last_visual_nis_rejected = false;
+  last_visual_observability_rejected = false;
+  last_visual_numerical_rejected = false;
   G.setZero();
   H_T_H.setZero();
   last_visual_measurement_dof = 0;
@@ -2905,13 +2944,20 @@ bool VIOManager::computeJacobianAndUpdateEKF(cv::Mat img)
     else
       level_updated = updateState(img, level);
     has_valid_update = has_valid_update || level_updated;
-    if (last_visual_nis_rejected) break;
+    if (last_visual_nis_rejected || last_visual_observability_rejected ||
+        last_visual_numerical_rejected) break;
   }
 
-  if (last_visual_nis_rejected)
+  // All pyramid levels are one measurement update. A rejected finer level
+  // must not leave a coarse-level pose, velocity, or information gain behind.
+  last_visual_numerical_rejected = last_visual_numerical_rejected ||
+      !finiteVisualState(*state) || !G.allFinite();
+  if (last_visual_nis_rejected || last_visual_observability_rejected ||
+      last_visual_numerical_rejected)
   {
     *state = state_before_ekf;
     G.setZero();
+    H_T_H.setZero();
     updateFrameState(*state);
     return false;
   }
@@ -2920,6 +2966,15 @@ bool VIOManager::computeJacobianAndUpdateEKF(cv::Mat img)
   {
     state->cov -= G * state->cov;
     state->cov = 0.5 * (state->cov + state->cov.transpose()).eval();
+    if (!state->cov.allFinite())
+    {
+      last_visual_numerical_rejected = true;
+      *state = state_before_ekf;
+      G.setZero();
+      H_T_H.setZero();
+      updateFrameState(*state);
+      return false;
+    }
     snapStateForDeterminism(*state);
   }
   else
@@ -3259,9 +3314,6 @@ void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelO
     {
       Feature *ref_patch_temp = *it;
       float *patch_temp = ref_patch_temp->patch_;
-      float NCC_up = 0.0;
-      float NCC_down1 = 0.0;
-      float NCC_down2 = 0.0;
       float NCC = 0.0;
       float score = 0.0;
       int count = 0;
@@ -3272,37 +3324,16 @@ void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelO
       double cos_angle = pf.dot(norm_vec);
       // if(fabs(cos_angle) < 0.86) continue; // 20 degree
 
-      float ref_mean;
-      if (abs(ref_patch_temp->mean_) < 1e-6)
-      {
-        float ref_sum = std::accumulate(patch_temp, patch_temp + patch_size_total, 0.0);
-        ref_mean = ref_sum / patch_size_total;
-        ref_patch_temp->mean_ = ref_mean;
-      }
-
       for (auto itm = pt->obs_.begin(), itme = pt->obs_.end(); itm != itme; ++itm)
       {
         if ((*itm)->id_ == ref_patch_temp->id_) continue;
         float *patch_cache = (*itm)->patch_;
-
-        float other_mean;
-        if (abs((*itm)->mean_) < 1e-6)
-        {
-          float other_sum = std::accumulate(patch_cache, patch_cache + patch_size_total, 0.0);
-          other_mean = other_sum / patch_size_total;
-          (*itm)->mean_ = other_mean;
-        }
-
-        for (int ind = 0; ind < patch_size_total; ind++)
-        {
-          NCC_up += (patch_temp[ind] - ref_mean) * (patch_cache[ind] - other_mean);
-          NCC_down1 += (patch_temp[ind] - ref_mean) * (patch_temp[ind] - ref_mean);
-          NCC_down2 += (patch_cache[ind] - other_mean) * (patch_cache[ind] - other_mean);
-        }
-        NCC += fabs(NCC_up / sqrt(NCC_down1 * NCC_down2));
+        // Reuse the pairwise calculation: cached means must not leave local
+        // values uninitialized or carry accumulators into another image pair.
+        NCC += fabs(calculateNCC(patch_temp, patch_cache, patch_size_total));
         count++;
       }
-
+      if (count == 0) continue;
       NCC = NCC / count;
 
       score = NCC + cos_angle;
@@ -3389,11 +3420,13 @@ void VIOManager::projectPatchFromRefToCur(const unordered_map<VOXEL_LOCATION, Vo
 
       float error_est = 0.0;
       float error_gt = 0.0;
+      ExposurePhotometricModel photometry;
+      if (!photometry.initialize(state->inv_expo_time, ref_ftr->inv_expo_time_)) continue;
 
       for (int ind = 0; ind < patch_size_total; ind++)
       {
-        error_est += (ref_ftr->inv_expo_time_ * visual_submap->warp_patch[i][ind] - state->inv_expo_time * patch_buffer[ind]) *
-                     (ref_ftr->inv_expo_time_ * visual_submap->warp_patch[i][ind] - state->inv_expo_time * patch_buffer[ind]);
+        const double residual = photometry.residual(patch_buffer[ind], visual_submap->warp_patch[i][ind]);
+        error_est += residual * residual;
       }
       std::string ref_est = "ref_est " + std::to_string(1.0 / ref_ftr->inv_expo_time_);
       std::string cur_est = "cur_est " + std::to_string(1.0 / state->inv_expo_time);
@@ -3634,6 +3667,13 @@ bool VIOManager::updateStateInverse(cv::Mat img, int level)
   MatrixXd H_sub;
   bool EKF_end = false;
   bool any_update = false;
+  MD(DIM_STATE, DIM_STATE) old_gain = G;
+  bool old_any_update = false;
+  auto rollback_iteration = [&]() {
+    *state = old_state;
+    G = old_gain;
+    any_update = old_any_update;
+  };
   float last_error = std::numeric_limits<float>::max();
   compute_jacobian_time = update_ekf_time = 0.0;
   M3D P_wi_hat;
@@ -3644,7 +3684,7 @@ bool VIOManager::updateStateInverse(cv::Mat img, int level)
   z.resize(H_DIM);
   z.setZero();
 
-  H_sub.resize(H_DIM, 6);
+  H_sub.resize(H_DIM, 7);
   H_sub.setZero();
 
   for (int iteration = 0; iteration < max_iterations; iteration++)
@@ -3694,20 +3734,32 @@ bool VIOManager::updateStateInverse(cv::Mat img, int level)
       const float w_ref_br = subpix_u_ref * subpix_v_ref;
 
       vector<float> P = visual_submap->warp_patch[i];
+      ExposurePhotometricModel photometry;
+      if (!photometry.initialize(state->inv_expo_time, visual_submap->inv_expo_list[i]))
+      {
+        z.segment(i * patch_size_total, patch_size_total).setConstant(
+            std::numeric_limits<double>::quiet_NaN());
+        continue;
+      }
       for (int x = 0; x < patch_size; x++)
       {
         uint8_t *img_ptr = (uint8_t *)img.data + (v_ref_i + x * scale - patch_size_half * scale) * img_step + u_ref_i - patch_size_half * scale;
         for (int y = 0; y < patch_size; ++y, img_ptr += scale)
         {
-          double res = w_ref_tl * img_ptr[0] + w_ref_tr * img_ptr[scale] + w_ref_bl * img_ptr[scale * img_step] +
-                       w_ref_br * img_ptr[scale * img_step + scale] - P[patch_size_total * level + x * patch_size + y];
+          const double current_value = w_ref_tl * img_ptr[0] + w_ref_tr * img_ptr[scale] +
+              w_ref_bl * img_ptr[scale * img_step] + w_ref_br * img_ptr[scale * img_step + scale];
+          const double res = photometry.residual(
+              current_value, P[patch_size_total * level + x * patch_size + y]);
           z(i * patch_size_total + x * patch_size + y) = res;
           patch_error += res * res;
           MD(1, 3) J_dR = H_sub_inv.block<1, 3>(i * patch_size_total + x * patch_size + y, 0);
           MD(1, 3) J_dt = H_sub_inv.block<1, 3>(i * patch_size_total + x * patch_size + y, 3);
-          JdR = J_dR * Rwi + J_dt * P_wi_hat * Rwi;
-          Jdt = J_dt * Rwi;
+          JdR = photometry.reference_weight * (J_dR * Rwi + J_dt * P_wi_hat * Rwi);
+          Jdt = photometry.reference_weight * J_dt * Rwi;
           H_sub.block<1, 6>(i * patch_size_total + x * patch_size + y, 0) << JdR, Jdt;
+          if (exposure_estimate_en)
+            H_sub(i * patch_size_total + x * patch_size + y, 6) =
+                photometry.exposureJacobian(current_value, res);
           n_meas++;
         }
       }
@@ -3715,17 +3767,25 @@ bool VIOManager::updateStateInverse(cv::Mat img, int level)
       error += patch_error;
     }
 
+    if (!z.allFinite() || !H_sub.allFinite())
+    {
+      last_visual_numerical_rejected = true;
+      rollback_iteration();
+      break;
+    }
     if (n_meas < min_update_meas)
     {
-      (*state) = old_state;
+      rollback_iteration();
       EKF_end = true;
       break;
     }
 
     error = error / n_meas;
-    if (!std::isfinite(error))
+    if (!std::isfinite(error) || !z.allFinite() || !H_sub.allFinite() ||
+        !std::isfinite(img_point_cov) || img_point_cov <= 0.0)
     {
-      (*state) = old_state;
+      last_visual_numerical_rejected = true;
+      rollback_iteration();
       EKF_end = true;
       break;
     }
@@ -3737,26 +3797,40 @@ bool VIOManager::updateStateInverse(cv::Mat img, int level)
     if (error <= last_error)
     {
       old_state = (*state);
+      old_gain = G;
+      old_any_update = any_update;
       last_error = error;
 
       applyPatchRobustWeights(z, H_sub);
       recordHuberMeasurementInformation(H_sub);
       applyVisualAdaptiveCovarianceWhitening(z, H_sub);
+      if (!z.allFinite() || !H_sub.allFinite())
+      {
+        last_visual_numerical_rejected = true;
+        rollback_iteration();
+        break;
+      }
       if (!applyPoseObservabilityGate(H_sub))
       {
         last_visual_observability_rejected = true;
-        (*state) = old_state;
+        rollback_iteration();
         EKF_end = true;
         break;
       }
       auto &&H_sub_T = H_sub.transpose();
       H_T_H.setZero();
       G.setZero();
-      H_T_H.block<6, 6>(0, 0) = H_sub_T * H_sub;
+      H_T_H.block<7, 7>(0, 0) = H_sub_T * H_sub;
       MD(DIM_STATE, DIM_STATE) &&K_1 = (H_T_H + (state->cov / img_point_cov).inverse()).inverse();
+      if (!K_1.allFinite())
+      {
+        last_visual_numerical_rejected = true;
+        rollback_iteration();
+        break;
+      }
       auto &&HTz = H_sub_T * z;
       last_visual_measurement_dof = n_meas;
-      last_visual_total_nis = std::max(0.0, (z.squaredNorm() - HTz.dot(K_1.block<6, 6>(0, 0) * HTz)) /
+      last_visual_total_nis = std::max(0.0, (z.squaredNorm() - HTz.dot(K_1.block<7, 7>(0, 0) * HTz)) /
                                                   std::max(img_point_cov, 1e-12));
       last_visual_normalized_nis = last_visual_measurement_dof > 0
                                        ? last_visual_total_nis / last_visual_measurement_dof
@@ -3766,15 +3840,20 @@ bool VIOManager::updateStateInverse(cv::Mat img, int level)
            last_visual_normalized_nis > visual_update_normalized_nis_max))
       {
         last_visual_nis_rejected = true;
-        (*state) = old_state;
-        G.setZero();
+        rollback_iteration();
         EKF_end = true;
         break;
       }
       auto vec = (*state_propagat) - (*state);
-      G.block<DIM_STATE, 6>(0, 0) = K_1.block<DIM_STATE, 6>(0, 0) * H_T_H.block<6, 6>(0, 0);
+      G.block<DIM_STATE, 7>(0, 0) = K_1.block<DIM_STATE, 7>(0, 0) * H_T_H.block<7, 7>(0, 0);
       MD(DIM_STATE, 1) solution =
-          (-K_1.block<DIM_STATE, 6>(0, 0) * HTz + vec - G.block<DIM_STATE, 6>(0, 0) * vec.block<6, 1>(0, 0)).eval();
+          (-K_1.block<DIM_STATE, 7>(0, 0) * HTz + vec - G.block<DIM_STATE, 7>(0, 0) * vec.block<7, 1>(0, 0)).eval();
+      if (!solution.allFinite() || !G.allFinite())
+      {
+        last_visual_numerical_rejected = true;
+        rollback_iteration();
+        break;
+      }
       V3D rot_add = solution.block<3, 1>(0, 0);
       V3D t_add = solution.block<3, 1>(3, 0);
       const double rot_step_deg = rot_add.norm() * 57.3;
@@ -3793,13 +3872,19 @@ bool VIOManager::updateStateInverse(cv::Mat img, int level)
 
       (*state) += solution;
       snapStateForDeterminism(*state);
+      if (!finiteVisualState(*state))
+      {
+        last_visual_numerical_rejected = true;
+        rollback_iteration();
+        break;
+      }
       any_update = true;
 
       if ((rot_add.norm() * 57.3f < 0.001f) && (t_add.norm() * 100.0f < 0.001f)) { EKF_end = true; }
     }
     else
     {
-      (*state) = old_state;
+      rollback_iteration();
       EKF_end = true;
     }
 
@@ -3821,6 +3906,13 @@ bool VIOManager::updateState(cv::Mat img, int level)
   MatrixXd H_sub;
   bool EKF_end = false;
   bool any_update = false;
+  MD(DIM_STATE, DIM_STATE) old_gain = G;
+  bool old_any_update = false;
+  auto rollback_iteration = [&]() {
+    *state = old_state;
+    G = old_gain;
+    any_update = old_any_update;
+  };
   float last_error = std::numeric_limits<float>::max();
 
   const int H_DIM = total_points * patch_size_total;
@@ -3894,6 +3986,13 @@ bool VIOManager::updateState(cv::Mat img, int level)
 
       vector<float> P = visual_submap->warp_patch[i];
       double inv_ref_expo = visual_submap->inv_expo_list[i];
+      ExposurePhotometricModel photometry;
+      if (!photometry.initialize(state->inv_expo_time, inv_ref_expo))
+      {
+        z.segment(i * patch_size_total, patch_size_total).setConstant(
+            std::numeric_limits<double>::quiet_NaN());
+        continue;
+      }
       // ROS_ERROR("inv_ref_expo: %.3lf, state->inv_expo_time: %.3lf\n", inv_ref_expo, state->inv_expo_time);
 
       for (int x = 0; x < patch_size; x++)
@@ -3913,7 +4012,7 @@ bool VIOManager::updateState(cv::Mat img, int level)
                (w_ref_tl * img_ptr[-scale * img_step] + w_ref_tr * img_ptr[-scale * img_step + scale] + w_ref_bl * img_ptr[0] + w_ref_br * img_ptr[scale]));
 
           Jimg << du, dv;
-          Jimg = Jimg * state->inv_expo_time;
+          Jimg = Jimg * photometry.current_weight;
           Jimg = Jimg * inv_scale;
           Jdphi = Jimg * Jdpi * p_hat;
           Jdp = -Jimg * Jdpi;
@@ -3922,14 +4021,15 @@ bool VIOManager::updateState(cv::Mat img, int level)
 
           double cur_value =
               w_ref_tl * img_ptr[0] + w_ref_tr * img_ptr[scale] + w_ref_bl * img_ptr[scale * img_step] + w_ref_br * img_ptr[scale * img_step + scale];
-          double res = state->inv_expo_time * cur_value - inv_ref_expo * P[patch_size_total * level + x * patch_size + y];
+          double res = photometry.residual(cur_value, P[patch_size_total * level + x * patch_size + y]);
 
           z(i * patch_size_total + x * patch_size + y) = res;
 
           patch_error += res * res;
           n_meas += 1;
 
-          if (exposure_estimate_en) { H_sub.block<1, 7>(i * patch_size_total + x * patch_size + y, 0) << JdR, Jdt, cur_value; }
+          if (exposure_estimate_en) { H_sub.block<1, 7>(i * patch_size_total + x * patch_size + y, 0) << JdR, Jdt,
+              photometry.exposureJacobian(cur_value, res); }
           else { H_sub.block<1, 6>(i * patch_size_total + x * patch_size + y, 0) << JdR, Jdt; }
         }
       }
@@ -3937,17 +4037,25 @@ bool VIOManager::updateState(cv::Mat img, int level)
       error += patch_error;
     }
 
+    if (!z.allFinite() || !H_sub.allFinite())
+    {
+      last_visual_numerical_rejected = true;
+      rollback_iteration();
+      break;
+    }
     if (n_meas < min_update_meas)
     {
-      (*state) = old_state;
+      rollback_iteration();
       EKF_end = true;
       break;
     }
 
     error = error / n_meas;
-    if (!std::isfinite(error))
+    if (!std::isfinite(error) || !z.allFinite() || !H_sub.allFinite() ||
+        !std::isfinite(img_point_cov) || img_point_cov <= 0.0)
     {
-      (*state) = old_state;
+      last_visual_numerical_rejected = true;
+      rollback_iteration();
       EKF_end = true;
       break;
     }
@@ -3959,15 +4067,23 @@ bool VIOManager::updateState(cv::Mat img, int level)
     if (error <= last_error)
     {
       old_state = (*state);
+      old_gain = G;
+      old_any_update = any_update;
       last_error = error;
 
       applyPatchRobustWeights(z, H_sub);
       recordHuberMeasurementInformation(H_sub);
       applyVisualAdaptiveCovarianceWhitening(z, H_sub);
+      if (!z.allFinite() || !H_sub.allFinite())
+      {
+        last_visual_numerical_rejected = true;
+        rollback_iteration();
+        break;
+      }
       if (!applyPoseObservabilityGate(H_sub))
       {
         last_visual_observability_rejected = true;
-        (*state) = old_state;
+        rollback_iteration();
         EKF_end = true;
         break;
       }
@@ -3976,6 +4092,12 @@ bool VIOManager::updateState(cv::Mat img, int level)
       G.setZero();
       H_T_H.block<7, 7>(0, 0) = H_sub_T * H_sub;
       MD(DIM_STATE, DIM_STATE) &&K_1 = (H_T_H + (state->cov / img_point_cov).inverse()).inverse();
+      if (!K_1.allFinite())
+      {
+        last_visual_numerical_rejected = true;
+        rollback_iteration();
+        break;
+      }
       auto &&HTz = H_sub_T * z;
       last_visual_measurement_dof = n_meas;
       last_visual_total_nis = std::max(0.0, (z.squaredNorm() - HTz.dot(K_1.block<7, 7>(0, 0) * HTz)) /
@@ -3988,8 +4110,7 @@ bool VIOManager::updateState(cv::Mat img, int level)
            last_visual_normalized_nis > visual_update_normalized_nis_max))
       {
         last_visual_nis_rejected = true;
-        (*state) = old_state;
-        G.setZero();
+        rollback_iteration();
         EKF_end = true;
         break;
       }
@@ -3997,6 +4118,12 @@ bool VIOManager::updateState(cv::Mat img, int level)
       G.block<DIM_STATE, 7>(0, 0) = K_1.block<DIM_STATE, 7>(0, 0) * H_T_H.block<7, 7>(0, 0);
       MD(DIM_STATE, 1)
       solution = -K_1.block<DIM_STATE, 7>(0, 0) * HTz + vec - G.block<DIM_STATE, 7>(0, 0) * vec.block<7, 1>(0, 0);
+      if (!solution.allFinite() || !G.allFinite())
+      {
+        last_visual_numerical_rejected = true;
+        rollback_iteration();
+        break;
+      }
 
       V3D rot_add = solution.block<3, 1>(0, 0);
       V3D t_add = solution.block<3, 1>(3, 0);
@@ -4016,6 +4143,12 @@ bool VIOManager::updateState(cv::Mat img, int level)
 
       (*state) += solution;
       snapStateForDeterminism(*state);
+      if (!finiteVisualState(*state))
+      {
+        last_visual_numerical_rejected = true;
+        rollback_iteration();
+        break;
+      }
       any_update = true;
 
       auto &&expo_add = solution.block<1, 1>(6, 0);
@@ -4023,7 +4156,7 @@ bool VIOManager::updateState(cv::Mat img, int level)
     }
     else
     {
-      (*state) = old_state;
+      rollback_iteration();
       EKF_end = true;
     }
 
@@ -4917,6 +5050,7 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg,
       ? "TRACKING_ONLY_DRY_RUN" : "NORMAL_LIDAR_SUPPORTED";
   current_visual_time = img_time;
   last_visual_nis_rejected = false;
+  last_visual_numerical_rejected = false;
   last_visual_observability_rejected = false;
   last_visual_measurement_dof = 0;
   last_visual_total_nis = std::numeric_limits<double>::quiet_NaN();
@@ -5775,10 +5909,12 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg,
     return;
   }
 
+  const std::string visual_ekf_skip_reason = last_visual_nis_rejected ? "normalized_nis" :
+      (last_visual_observability_rejected ? "observability_reject" :
+       (last_visual_numerical_rejected ? "non_finite_visual_update" : "ekf_no_valid_measurement"));
   logVisualDelta(img_time, total_points, saturated_fraction,
                  max_tile_saturated_fraction, intensity_std,
-                 visual_ekf_updated ? "" :
-                     (last_visual_nis_rejected ? "normalized_nis" : "ekf_no_valid_measurement"),
+                 visual_ekf_updated ? "" : visual_ekf_skip_reason,
                  state_before_visual_update, *state, last_visual_total_nis,
                  visual_ekf_updated);
 
@@ -5953,14 +6089,10 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg,
 
     appendTimingLogLines(lines);
   }
-  logVisualFunnel(visual_ekf_updated ? "none" :
-                      (last_visual_nis_rejected ? "normalized_nis" : "ekf_no_valid_measurement"),
+  logVisualFunnel(visual_ekf_updated ? "none" : visual_ekf_skip_reason,
                   true, false, visual_ekf_updated);
   logVisualAdaptiveCovarianceRelaxed(
-      visual_ekf_updated ? "none" :
-          (last_visual_nis_rejected ? "normalized_nis" :
-           (last_visual_observability_rejected ? "observability_reject" :
-            "ekf_no_valid_measurement")),
+      visual_ekf_updated ? "none" : visual_ekf_skip_reason,
       true, visual_ekf_updated, false, false,
       state_before_visual_update, *state);
   rememberVisualGuardPose();

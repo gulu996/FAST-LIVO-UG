@@ -376,7 +376,7 @@ public:
     feats_down_world_.reset(new PointCloudXYZI());
   };
 
-  void StateEstimation(StatesGroup &state_propagat);
+  void StateEstimation(StatesGroup &state_propagat, std::ostream *iteration_log = nullptr);
   void TransformLidar(const Eigen::Matrix3d rot, const Eigen::Vector3d t, const PointCloudXYZI::Ptr &input_cloud,
                       pcl::PointCloud<pcl::PointXYZI>::Ptr &trans_cloud);
 

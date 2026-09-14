@@ -1,0 +1,53 @@
+<launch>
+  <!-- RTK-SLAM Dataset-only entry point. `run_dir` is deliberately required. -->
+  <arg name="run_dir" />
+  <arg name="gnss_pose_topic" default="/rtk_slam/gnss/enu_pose" />
+  <arg name="scratch_root" default="/tmp/fast_livo_rtk_slam_dataset_internal" />
+  <arg name="use_sim_time" default="true" />
+  <arg name="config_override" default="" />
+
+  <param name="/use_sim_time" value="$(arg use_sim_time)" />
+  <param name="/fast_livo/run_log_directory" value="__PENDING__" />
+
+  <rosparam command="load"
+            file="$(find fast_livo)/config/rtk_slam_dataset/ours.yaml" />
+  <rosparam command="load"
+            file="$(find fast_livo)/config/rtk_slam_dataset/gnss_adapter.yaml" />
+  <rosparam command="load"
+            file="$(find fast_livo)/config/rtk_slam_dataset/rtk_fixed_lag_backend.yaml" />
+  <group if="$(eval arg('config_override') != '')">
+    <rosparam command="load" file="$(arg config_override)" />
+  </group>
+
+  <!-- Exact, non-timestamped benchmark destination. The main node still makes
+       an unused internal timestamp directory because that behavior is
+       unconditional; keep it outside the benchmark run directory. -->
+  <param name="/rtk_backend/output_directory" type="string"
+         value="$(arg run_dir)" />
+  <param name="/gnss_adapter/input_topic" type="string"
+         value="$(arg gnss_pose_topic)" />
+
+  <!-- The bag's topic is /camera/image_raw/compressed. Ours consumes Image. -->
+  <node pkg="image_transport" type="republish"
+        name="rtk_slam_image_decoder" required="true" output="screen"
+        args="compressed in:=/camera/image_raw raw out:=/camera/image_raw" />
+
+  <node pkg="fast_livo" type="fastlivo_mapping" name="laserMapping"
+        required="true" output="screen">
+    <param name="save_path" type="string" value="$(arg scratch_root)" />
+    <param name="use_gnss_fusion_enable" value="true" />
+    <rosparam file="$(find fast_livo)/config/rtk_slam_dataset/camera.yaml" />
+  </node>
+
+  <node pkg="fast_livo" type="gnss_adapter_node" name="gnss_adapter"
+        required="true" output="screen">
+    <param name="use_gnss_fusion_enable" value="true" />
+  </node>
+
+  <node pkg="fast_livo" type="rtk_fixed_lag_backend_node"
+        name="rtk_fixed_lag_backend" required="true" output="screen">
+    <param name="use_gnss_fusion_enable" value="true" />
+  </node>
+
+  <!-- No RViz, UWB node, fault injector, GT reader, or camera-aligned logger. -->
+</launch>

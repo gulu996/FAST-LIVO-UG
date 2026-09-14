@@ -12,6 +12,7 @@ which is included as part of this source code package.
 
 #include "LIVMapper.h"
 #include "gnss_fusion_policy.h"
+#include "livo_point_time_split.h"
 #include "run_log_directory.h"
 #include <algorithm>
 #include <arpa/inet.h>
@@ -181,7 +182,9 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<bool>("vio/normal_en", normal_en, true);
   nh.param<bool>("vio/inverse_composition_en", inverse_composition_en, false);
   nh.param<int>("vio/max_iterations", max_iterations, 5);
-  IMG_POINT_COV = 200.0;  // 降低visual EKF权重：100.0→200.0，使EKF对visual测量的信任度减半
+  nh.param<double>("vio/img_point_cov", IMG_POINT_COV, 500.0);
+  if (!std::isfinite(IMG_POINT_COV) || IMG_POINT_COV <= 0.0)
+    throw std::invalid_argument("vio/img_point_cov must be positive and finite");
   nh.param<bool>("vio/raycast_en", raycast_en, false);
   nh.param<bool>("vio/exposure_estimate_en", exposure_estimate_en, true);
   nh.param<double>("vio/inv_expo_cov", inv_expo_cov, 0.2);
@@ -2141,8 +2144,38 @@ void LIVMapper::handleLIO()
 
   double t1 = omp_get_wtime();
 
-  voxelmap_manager->StateEstimation(state_propagat);
+  std::ostringstream lio_iteration_log;
+  const bool record_lio_iterations = save_log_en && vio_manager;
+  voxelmap_manager->StateEstimation(
+      state_propagat, record_lio_iterations ? &lio_iteration_log : nullptr);
   _state = voxelmap_manager->state_;
+  if (save_log_en && vio_manager)
+  {
+    // Observe the unmodified LIO transaction, before external corrections.
+    std::ostringstream health;
+    health << std::setprecision(17) << "[LIO_STATE_HEALTH] timestamp="
+           << LidarMeasures.last_lio_update_time;
+    for (const auto &entry : {std::make_pair("predicted", &state_propagat),
+                              std::make_pair("updated", &_state)})
+    {
+      const StatesGroup &value = *entry.second;
+      double minimum_eigenvalue = std::numeric_limits<double>::quiet_NaN();
+      if (value.cov.allFinite())
+      {
+        Eigen::SelfAdjointEigenSolver<MD(DIM_STATE, DIM_STATE)> spectrum(
+            0.5 * (value.cov + value.cov.transpose()).eval(), Eigen::EigenvaluesOnly);
+        if (spectrum.info() == Eigen::Success)
+          minimum_eigenvalue = spectrum.eigenvalues().minCoeff();
+      }
+      health << " " << entry.first << "_bias_a=" << value.bias_a.transpose()
+             << " " << entry.first << "_bias_g=" << value.bias_g.transpose()
+             << " " << entry.first << "_gravity=" << value.gravity.transpose()
+             << " " << entry.first << "_cov_min_eigenvalue=" << minimum_eigenvalue
+             << " " << entry.first << "_cov_asymmetry="
+             << (value.cov - value.cov.transpose()).cwiseAbs().maxCoeff();
+    }
+    vio_manager->appendTimingLogLines({lio_iteration_log.str(), health.str()});
+  }
   _pv_list = voxelmap_manager->pv_list_;
   snapStateForDeterminism(_state);
   voxelmap_manager->state_ = _state;
@@ -3218,13 +3251,19 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
                   });
       }
 
-      *(meas.pcl_proc_cur) = *(meas.pcl_proc_next);
-      PointCloudXYZI().swap(*meas.pcl_proc_next);
+      // A LiDAR scan can span multiple images. Re-cut carried points before
+      // using them; copying the entire tail consumes future measurements.
+      auto carried_points = std::move(meas.pcl_proc_next->points);
+      meas.pcl_proc_cur->clear();
+      meas.pcl_proc_next->clear();
 
       int lid_frame_num = lid_raw_data_buffer.size();
       int max_size = meas.pcl_proc_cur->size() + 24000 * lid_frame_num;
       meas.pcl_proc_cur->reserve(max_size);
       meas.pcl_proc_next->reserve(max_size);
+      fast_livo::appendLivoTimeSplit(carried_points, meas.last_lio_update_time,
+                                    meas.last_lio_update_time, m.lio_time,
+                                    meas.pcl_proc_cur->points, meas.pcl_proc_next->points);
       // deque<PointCloudXYZI::Ptr> lidar_buffer_tmp;
 
       while (!lid_raw_data_buffer.empty())
@@ -3232,22 +3271,9 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
         if (lid_header_time_buffer.front() > img_capture_time) break;
         auto pcl(lid_raw_data_buffer.front()->points);
         double frame_header_time(lid_header_time_buffer.front());
-        float max_offs_time_ms = (m.lio_time - frame_header_time) * 1000.0f;
-
-        for (int i = 0; i < pcl.size(); i++)
-        {
-          auto pt = pcl[i];
-          if (pcl[i].curvature < max_offs_time_ms)
-          {
-            pt.curvature += (frame_header_time - meas.last_lio_update_time) * 1000.0f;
-            meas.pcl_proc_cur->points.push_back(pt);
-          }
-          else
-          {
-            pt.curvature += (frame_header_time - m.lio_time) * 1000.0f;
-            meas.pcl_proc_next->points.push_back(pt);
-          }
-        }
+        fast_livo::appendLivoTimeSplit(pcl, frame_header_time,
+                                      meas.last_lio_update_time, m.lio_time,
+                                      meas.pcl_proc_cur->points, meas.pcl_proc_next->points);
         lid_raw_data_buffer.pop_front();
         lid_header_time_buffer.pop_front();
       }

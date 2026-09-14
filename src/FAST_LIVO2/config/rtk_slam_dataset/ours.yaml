@@ -1,0 +1,211 @@
+# Source: RTK-SLAM Dataset official calibration
+# Converted for: Ours (FAST-LIVO2 + GNSS/RTK fixed-lag backend)
+# Do not tune against ground truth.
+
+common:
+  # The bag stores CompressedImage on <base>/compressed. The launch file uses
+  # image_transport to expose the raw Image on this base topic.
+  img_topic: "/camera/image_raw"
+  lid_topic: "/livox/lidar"
+  imu_topic: "/livox/imu"
+  img_en: 1
+  lidar_en: 1
+  ros_driver_bug_fix: false
+
+startup:
+  wait_for_sensor_publishers: true
+  imu_warmup_min_samples: 30
+  imu_warmup_min_duration_s: 0.15
+  require_lidar_frame: true
+  require_image_buffer: true
+
+deterministic_debug:
+  # Preserve normal multithreaded execution while disabling debug-only state
+  # quantization. Stable buffer ordering remains enabled for repeatable replay.
+  force_single_thread: false
+  visual_update_serial_en: false
+  lio_update_serial_en: false
+  contiguous_image_copy_en: false
+  state_snap_en: false
+  camera_point_snap_en: false
+  pixel_snap_en: false
+  imu_accept_out_of_order_en: true
+  imu_buffer_sort_en: true
+  prop_imu_buffer_sort_en: true
+  image_buffer_sort_en: true
+  sync_wait_for_image_lookahead_en: true
+  pending_vio_image_en: true
+  lio_feature_sort_en: true
+  visual_observed_voxel_sort_en: true
+  visual_voxel_key_sort_en: true
+
+extrin_calib:
+  # Official T_lidar_imu: LiDAR -> IMU.
+  extrinsic_T: [-0.011, -0.023, 0.044]
+  extrinsic_R: [1.0, 0.0, 0.0,
+                0.0, 1.0, 0.0,
+                0.0, 0.0, 1.0]
+  # Ours expects LiDAR -> camera. Computed, not hand-tuned, as
+  # T_cam_lidar = T_cam_imu * T_lidar_imu.
+  Rcl: [ 0.00108687073756647,  0.9999988715203714,  -0.0010371451121827802,
+        -0.3836505154202839,  -0.0005408029950234039, -0.9234782019895602,
+        -0.9234777207544047,   0.0014016026913775126,  0.38364949469554266]
+  Pcl: [-0.00097381575939133,
+        -0.08439486149212086,
+        -0.03120804570039193]
+
+time_offset:
+  imu_time_offset: 0.0
+  lidar_time_offset: 0.0
+  # Official calibration records -0.020638326672916422 s as provenance, but
+  # the dataset project states that every released format is already corrected.
+  img_time_offset: 0.0
+  exposure_time_init: 0.0
+
+preprocess:
+  # Reuse this checkout's existing MID360 sensor preset. lidar_type=1 is the
+  # code's Livox CustomMsg handler enum; it does not mean the hardware is Avia.
+  point_filter_num: 2
+  filter_size_surf: 0.25
+  lidar_type: 1
+  scan_line: 4
+  blind: 0.5
+  feature_extract_enabled: false
+
+vio:
+  # Upstream FAST-LIVO2 baseline values. Ours' existing guarded visual update
+  # remains the algorithm under test; no RTK-SLAM GT-derived thresholds appear.
+  max_iterations: 5
+  outlier_threshold: 1000.0
+  patch_size: 8
+  patch_pyrimid_level: 4
+  normal_en: true
+  raycast_en: false
+  inverse_composition_en: false
+  exposure_estimate_en: true
+  inv_expo_cov: 0.1
+  visual_map_prune_en: true
+  visual_map_supply_diagnostics_en: false
+  visual_map_fov_fallback_en: false
+  visual_tracking_only_dry_run_en: false
+  visual_adaptive_covariance_shadow_en: false
+  visual_adaptive_covariance_relaxed_en: false
+  visual_reference_refresh_en: false
+
+imu:
+  imu_en: true
+  imu_int_frame: 30
+  acc_cov: 0.5
+  gyr_cov: 0.3
+
+lio:
+  max_iterations: 5
+  map_update_stride: 1
+  dept_err: 0.02
+  beam_err: 0.05
+  min_eigen_value: 0.0025
+  voxel_size: 0.5
+  max_layer: 2
+  max_points_num: 50
+  layer_init_num: [5, 5, 5, 5, 5]
+
+lio_degeneracy:
+  # Diagnostics feed Ours' guarded visual path, but are not allowed to modify
+  # the state in this baseline.
+  enable_observability_diagnostics: true
+  enable_state_intervention: false
+
+lio_direction_guard:
+  mode: "off"
+
+lio_map_guard:
+  mode: "off"
+
+local_map:
+  # Native bounded-map mode is necessary for the 0.39--1.04 km sequences.
+  map_sliding_en: true
+  half_map_size: 100
+  sliding_thresh: 4.0
+  long_term_visual_map_en: false
+  long_term_visual_max_voxels: 5000
+
+uav:
+  imu_rate_odom: false
+  gravity_align_en: true
+
+# The fixed-lag backend is the only absolute-position update path. These
+# explicit aliases prevent stale parameters in a reused ROS master from
+# reopening a serial/frontend GNSS or UWB path.
+gnss_fusion:
+  enable: true
+
+gps:
+  en: false
+  enable: false
+  update_en: false
+  update_enable: false
+  use_gps_position: false
+  input_mode: "disabled"
+
+gnss:
+  input_mode: "disabled"
+
+uwb:
+  en: false
+  enable: false
+  update_en: false
+  update_enable: false
+  input_mode: "disabled"
+  summary_log_en: false
+  debug_log_en: false
+  range_debug_log_en: false
+  summary_to_console: false
+  debug_to_console: false
+  summary_to_file: false
+  debug_to_file: false
+
+publish:
+  dense_map_en: false
+  pub_effect_point_en: false
+  pub_plane_en: false
+  colorize_cloud_en: false
+  pub_scan_num: 20
+  publish_img_stride: 20
+  blind_rgb_points: 0.0
+
+evo:
+  pose_output_en: false
+
+pcd_save:
+  # The backend writes the only benchmark artifacts into the launch run_dir.
+  save_log_en: false
+  pcd_save_en: false
+  global_map_pub: false
+  colmap_output_en: false
+  filter_size_pcd: 0.5
+  interval: -1
+  max_cache_points: 0
+
+udp_report:
+  en: false
+
+aruco_landmarks:
+  aruco_landmarks_en: false
+
+adaptive_selector:
+  en: false
+
+runtime_guard:
+  # Do not let wall-clock load silently change the estimator between runs.
+  enable: false
+
+diagnostics:
+  runtime_memory_monitor_en: false
+  console_interval_frames: 500
+  csv_flush_interval_rows: 500
+
+debug:
+  print_console_timing_en: false
+  print_console_timing_stride: 100
+  vio_console_timing_print_en: false
+  vio_console_timing_print_stride: 100

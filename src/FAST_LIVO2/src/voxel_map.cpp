@@ -14,6 +14,7 @@ which is included as part of this source code package.
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <iomanip>
 #include <limits>
 #include <sstream>
 #include <unordered_set>
@@ -575,7 +576,7 @@ VoxelOctoTree *VoxelOctoTree::Insert(const pointWithVar &pv)
   return nullptr;
 }
 
-void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
+void VoxelMapManager::StateEstimation(StatesGroup &state_propagat, std::ostream *iteration_log)
 {
   ++current_frame_id_;
   last_lio_diagnostics_ = LioUpdateDiagnostics();
@@ -849,6 +850,12 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
     }
     int minRow, minCol;
     const StatesGroup iteration_state_before = state_;
+    Eigen::Matrix<double, 9, 1> diagnostic_raw_pose_velocity;
+    if (iteration_log)
+    {
+      diagnostic_raw_pose_velocity.head<6>() = solution.head<6>();
+      diagnostic_raw_pose_velocity.tail<3>() = solution.segment<3>(7);
+    }
 
     auto rot_add = solution.block<3, 1>(0, 0);
     auto t_add = solution.block<3, 1>(3, 0);
@@ -1076,6 +1083,25 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
       // VD(DIM_STATE) P_diag = _state.cov.diagonal();
       EKF_stop_flg = true;
     }
+    if (iteration_log)
+    {
+      // ponytail: one bounded row per existing ICP iteration, no matrix dumps.
+      *iteration_log << std::setprecision(17)
+          << "[LIO_ITER] frame_id=" << current_frame_id_
+          << " iter=" << iterCount + 1 << " features=" << effct_feat_num_
+          << " residual_before_update=" << avg_residual
+          << " raw_dr_rad=(" << diagnostic_raw_pose_velocity.head<3>().transpose() << ")"
+          << " raw_dp_m=(" << diagnostic_raw_pose_velocity.segment<3>(3).transpose() << ")"
+          << " raw_dv_mps=(" << diagnostic_raw_pose_velocity.tail<3>().transpose() << ")"
+          << " step_scale=" << step_scale
+          << " applied_dr_rad=(" << solution.head<3>().transpose() << ")"
+          << " applied_dp_m=(" << solution.segment<3>(3).transpose() << ")"
+          << " applied_dv_mps=(" << solution.segment<3>(7).transpose() << ")"
+          << " converged=" << flg_EKF_converged << " rematch=" << rematch_num
+          << " tiny_residual_improvement=" << tiny_residual_improvement
+          << " iteration_limit=" << (iterCount == config_setting_.max_iterations_ - 1)
+          << " covariance_updated=" << EKF_stop_flg << '\n';
+    }
     if (EKF_stop_flg) break;
   }
 
@@ -1091,6 +1117,10 @@ void VoxelMapManager::StateEstimation(StatesGroup &state_propagat)
   if (!config_setting_.observability_diagnostics_enable) updateLidarDegeneracyStatus();
   last_lio_diagnostics_.is_degenerate = lidar_degenerated_;
   last_lio_diagnostics_.updated_state = state_;
+  if (iteration_log)
+    *iteration_log << "[LIO_ITER_END] frame_id=" << current_frame_id_
+                   << " valid_update=" << last_lio_diagnostics_.valid_update
+                   << " covariance_finite=" << state_.cov.allFinite() << '\n';
   if (last_lio_diagnostics_.observability.valid)
   {
     const V3D weak = last_lio_diagnostics_.observability.weak_translation_direction_world;

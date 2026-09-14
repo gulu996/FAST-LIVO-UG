@@ -21,6 +21,7 @@ which is included as part of this source code package.
 #include <opencv2/core/eigen.hpp>
 #include <pcl/filters/voxel_grid.h>
 #include <cstdint>
+#include <cmath>
 #include <limits>
 #include <set>
 #include <unordered_set>
@@ -187,6 +188,39 @@ struct VisualPoseObservabilityDiagnostics
   V3D translation_direction_weights = V3D::Ones();
 };
 
+// Equal pixel-noise variance in the two images gives variance proportional
+// to a^2+b^2. The sqrt(2) preserves the existing units when a=b=1.
+struct ExposurePhotometricModel
+{
+  double current_weight = 0.0;
+  double reference_weight = 0.0;
+  double inverse_scale = 0.0;
+
+  bool initialize(double current_inverse_exposure, double reference_inverse_exposure)
+  {
+    if (!std::isfinite(current_inverse_exposure) || current_inverse_exposure <= 0.0 ||
+        !std::isfinite(reference_inverse_exposure) || reference_inverse_exposure <= 0.0)
+      return false;
+    const double scale = std::hypot(current_inverse_exposure, reference_inverse_exposure) / std::sqrt(2.0);
+    current_weight = current_inverse_exposure / scale;
+    reference_weight = reference_inverse_exposure / scale;
+    inverse_scale = 1.0 / scale;
+    return std::isfinite(current_weight) && std::isfinite(reference_weight) &&
+        std::isfinite(inverse_scale) && inverse_scale > 0.0;
+  }
+
+  double residual(double current_intensity, double reference_intensity) const
+  {
+    return current_weight * current_intensity - reference_weight * reference_intensity;
+  }
+
+  double exposureJacobian(double current_intensity, double normalized_residual) const
+  {
+    // Differentiate the normalization too; freezing it recreates gain decay.
+    return (current_intensity - 0.5 * current_weight * normalized_residual) * inverse_scale;
+  }
+};
+
 class VIOManager
 {
 public:
@@ -341,6 +375,7 @@ public:
   double visual_update_max_gyro_bias_increment_rps = 0.005;
   double visual_update_normalized_nis_max = 0.0;
   bool last_visual_nis_rejected = false;
+  bool last_visual_numerical_rejected = false;
   int last_visual_measurement_dof = 0; // one scalar photometric residual per measurement
   double last_visual_total_nis = std::numeric_limits<double>::quiet_NaN();
   double last_visual_normalized_nis = std::numeric_limits<double>::quiet_NaN();
@@ -548,6 +583,7 @@ public:
   void initializeVIO(ros::NodeHandle &nh);
   void getImagePatch(cv::Mat img, V2D pc, float *patch_tmp, int level);
   void computeProjectionJacobian(V3D p, MD(2, 3) & J);
+  bool getVisualVoxelLocation(const V3D &point, VOXEL_LOCATION &location) const;
   bool computeJacobianAndUpdateEKF(cv::Mat img);
   void resetGrid();
   void updateVisualMapPoints(cv::Mat img);

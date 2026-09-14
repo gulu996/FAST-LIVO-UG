@@ -1,0 +1,20 @@
+# First repair trial: keep the original frontend sampling and safety settings.
+# Parameters below are chosen from timing/statistical checks, not checkpoints.
+vio:
+  img_point_cov: 500.0
+
+rtk_backend:
+  gnss_reacquisition_en: true
+  gnss_reacquisition_consistency_m: 0.5
+  gnss_recovery_gap_threshold_s: 5.0
+  gnss_recovery_fixed_confirm_factors: 5
+  gnss_recovery_fixed_max_gap_s: 0.5
+  # Preserve source GNSS covariance; isolate gate recovery from sigma ramping.
+  gnss_recovery_ramp_duration_s: 0.0
+  gnss_recovery_initial_sigma_scale: 1.0
+
+pcd_save:
+  save_log_en: true
+
+diagnostics:
+  csv_flush_interval_rows: 100
