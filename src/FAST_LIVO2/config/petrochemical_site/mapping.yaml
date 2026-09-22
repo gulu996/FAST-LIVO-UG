@@ -151,13 +151,13 @@ lio_map_guard:
 
 local_map:
   map_sliding_en: true
-  half_map_size: 100
+  half_map_size: 200
   sliding_thresh: 4
   long_term_visual_map_en: false
   long_term_visual_max_voxels: 5000
 
 adaptive_selector:
-  en: false
+  en: true
 
 runtime_guard:
   enable: false
