@@ -105,6 +105,7 @@ LIVMapper::LIVMapper(ros::NodeHandle &nh)
   }
   VoxelMapConfig voxel_config;
   loadVoxelConfig(nh, voxel_config);
+  if (deterministic_debug_en_) voxel_config.deterministic_lio_update_en = true;
 
   visual_sub_map.reset(new PointCloudXYZI());
   feats_undistort.reset(new PointCloudXYZI());
@@ -115,6 +116,7 @@ LIVMapper::LIVMapper(ros::NodeHandle &nh)
   pcl_wait_save.reset(new PointCloudXYZRGB());
   pcl_wait_save_intensity.reset(new PointCloudXYZI());
   voxelmap_manager.reset(new VoxelMapManager(voxel_config, voxel_map));
+  p_imu->enable_p4_diagnostics(voxel_config.p4_frontend_diagnostics_enable);
   vio_manager.reset(new VIOManager());
   uwb_manager.reset(new UwbManager());
   gnss_manager.reset(new GnssManager());
@@ -123,14 +125,54 @@ LIVMapper::LIVMapper(ros::NodeHandle &nh)
   uwb_manager->initialize(nh, save_path);
   gnss_manager->initialize(nh, save_path);
   initializeComponents(nh);
+  fast_livo::p4b::HarnessConfig p4b_config;
+  p4b_config.enabled = voxel_config.p4b_snapshot_enable;
+  nh.param<bool>("p4b_snapshot/run_all_branches",
+                 p4b_config.run_all_branches, false);
+  nh.param<bool>("p4b_snapshot/pause_input_during_capture",
+                 p4b_config.pause_input_during_capture, false);
+  nh.param<double>("p4b_snapshot/snapshot_relative_time_s",
+                   p4b_config.snapshot_relative_time_s, 895.0);
+  nh.param<double>("p4b_snapshot/end_relative_time_s",
+                   p4b_config.end_relative_time_s, 910.0);
+  nh.param<std::string>("p4b_snapshot/output_directory",
+                        p4b_config.output_directory,
+                        save_path + "p4b_same_snapshot");
+  p4b_config.voxel_leaf_size_m = filter_size_surf_min;
+  p4b_config.lidar_max_range_m = voxel_lidar_max_range_m_;
+  p4b_config.map_sliding_enabled = voxel_config.map_sliding_en;
+  p4b_config.map_update_stride = lio_map_update_stride_;
+  if (p4b_config.enabled)
+  {
+    if (!voxel_config.p4b_retain_support_points)
+      throw std::runtime_error(
+          "P4-B requires p4b_snapshot/retain_support_points=true");
+    // Diagnostic-only: production and every fork must execute the same
+    // correspondence ordering for the restore parity gate.
+    voxel_config.deterministic_lio_update_en = true;
+    voxelmap_manager->config_setting_.deterministic_lio_update_en = true;
+    deterministic_lio_feature_sort_en_ = true;
+    p4b_fork_harness_.reset(
+        new fast_livo::p4b::P4ForkHarness(p4b_config));
+    ROS_WARN("[P4B] diagnostic harness enabled snapshot=%.3f end=%.3f all_branches=%d pause_input=%d output=%s",
+             p4b_config.snapshot_relative_time_s,
+             p4b_config.end_relative_time_s,
+             static_cast<int>(p4b_config.run_all_branches),
+             static_cast<int>(p4b_config.pause_input_during_capture),
+             p4b_config.output_directory.c_str());
+  }
   path.header.stamp = ros::Time::now();
   path.header.frame_id = "camera_init";
 }
 
 LIVMapper::~LIVMapper()
 {
+  logRuntimeEventCounts(true);
   if (fout_lio_degeneracy.is_open()) fout_lio_degeneracy.flush();
+  if (fout_lio_transaction.is_open()) fout_lio_transaction.flush();
+  if (fout_lio_motion_consistency.is_open()) fout_lio_motion_consistency.flush();
   if (fout_runtime_memory.is_open()) fout_runtime_memory.flush();
+  if (fout_runtime_events.is_open()) fout_runtime_events.flush();
   if (fout_visual_image_flow.is_open()) fout_visual_image_flow.flush();
   if (gnss_manager) gnss_manager->shutdown();
   if (uwb_manager) uwb_manager->shutdown();
@@ -161,6 +203,7 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   sync_img_buffer_min_size_ = std::max(1, sync_img_buffer_min_size_);
   sync_img_lookahead_time_ = std::max(0.0, sync_img_lookahead_time_);
 
+  nh.param<bool>("deterministic_debug/en", deterministic_debug_en_, false);
   bool legacy_visual_update_serial = true;
   nh.param<bool>("vio/deterministic_visual_update_en", legacy_visual_update_serial, true);
   nh.param<bool>("deterministic_debug/state_snap_en", deterministic_state_snap_en_, true);
@@ -177,6 +220,23 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<bool>("deterministic_debug/lio_feature_sort_en", deterministic_lio_feature_sort_en_, true);
   nh.param<bool>("deterministic_debug/visual_observed_voxel_sort_en", deterministic_visual_observed_voxel_sort_en_, true);
   nh.param<bool>("deterministic_debug/visual_voxel_key_sort_en", deterministic_visual_voxel_key_sort_en_, true);
+  if (deterministic_debug_en_)
+  {
+    deterministic_state_snap_en_ = true;
+    deterministic_pixel_snap_en_ = true;
+    deterministic_camera_point_snap_en_ = true;
+    deterministic_contiguous_image_copy_en_ = true;
+    vio_deterministic_visual_update_en_ = true;
+    deterministic_imu_accept_out_of_order_en_ = true;
+    deterministic_imu_buffer_sort_en_ = true;
+    deterministic_prop_imu_buffer_sort_en_ = true;
+    deterministic_image_buffer_sort_en_ = true;
+    deterministic_sync_wait_for_image_lookahead_en_ = true;
+    deterministic_pending_vio_image_en_ = true;
+    deterministic_lio_feature_sort_en_ = true;
+    deterministic_visual_observed_voxel_sort_en_ = true;
+    deterministic_visual_voxel_key_sort_en_ = true;
+  }
   setStateSnapForDeterminismEnabled(deterministic_state_snap_en_);
 
   nh.param<bool>("vio/normal_en", normal_en, true);
@@ -399,6 +459,10 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<bool>("imu/imu_en", imu_en, false);
   nh.param<bool>("imu/gravity_est_en", gravity_est_en, true);
   nh.param<bool>("imu/ba_bg_est_en", ba_bg_est_en, true);
+  nh.param<bool>("fullstate_shadow/enable", fullstate_shadow_enable_, false);
+  nh.param<std::string>("fullstate_shadow/geometry_topic",
+                        fullstate_shadow_geometry_topic_,
+                        fullstate_shadow_geometry_topic_);
 
   nh.param<double>("preprocess/blind", p_pre->blind, 0.01);
   nh.param<double>("preprocess/filter_size_surf", filter_size_surf_min, 0.5);
@@ -763,6 +827,7 @@ void LIVMapper::initializeComponents(ros::NodeHandle &nh)
 
   voxelmap_manager->extT_ << VEC_FROM_ARRAY(extrinT);
   voxelmap_manager->extR_ << MAT_FROM_ARRAY(extrinR);
+  voxelmap_manager->configureP5SeedBasin(filter_size_surf_min, save_path);
 
   if (!vk::camera_loader::loadFromRosNs("laserMapping", vio_manager->cam)) throw std::runtime_error("Camera model not correctly specified.");
 
@@ -1010,6 +1075,165 @@ void LIVMapper::initializeFiles()
     {
       ROS_WARN("[LIO_DEGEN] Failed to open %slio_degeneracy.csv", save_path.c_str());
     }
+    fout_lio_transaction.open(save_path + "lio_frame_transaction.csv", std::ios::out);
+    if (fout_lio_transaction.is_open())
+    {
+      fout_lio_transaction
+          << "timestamp,frame_id,iteration_count,convergence_status,converged,reached_iteration_limit,"
+             "correspondence_count,valid_residual_count,cost_before,cost_after,"
+             "translation_increment_norm,rotation_increment_deg,velocity_increment_norm,"
+             "covariance_trace_before,covariance_trace_after,covariance_min_diagonal,"
+             "covariance_max_diagonal,candidate_covariance_min_eigenvalue,candidate_covariance_asymmetry,"
+             "map_inserted,commit\n";
+    }
+    fout_lio_motion_consistency.open(
+        save_path + "motion_consistency_shadow.csv", std::ios::out);
+    if (fout_lio_motion_consistency.is_open())
+    {
+      auto header_vector = [&](const std::string &prefix, int size) {
+        for (int i = 0; i < size; ++i)
+          fout_lio_motion_consistency << ',' << prefix << '_' << i;
+      };
+      auto header_cross = [&](const std::string &prefix) {
+        fout_lio_motion_consistency << ',' << prefix << "_frobenius_norm,"
+            << prefix << "_maximum_singular_value";
+        header_vector(prefix + "_velocity_direction", 3);
+        header_vector(prefix + "_coupled_direction", 3);
+      };
+      auto header_quadratic = [&](const std::string &prefix) {
+        fout_lio_motion_consistency << ',' << prefix << "_valid," << prefix
+            << "_value," << prefix << "_rank," << prefix
+            << "_minimum_eigenvalue," << prefix << "_maximum_eigenvalue,"
+            << prefix << "_condition_number," << prefix << "_eigenvalue_cutoff";
+      };
+      auto header_source_counterfactual = [&](const std::string &prefix) {
+        fout_lio_motion_consistency << ',' << prefix << "_valid," << prefix
+            << "_strength";
+        header_vector(prefix + "_dimensionless_information_eigenvalue", 6);
+        header_vector(prefix + "_direction_weight", 6);
+        header_vector(prefix + "_delta_state", DIM_STATE);
+        fout_lio_motion_consistency
+            << ',' << prefix << "_delta_pose_norm"
+            << ',' << prefix << "_delta_exposure_abs"
+            << ',' << prefix << "_delta_velocity_norm"
+            << ',' << prefix << "_delta_bias_g_norm"
+            << ',' << prefix << "_delta_bias_a_norm"
+            << ',' << prefix << "_delta_gravity_norm"
+            << ',' << prefix << "_pose_difference_norm"
+            << ',' << prefix << "_velocity_difference_norm"
+            << ',' << prefix << "_localized_prior_min_eigenvalue"
+            << ',' << prefix << "_localized_prior_asymmetry"
+            << ',' << prefix << "_posterior_min_eigenvalue"
+            << ',' << prefix << "_posterior_asymmetry"
+            << ',' << prefix << "_posterior_trace"
+            << ',' << prefix << "_pose_posterior_covariance_difference_norm";
+      };
+      fout_lio_motion_consistency
+          << "timestamp,frame_id,shadow_warn,shadow_reason,diagnostic_valid,commit";
+      fout_lio_motion_consistency
+          << ",delta_rotation_x,delta_rotation_y,delta_rotation_z,"
+             "delta_position_x,delta_position_y,delta_position_z,delta_exposure,"
+             "delta_velocity_x,delta_velocity_y,delta_velocity_z,"
+             "delta_bias_g_x,delta_bias_g_y,delta_bias_g_z,"
+             "delta_bias_a_x,delta_bias_a_y,delta_bias_a_z,"
+             "delta_gravity_x,delta_gravity_y,delta_gravity_z";
+      fout_lio_motion_consistency
+          << ",delta_rotation_norm_rad,delta_rotation_norm_deg,delta_position_norm_m,"
+             "delta_exposure_abs,delta_velocity_norm_mps,delta_bias_g_norm,delta_bias_a_norm,"
+             "delta_gravity_norm";
+      header_cross("p_v_theta");
+      header_cross("p_v_position");
+      header_cross("p_v_bg");
+      header_cross("p_v_ba");
+      header_cross("p_v_gravity");
+      fout_lio_motion_consistency
+          << ",rotation_equivalent_gain_norm,position_equivalent_gain_norm,"
+             "velocity_equivalent_gain_norm,bias_g_equivalent_gain_norm,"
+             "bias_a_equivalent_gain_norm,gravity_equivalent_gain_norm";
+      header_vector("last_iteration_innovation_component", DIM_STATE);
+      header_vector("last_iteration_relinearization_component", DIM_STATE);
+      header_vector("accumulated_innovation_component", DIM_STATE);
+      header_vector("accumulated_relinearization_component", DIM_STATE);
+      fout_lio_motion_consistency
+          << ",analyzed_iteration_count,maximum_iteration_linearized_nis_per_dof,"
+             "mean_iteration_linearized_nis_per_dof,"
+             "maximum_iteration_rotation_equivalent_gain_norm,"
+             "maximum_iteration_position_equivalent_gain_norm,"
+             "maximum_iteration_velocity_equivalent_gain_norm,"
+             "maximum_iteration_velocity_innovation_component_norm";
+      header_quadratic("q_velocity_prior");
+      header_quadratic("q_pose_prior");
+      header_quadratic("q_bias_prior");
+      header_quadratic("q_gravity_prior");
+      header_quadratic("q_state_prior");
+      header_quadratic("q_velocity_correction_approx");
+      header_vector("correction_covariance_eigenvalue", DIM_STATE);
+      header_vector("velocity_correction_covariance_eigenvalue", 3);
+      fout_lio_motion_consistency
+          << ",correction_covariance_psd,correction_covariance_rank,"
+             "correction_covariance_asymmetry,residual_weighted_energy,"
+             "information_explained_energy,linearized_nis,linearized_nis_per_dof,"
+             "linearized_nis_valid";
+      header_vector("pose_information_eigenvalue", 6);
+      header_vector("pose_information_weak_direction", 6);
+      header_vector("pose_correction_eigen_projection", 6);
+      fout_lio_motion_consistency << ",pose_direction_decomposition_valid";
+      header_vector("pose_direction_eigenvalue", 6);
+      for (int direction = 0; direction < 6; ++direction)
+      {
+        header_vector("pose_direction_" + std::to_string(direction) + "_axis", 6);
+        header_vector("pose_direction_" + std::to_string(direction) +
+                          "_velocity_contribution", 3);
+        fout_lio_motion_consistency << ",pose_direction_" << direction
+            << "_velocity_contribution_norm";
+      }
+      header_vector("pose_direction_unapplied_carry", DIM_STATE);
+      fout_lio_motion_consistency
+          << ",pose_direction_full_closure_norm,pose_direction_velocity_closure_norm,"
+             "pose_direction_applied_full_closure_norm,"
+             "pose_direction_applied_velocity_closure_norm,"
+             "source_counterfactual_compute_time_ms";
+      header_source_counterfactual("transfer_identity");
+      header_source_counterfactual("transfer_mild");
+      header_source_counterfactual("transfer_medium");
+      header_source_counterfactual("transfer_stronger");
+      header_source_counterfactual("damping_identity");
+      header_source_counterfactual("damping_mild");
+      header_source_counterfactual("damping_medium");
+      header_source_counterfactual("damping_stronger");
+      fout_lio_motion_consistency
+          << ",pose_information_rank,pose_information_condition_number,"
+             "raw_is_degenerate,is_degenerate,observability_valid";
+      header_vector("rotation_information_eigenvalue", 3);
+      header_vector("translation_information_eigenvalue", 3);
+      fout_lio_motion_consistency
+          << ",rotation_information_ratio,rotation_information_condition,"
+             "translation_information_ratio,translation_information_condition";
+      header_vector("weak_rotation_direction_body", 3);
+      header_vector("weak_translation_direction_world", 3);
+      header_vector("cumulative_dv_025", 3);
+      fout_lio_motion_consistency << ",cumulative_dv_025_norm";
+      header_vector("cumulative_dv_050", 3);
+      fout_lio_motion_consistency << ",cumulative_dv_050_norm";
+      header_vector("cumulative_dv_100", 3);
+      fout_lio_motion_consistency
+          << ",cumulative_dv_100_norm,consecutive_dv_direction_cosine,"
+             "dv_direction_persistence_1s,dv_velocity_cosine,dv_velocity_angle_deg,"
+             "dv_dp_cosine,dv_dp_angle_deg,dv_dp_norm_ratio\n";
+    }
+    else
+    {
+      ROS_WARN("[LIO_MOTION_SHADOW] Failed to open %smotion_consistency_shadow.csv",
+               save_path.c_str());
+    }
+    fout_runtime_events.open(save_path + "runtime_event_counts.csv", std::ios::out);
+    if (fout_runtime_events.is_open())
+    {
+      fout_runtime_events
+          << "timestamp,final,lidar_received,imu_received,image_received,image_synced,"
+             "image_processed,lio_attempted,lio_committed,lio_rejected,vio_attempted,"
+             "vio_accepted,vio_rejected,buffer_overflow\n";
+    }
     if (voxelmap_manager && voxelmap_manager->config_setting_.directional_shadow_enable)
     {
       fout_lio_directional_shadow.open(
@@ -1079,6 +1303,235 @@ void LIVMapper::logVisualImageFlow(double timestamp, const char *event,
   {
     fout_visual_image_flow.flush();
     visual_image_flow_pending_rows_ = 0;
+  }
+}
+
+void LIVMapper::logLioTransaction()
+{
+  if (!fout_lio_transaction.is_open() || !voxelmap_manager) return;
+  const LioUpdateDiagnostics &diagnostics = voxelmap_manager->getLastLioDiagnostics();
+  fout_lio_transaction << std::setprecision(17)
+      << LidarMeasures.last_lio_update_time << ','
+      << voxelmap_manager->current_frame_id_ << ','
+      << diagnostics.iteration_count << ',' << diagnostics.convergence_status << ','
+      << static_cast<int>(diagnostics.converged) << ','
+      << static_cast<int>(diagnostics.reached_iteration_limit) << ','
+      << diagnostics.correspondence_count << ',' << diagnostics.valid_residual_count << ','
+      << diagnostics.cost_before << ',' << diagnostics.cost_after << ','
+      << diagnostics.translation_increment_norm << ','
+      << diagnostics.rotation_increment_deg << ','
+      << diagnostics.velocity_increment_norm << ','
+      << diagnostics.covariance_trace_before << ','
+      << diagnostics.covariance_trace_after << ','
+      << diagnostics.covariance_min_diagonal << ','
+      << diagnostics.covariance_max_diagonal << ','
+      << diagnostics.covariance_min_eigenvalue << ','
+      << diagnostics.covariance_asymmetry << ','
+      << static_cast<int>(diagnostics.map_inserted) << ','
+      << static_cast<int>(diagnostics.commit) << '\n';
+  if (++lio_transaction_pending_rows_ >= diagnostics_csv_flush_interval_rows_)
+  {
+    fout_lio_transaction.flush();
+    lio_transaction_pending_rows_ = 0;
+  }
+}
+
+void LIVMapper::logLioMotionConsistency()
+{
+  if (!fout_lio_motion_consistency.is_open() || !voxelmap_manager) return;
+  const LioUpdateDiagnostics &diagnostics =
+      voxelmap_manager->getLastLioDiagnostics();
+  const fast_livo::LioMotionConsistencyMetrics &motion =
+      diagnostics.motion_consistency;
+  auto write_vector = [&](const auto &value) {
+    for (int i = 0; i < value.size(); ++i)
+      fout_lio_motion_consistency << ',' << value[i];
+  };
+  auto write_cross = [&](const fast_livo::CrossBlockSummary &value) {
+    fout_lio_motion_consistency << ',' << value.frobenius_norm << ','
+        << value.maximum_singular_value;
+    write_vector(value.state_direction);
+    write_vector(value.coupled_direction);
+  };
+  auto write_quadratic = [&](const fast_livo::NormalizedQuadratic &value) {
+    fout_lio_motion_consistency << ',' << static_cast<int>(value.valid) << ','
+        << value.value << ',' << value.rank << ',' << value.minimum_eigenvalue
+        << ',' << value.maximum_eigenvalue << ',' << value.condition_number
+        << ',' << value.eigenvalue_cutoff;
+  };
+  auto write_source_counterfactual = [&] (
+      const fast_livo::SourceUpdateCounterfactual &value) {
+    fout_lio_motion_consistency << ',' << static_cast<int>(value.valid) << ','
+        << value.strength;
+    write_vector(value.dimensionless_information_eigenvalues);
+    write_vector(value.direction_weights);
+    write_vector(value.delta_state);
+    fout_lio_motion_consistency
+        << ',' << value.delta_state.head<6>().norm()
+        << ',' << std::fabs(value.delta_state[6])
+        << ',' << value.delta_state.segment<3>(7).norm()
+        << ',' << value.delta_state.segment<3>(10).norm()
+        << ',' << value.delta_state.segment<3>(13).norm()
+        << ',' << value.delta_state.segment<3>(16).norm()
+        << ',' << value.pose_difference_norm
+        << ',' << value.velocity_difference_norm
+        << ',' << value.localized_prior_min_eigenvalue
+        << ',' << value.localized_prior_asymmetry
+        << ',' << value.posterior_min_eigenvalue
+        << ',' << value.posterior_asymmetry
+        << ',' << value.posterior_trace
+        << ',' << value.pose_posterior_covariance_difference_norm;
+  };
+
+  const auto &delta = motion.delta_state;
+  fout_lio_motion_consistency << std::setprecision(17)
+      << LidarMeasures.last_lio_update_time << ','
+      << voxelmap_manager->current_frame_id_ << ','
+      << static_cast<int>(motion.shadow_warn) << ','
+      << diagnostics.motion_shadow_reason << ','
+      << static_cast<int>(motion.valid) << ','
+      << static_cast<int>(diagnostics.commit);
+  write_vector(delta);
+  fout_lio_motion_consistency
+      << ',' << delta.head<3>().norm()
+      << ',' << delta.head<3>().norm() * 57.29577951308232
+      << ',' << delta.segment<3>(3).norm() << ',' << delta[6]
+      << ',' << delta.segment<3>(7).norm()
+      << ',' << delta.segment<3>(10).norm()
+      << ',' << delta.segment<3>(13).norm()
+      << ',' << delta.segment<3>(16).norm();
+  write_cross(motion.p_v_theta);
+  write_cross(motion.p_v_position);
+  write_cross(motion.p_v_bg);
+  write_cross(motion.p_v_ba);
+  write_cross(motion.p_v_gravity);
+  fout_lio_motion_consistency
+      << ',' << motion.rotation_equivalent_gain_norm
+      << ',' << motion.position_equivalent_gain_norm
+      << ',' << motion.velocity_equivalent_gain_norm
+      << ',' << motion.bias_g_equivalent_gain_norm
+      << ',' << motion.bias_a_equivalent_gain_norm
+      << ',' << motion.gravity_equivalent_gain_norm;
+  write_vector(motion.innovation_component);
+  write_vector(motion.relinearization_component);
+  write_vector(motion.accumulated_innovation_component);
+  write_vector(motion.accumulated_relinearization_component);
+  fout_lio_motion_consistency
+      << ',' << motion.analyzed_iteration_count
+      << ',' << motion.maximum_iteration_linearized_nis_per_dof
+      << ',' << motion.mean_iteration_linearized_nis_per_dof
+      << ',' << motion.maximum_iteration_rotation_equivalent_gain_norm
+      << ',' << motion.maximum_iteration_position_equivalent_gain_norm
+      << ',' << motion.maximum_iteration_velocity_equivalent_gain_norm
+      << ',' << motion.maximum_iteration_velocity_innovation_component_norm;
+  write_quadratic(motion.q_velocity_prior);
+  write_quadratic(motion.q_pose_prior);
+  write_quadratic(motion.q_bias_prior);
+  write_quadratic(motion.q_gravity_prior);
+  write_quadratic(motion.q_state_prior);
+  write_quadratic(motion.q_velocity_correction_approx);
+  write_vector(motion.correction_covariance_eigenvalues);
+  write_vector(motion.velocity_correction_covariance_eigenvalues);
+  fout_lio_motion_consistency
+      << ',' << static_cast<int>(motion.correction_covariance_psd)
+      << ',' << motion.correction_covariance_rank
+      << ',' << motion.correction_covariance_asymmetry
+      << ',' << motion.residual_weighted_energy
+      << ',' << motion.information_explained_energy
+      << ',' << motion.linearized_nis
+      << ',' << motion.linearized_nis_per_dof
+      << ',' << static_cast<int>(motion.linearized_nis_valid);
+  write_vector(motion.pose_information_eigenvalues);
+  write_vector(motion.pose_information_weak_direction);
+  write_vector(motion.pose_correction_eigen_projections);
+  const auto &directions = motion.pose_direction_correction;
+  fout_lio_motion_consistency << ',' << static_cast<int>(directions.valid);
+  write_vector(directions.eigenvalues);
+  for (int direction = 0; direction < 6; ++direction)
+  {
+    write_vector(directions.eigenvectors.col(direction));
+    write_vector(directions.state_contributions.block<3, 1>(7, direction));
+    fout_lio_motion_consistency << ','
+        << directions.state_contributions.block<3, 1>(7, direction).norm();
+  }
+  write_vector(directions.unapplied_iteration_carry);
+  fout_lio_motion_consistency
+      << ',' << directions.full_closure_norm
+      << ',' << directions.velocity_closure_norm
+      << ',' << directions.applied_full_closure_norm
+      << ',' << directions.applied_velocity_closure_norm
+      << ',' << motion.source_counterfactual_compute_time_ms;
+  for (const auto &counterfactual : motion.transfer_counterfactuals)
+    write_source_counterfactual(counterfactual);
+  for (const auto &counterfactual : motion.damping_counterfactuals)
+    write_source_counterfactual(counterfactual);
+  fout_lio_motion_consistency
+      << ',' << motion.pose_information_rank
+      << ',' << motion.pose_information_condition_number
+      << ',' << static_cast<int>(diagnostics.raw_is_degenerate)
+      << ',' << static_cast<int>(diagnostics.is_degenerate)
+      << ',' << static_cast<int>(diagnostics.observability.valid);
+  write_vector(diagnostics.observability.rotation_eigenvalues);
+  write_vector(diagnostics.observability.translation_eigenvalues);
+  fout_lio_motion_consistency
+      << ',' << diagnostics.observability.rotation_eigenvalue_ratio
+      << ',' << diagnostics.observability.rotation_condition_number
+      << ',' << diagnostics.observability.translation_eigenvalue_ratio
+      << ',' << diagnostics.observability.translation_condition_number;
+  write_vector(diagnostics.observability.weak_rotation_direction_body);
+  write_vector(diagnostics.observability.weak_translation_direction_world);
+  write_vector(motion.temporal.cumulative_dv_025);
+  fout_lio_motion_consistency << ','
+      << motion.temporal.cumulative_dv_025.norm();
+  write_vector(motion.temporal.cumulative_dv_050);
+  fout_lio_motion_consistency << ','
+      << motion.temporal.cumulative_dv_050.norm();
+  write_vector(motion.temporal.cumulative_dv_100);
+  fout_lio_motion_consistency
+      << ',' << motion.temporal.cumulative_dv_100.norm()
+      << ',' << motion.temporal.consecutive_direction_cosine
+      << ',' << motion.temporal.direction_persistence_1s
+      << ',' << motion.temporal.dv_velocity_cosine
+      << ',' << motion.temporal.dv_velocity_angle_deg
+      << ',' << motion.temporal.dv_dp_cosine
+      << ',' << motion.temporal.dv_dp_angle_deg
+      << ',' << motion.temporal.dv_dp_norm_ratio << '\n';
+  if (++lio_motion_consistency_pending_rows_ >=
+      diagnostics_csv_flush_interval_rows_)
+  {
+    fout_lio_motion_consistency.flush();
+    lio_motion_consistency_pending_rows_ = 0;
+  }
+}
+
+void LIVMapper::logRuntimeEventCounts(bool final_snapshot)
+{
+  const bool periodic_snapshot = runtime_events_.lio_attempted > 0 &&
+      runtime_events_.lio_attempted % 200 == 0;
+  if (!final_snapshot && !periodic_snapshot) return;
+  const double timestamp = LidarMeasures.last_lio_update_time;
+  if (fout_runtime_events.is_open())
+  {
+    fout_runtime_events << std::setprecision(17) << timestamp << ','
+        << static_cast<int>(final_snapshot) << ','
+        << runtime_events_.lidar_received << ',' << runtime_events_.imu_received << ','
+        << runtime_events_.image_received << ',' << runtime_events_.image_synced << ','
+        << runtime_events_.image_processed << ',' << runtime_events_.lio_attempted << ','
+        << runtime_events_.lio_committed << ',' << runtime_events_.lio_rejected << ','
+        << runtime_events_.vio_attempted << ',' << runtime_events_.vio_accepted << ','
+        << runtime_events_.vio_rejected << ',' << runtime_events_.buffer_overflow << '\n';
+    if (final_snapshot) fout_runtime_events.flush();
+  }
+  if (final_snapshot || periodic_snapshot)
+  {
+    ROS_INFO("[EVENT_COUNTS] final=%d lidar=%lu imu=%lu image=%lu image_synced=%lu image_processed=%lu lio=%lu/%lu/%lu vio=%lu/%lu/%lu overflow=%lu",
+             static_cast<int>(final_snapshot), runtime_events_.lidar_received,
+             runtime_events_.imu_received, runtime_events_.image_received,
+             runtime_events_.image_synced, runtime_events_.image_processed,
+             runtime_events_.lio_attempted, runtime_events_.lio_committed,
+             runtime_events_.lio_rejected, runtime_events_.vio_attempted,
+             runtime_events_.vio_accepted, runtime_events_.vio_rejected,
+             runtime_events_.buffer_overflow);
   }
 }
 
@@ -1397,6 +1850,10 @@ void LIVMapper::initializeSubscribersAndPublishers(ros::NodeHandle &nh, image_tr
                         raw_backend_body_frame_id_);
   pubRawBackendOdom =
       nh.advertise<nav_msgs::Odometry>(raw_backend_odom_topic_, 100);
+  if (fullstate_shadow_enable_)
+    pubFullStateShadowGeometry =
+        nh.advertise<fast_livo::FullStateLidarGeometry>(
+            fullstate_shadow_geometry_topic_, 100);
   pubPath = nh.advertise<nav_msgs::Path>("/mapping/path", 10);
   plane_pub = nh.advertise<visualization_msgs::Marker>("/planner_normal", 1);
   voxel_pub = nh.advertise<visualization_msgs::MarkerArray>("/voxels", 1);
@@ -1461,6 +1918,71 @@ bool LIVMapper::publishRawBackendOdometry()
   return true;
 }
 
+void LIVMapper::publishFullStateShadowGeometry()
+{
+  if (!fullstate_shadow_enable_ || !pubFullStateShadowGeometry) return;
+  const LioUpdateDiagnostics &diagnostics =
+      voxelmap_manager->getLastLioDiagnostics();
+  fast_livo::FullStateLidarGeometry message;
+  message.header.stamp.fromSec(LidarMeasures.last_lio_update_time);
+  message.header.frame_id = raw_backend_odom_frame_id_;
+  message.factor_source = "L1_FINAL_POINT_TO_PLANE";
+  message.geometry_valid = diagnostics.lidar_geometry_valid;
+  message.production_commit = diagnostics.commit;
+  // StateEstimation finishes before handleLIO mutates the voxel map.
+  message.frozen_submap = true;
+  message.correspondence_count = std::max(0, diagnostics.correspondence_count);
+  message.residual_dof =
+      std::max(0, diagnostics.lidar_geometry_residual_dof);
+
+  const StatesGroup &linearization =
+      diagnostics.lidar_geometry_linearization_state;
+  Eigen::Quaterniond quaternion(linearization.rot_end);
+  quaternion.normalize();
+  message.linearization_pose.position.x = linearization.pos_end.x();
+  message.linearization_pose.position.y = linearization.pos_end.y();
+  message.linearization_pose.position.z = linearization.pos_end.z();
+  message.linearization_pose.orientation.w = quaternion.w();
+  message.linearization_pose.orientation.x = quaternion.x();
+  message.linearization_pose.orientation.y = quaternion.y();
+  message.linearization_pose.orientation.z = quaternion.z();
+
+  Eigen::Quaterniond production_quaternion(_state.rot_end);
+  production_quaternion.normalize();
+  message.production_pose.position.x = _state.pos_end.x();
+  message.production_pose.position.y = _state.pos_end.y();
+  message.production_pose.position.z = _state.pos_end.z();
+  message.production_pose.orientation.w = production_quaternion.w();
+  message.production_pose.orientation.x = production_quaternion.x();
+  message.production_pose.orientation.y = production_quaternion.y();
+  message.production_pose.orientation.z = production_quaternion.z();
+
+  auto assign_vector = [](geometry_msgs::Vector3 &destination,
+                          const V3D &source) {
+    destination.x = source.x();
+    destination.y = source.y();
+    destination.z = source.z();
+  };
+  assign_vector(message.production_velocity, _state.vel_end);
+  assign_vector(message.production_gyro_bias, _state.bias_g);
+  assign_vector(message.production_accel_bias, _state.bias_a);
+  assign_vector(message.gravity, _state.gravity);
+  message.accel_scale =
+      p_imu->IMU_mean_acc_norm > 1e-12
+          ? G_m_s2 / p_imu->IMU_mean_acc_norm
+          : std::numeric_limits<double>::quiet_NaN();
+  for (int row = 0; row < 6; ++row)
+  {
+    message.pose_rhs[row] = diagnostics.lidar_geometry_rhs[row];
+    for (int column = 0; column < 6; ++column)
+      message.pose_information[row * 6 + column] =
+          diagnostics.lidar_geometry_information(row, column);
+  }
+  message.residual_weighted_energy =
+      diagnostics.lidar_geometry_residual_weighted_energy;
+  pubFullStateShadowGeometry.publish(message);
+}
+
 void LIVMapper::handleFirstFrame() 
 {
   if (!is_first_frame)
@@ -1495,6 +2017,15 @@ void LIVMapper::processImu()
   // double t0 = omp_get_wtime();
 
   p_imu->Process2(LidarMeasures, _state, feats_undistort);
+
+  if (voxelmap_manager->config_setting_.p4_frontend_diagnostics_enable)
+  {
+    voxelmap_manager->p4SetDeskewDiagnostics(
+        p_imu->p4_deskew_diagnostics());
+    voxelmap_manager->p4_raw_cloud_ = p_imu->p4_raw_cloud();
+    voxelmap_manager->p4_fixed_velocity_cloud_ =
+        p_imu->p4_fixed_velocity_cloud();
+  }
 
   if (gravity_align_en) gravityAlignment();
 
@@ -1824,10 +2355,16 @@ void LIVMapper::handleVIO()
       const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> no_lidar_plane_map;
       logVisualImageFlow(LidarMeasures.last_lio_update_time,
                          "image_tracking_only_dry_run", "no_lidar_features");
+      ++runtime_events_.vio_attempted;
       vio_manager->processFrame(
           LidarMeasures.measures.back().img, no_lidar_features,
           no_lidar_plane_map,
           LidarMeasures.last_lio_update_time - _first_lidar_time, true);
+      ++runtime_events_.image_processed;
+      if (vio_manager->last_visual_update_accepted)
+        ++runtime_events_.vio_accepted;
+      else
+        ++runtime_events_.vio_rejected;
       return;
     }
     logVisualImageFlow(LidarMeasures.last_lio_update_time,
@@ -1945,10 +2482,16 @@ void LIVMapper::handleVIO()
 
   logVisualImageFlow(LidarMeasures.last_lio_update_time,
                      "image_processed", last_selector_reason_);
+  ++runtime_events_.vio_attempted;
   vio_manager->processFrame(LidarMeasures.measures.back().img, _pv_list,
                             voxelmap_manager->voxel_map_,
                             LidarMeasures.last_lio_update_time - _first_lidar_time,
                             false);
+  ++runtime_events_.image_processed;
+  if (vio_manager->last_visual_update_accepted)
+    ++runtime_events_.vio_accepted;
+  else
+    ++runtime_events_.vio_rejected;
   snapStateForDeterminism(_state);
   vio_manager->updateFrameState(_state);
   updateVisualObservationHints();
@@ -2127,6 +2670,31 @@ void LIVMapper::handleLIO()
                 return a.z < b.z;
               });
   }
+  if (voxelmap_manager->config_setting_.p4_frontend_diagnostics_enable)
+  {
+    voxelmap_manager->p4_fixed_velocity_down_body_->clear();
+    if (voxelmap_manager->p4_fixed_velocity_cloud_ &&
+        !voxelmap_manager->p4_fixed_velocity_cloud_->empty())
+    {
+      const bool p4_filtered = safeVoxelFilter<PointType>(
+          voxelmap_manager->p4_fixed_velocity_cloud_,
+          voxelmap_manager->p4_fixed_velocity_down_body_,
+          Eigen::Vector3f::Constant(
+              static_cast<float>(filter_size_surf_min)),
+          "P4_FIXED_VELOCITY_DESKEW", voxel_context);
+      if (!p4_filtered)
+        voxelmap_manager->p4_fixed_velocity_down_body_->clear();
+      else if (deterministic_lio_feature_sort_en_)
+        std::sort(
+            voxelmap_manager->p4_fixed_velocity_down_body_->points.begin(),
+            voxelmap_manager->p4_fixed_velocity_down_body_->points.end(),
+            [](const PointType &a, const PointType &b) {
+              if (a.x != b.x) return a.x < b.x;
+              if (a.y != b.y) return a.y < b.y;
+              return a.z < b.z;
+            });
+    }
+  }
   
   double t_down = omp_get_wtime();
 
@@ -2139,16 +2707,26 @@ void LIVMapper::handleLIO()
   if (!lidar_map_inited) 
   {
     lidar_map_inited = true;
-    voxelmap_manager->BuildVoxelMap();
+    voxelmap_manager->BuildVoxelMap(LidarMeasures.last_lio_update_time);
   }
 
   double t1 = omp_get_wtime();
 
   std::ostringstream lio_iteration_log;
   const bool record_lio_iterations = save_log_en && vio_manager;
+  ++runtime_events_.lio_attempted;
   voxelmap_manager->StateEstimation(
-      state_propagat, record_lio_iterations ? &lio_iteration_log : nullptr);
+      state_propagat, LidarMeasures.last_lio_update_time,
+      record_lio_iterations ? &lio_iteration_log : nullptr);
+  voxelmap_manager->runP5SeedBasinShadow(
+      state_propagat, LidarMeasures.last_lio_update_time,
+      LidarMeasures.last_lio_update_time - _first_lidar_time);
+  if (voxelmap_manager->getLastLioDiagnostics().commit)
+    ++runtime_events_.lio_committed;
+  else
+    ++runtime_events_.lio_rejected;
   _state = voxelmap_manager->state_;
+  publishFullStateShadowGeometry();
   if (save_log_en && vio_manager)
   {
     // Observe the unmodified LIO transaction, before external corrections.
@@ -2285,6 +2863,8 @@ void LIVMapper::handleLIO()
   }
 
   const bool external_map_guard = external_update_pause_map_frames_ > 0;
+  const bool p4_map_mutation_allowed = voxelmap_manager->p4MapMutationAllowed(
+      LidarMeasures.last_lio_update_time);
   bool lio_map_guard_enforced = false;
   if (do_map_update && map_guard_enforce && lio_map_guard_active_)
   {
@@ -2303,9 +2883,16 @@ void LIVMapper::handleLIO()
       ++lio_map_guard_freeze_frames_;
     }
   }
-  const bool skip_map_insert = do_map_update && (external_map_guard || lio_map_guard_enforced);
+  const bool lio_measurement_rejected = !lio_diagnostics.commit;
+  const bool map_guarded = external_map_guard || lio_map_guard_enforced ||
+                           !p4_map_mutation_allowed;
+  const bool insert_lio_map = fast_livo::shouldInsertLioMap(
+      lio_diagnostics.commit, do_map_update, map_guarded);
+  const bool skip_map_insert = do_map_update && !insert_lio_map;
   std::string map_insert_skip_reason = "none";
-  if (!do_map_update)
+  if (lio_measurement_rejected)
+    map_insert_skip_reason = "lio_" + lio_diagnostics.convergence_status;
+  else if (!do_map_update)
     map_insert_skip_reason = "map_update_stride";
   else if (external_map_guard && lio_map_guard_enforced)
     map_insert_skip_reason = "external_update+" + map_guard_reason;
@@ -2313,6 +2900,8 @@ void LIVMapper::handleLIO()
     map_insert_skip_reason = "external_update";
   else if (lio_map_guard_enforced)
     map_insert_skip_reason = map_guard_reason;
+  else if (!p4_map_mutation_allowed)
+    map_insert_skip_reason = "p4_frozen_map_counterfactual";
   const int pause_map_update_frames_before = external_update_pause_map_frames_;
   double t4 = t3;
 
@@ -2326,7 +2915,7 @@ void LIVMapper::handleLIO()
                       external_update_pause_map_frames_, lio_map_guard_freeze_frames_,
                       lio_map_guard_recovery_frames_);
   }
-  else if (do_map_update)
+  else if (insert_lio_map)
   {
     PointCloudXYZI::Ptr world_lidar(new PointCloudXYZI());
     transformLidar(_state.rot_end, _state.pos_end, feats_down_body, world_lidar);
@@ -2338,8 +2927,20 @@ void LIVMapper::handleLIO()
       var = (_state.rot_end * extR) * var * (_state.rot_end * extR).transpose() +
             (-point_crossmat) * _state.cov.block<3, 3>(0, 0) * (-point_crossmat).transpose() + _state.cov.block<3, 3>(3, 3);
       voxelmap_manager->pv_list_[i].var = var;
+      if (lio_config.p4_frontend_diagnostics_enable ||
+          lio_config.p4b_snapshot_enable)
+      {
+        voxelmap_manager->pv_list_[i].source_frame_id =
+            voxelmap_manager->current_frame_id_;
+        voxelmap_manager->pv_list_[i].source_point_index =
+            static_cast<int>(i);
+        voxelmap_manager->pv_list_[i].source_timestamp_s =
+            LidarMeasures.last_lio_update_time;
+        voxelmap_manager->pv_list_[i].source_origin_w = _state.pos_end;
+      }
     }
     voxelmap_manager->UpdateVoxelMap(voxelmap_manager->pv_list_);
+    voxelmap_manager->markLastLioMapInserted(true);
     if (print_console_timing_en_ && (frame_num % std::max(1, print_console_timing_stride_) == 0))
     {
       std::cout << "[ LIO ] Update Voxel Map" << std::endl;
@@ -2352,14 +2953,75 @@ void LIVMapper::handleLIO()
 
   // Sliding/cropping is memory management, not map insertion. It must continue
   // even while an external or experimental guard pauses new point insertion.
-  if (do_map_update && voxelmap_manager->config_setting_.map_sliding_en)
+  if (do_map_update && p4_map_mutation_allowed &&
+      voxelmap_manager->config_setting_.map_sliding_en)
   {
     voxelmap_manager->mapSliding();
   }
 
+  voxelmap_manager->p4RecordMapDecision(
+      LidarMeasures.last_lio_update_time, insert_lio_map,
+      insert_lio_map ? "inserted" : map_insert_skip_reason,
+      state_propagat.pos_end, _state.pos_end);
+
   logLioDegeneracy(skip_map_insert, map_insert_skip_reason,
                    map_guard_request, lio_map_guard_enforced);
+  logLioTransaction();
+  logLioMotionConsistency();
+  logRuntimeEventCounts(false);
   logLioDirectionalShadow();
+
+  if (p4b_fork_harness_)
+  {
+    p4b_fork_harness_->observeProductionResult(
+        _state, *voxelmap_manager, *feats_undistort,
+        LidarMeasures.last_lio_update_time,
+        runtime_events_.vio_accepted);
+    const double relative_time_s =
+        LidarMeasures.last_lio_update_time - _first_lidar_time;
+    if (p4b_fork_harness_->shouldCapture(relative_time_s))
+    {
+      std::string error;
+      if (!p4b_fork_harness_->beginCapture(error))
+      {
+        ROS_ERROR("[P4B] capture pause failed: %s", error.c_str());
+        return;
+      }
+      fast_livo::p4b::P4ForkSnapshot snapshot;
+      snapshot.boundary_timestamp_s = LidarMeasures.last_lio_update_time;
+      snapshot.state = _state;
+      snapshot.propagated_state = state_propagat;
+      snapshot.imu = p_imu->captureSnapshot();
+      snapshot.map = voxelmap_manager->captureSnapshot();
+      snapshot.lifecycle.lidar_map_initialized = lidar_map_inited;
+      snapshot.lifecycle.gravity_alignment_finished = gravity_align_finished;
+      snapshot.lifecycle.lidar_map_update_counter = lio_map_update_counter_;
+      snapshot.lifecycle.lidar_map_guard_active = lio_map_guard_active_;
+      snapshot.lifecycle.lidar_map_guard_hard_limit_latched =
+          lio_map_guard_hard_limit_latched_;
+      snapshot.lifecycle.lidar_map_guard_recovery_frames =
+          lio_map_guard_recovery_frames_;
+      snapshot.lifecycle.lidar_map_guard_freeze_frames =
+          lio_map_guard_freeze_frames_;
+      snapshot.lifecycle.external_update_pause_map_frames =
+          external_update_pause_map_frames_;
+      snapshot.lifecycle.lidar_frame_begin_time =
+          LidarMeasures.lidar_frame_beg_time;
+      snapshot.lifecycle.lidar_frame_end_time =
+          LidarMeasures.lidar_frame_end_time;
+      snapshot.lifecycle.last_lidar_update_time =
+          LidarMeasures.last_lio_update_time;
+      snapshot.lifecycle.lidar_scan_index =
+          LidarMeasures.lidar_scan_index_now;
+      if (!p4b_fork_harness_->capture(
+              snapshot, voxelmap_manager->config_setting_,
+              runtime_events_.vio_accepted, error))
+        ROS_ERROR("[P4B] snapshot capture failed: %s", error.c_str());
+      else
+        ROS_WARN("[P4B] snapshot captured at relative_time=%.6f frame_id=%d",
+                 relative_time_s, voxelmap_manager->current_frame_id_);
+    }
+  }
   
   PointCloudXYZI::Ptr laserCloudFullRes(dense_map_en ? feats_undistort : feats_down_body);
   int size = laserCloudFullRes->points.size();
@@ -2596,6 +3258,23 @@ void LIVMapper::run()
     const double t_sync_end = omp_get_wtime();
     handleFirstFrame();
 
+    if (p4b_fork_harness_ && p4b_fork_harness_->captured() &&
+        !p4b_fork_harness_->finished() &&
+        LidarMeasures.lio_vio_flg != VIO)
+    {
+      std::string error;
+      if (!p4b_fork_harness_->beginForkFrame(error))
+      {
+        ROS_ERROR("[P4B] fork-frame input pause failed: %s", error.c_str());
+        return;
+      }
+      const double packet_time = !LidarMeasures.measures.empty()
+          ? LidarMeasures.measures.back().lio_time
+          : LidarMeasures.last_lio_update_time;
+      p4b_fork_harness_->processImmutableLioPacket(
+          LidarMeasures, packet_time - _first_lidar_time);
+    }
+
     processImu();
     const double t_imu_end = omp_get_wtime();
 
@@ -2603,6 +3282,7 @@ void LIVMapper::run()
 
     const EKF_STATE frame_mode = LidarMeasures.lio_vio_flg;
     stateEstimationAndMapping();
+    if (p4b_fork_harness_) p4b_fork_harness_->endForkFrame();
     updateMappingReady();
 
     const double t2 = omp_get_wtime();
@@ -2824,6 +3504,7 @@ void LIVMapper::RGBpointBodyToWorld(PointType const *const pi, PointType *const 
 void LIVMapper::standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg)
 {
   if (!lidar_en) return;
+  ++runtime_events_.lidar_received;
   mtx_buffer.lock();
 
   double cur_head_time = msg->header.stamp.toSec() + lidar_time_offset;
@@ -2844,6 +3525,7 @@ void LIVMapper::standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg)
   {
     lid_raw_data_buffer.pop_front();
     lid_header_time_buffer.pop_front();
+    ++runtime_events_.buffer_overflow;
   }
   last_timestamp_lidar = cur_head_time;
 
@@ -2854,6 +3536,7 @@ void LIVMapper::standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg)
 void LIVMapper::livox_pcl_cbk(const livox_ros_driver::CustomMsg::ConstPtr &msg_in)
 {
   if (!lidar_en) return;
+  ++runtime_events_.lidar_received;
   mtx_buffer.lock();
   livox_ros_driver::CustomMsg::Ptr msg(new livox_ros_driver::CustomMsg(*msg_in));
   // if ((abs(msg->header.stamp.toSec() - last_timestamp_lidar) > 0.2 && last_timestamp_lidar > 0) || sync_jump_flag)
@@ -2894,6 +3577,7 @@ void LIVMapper::livox_pcl_cbk(const livox_ros_driver::CustomMsg::ConstPtr &msg_i
   {
     lid_raw_data_buffer.pop_front();
     lid_header_time_buffer.pop_front();
+    ++runtime_events_.buffer_overflow;
   }
   last_timestamp_lidar = cur_head_time;
 
@@ -2904,6 +3588,7 @@ void LIVMapper::livox_pcl_cbk(const livox_ros_driver::CustomMsg::ConstPtr &msg_i
 void LIVMapper::imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
 {
   if (!imu_en) return;
+  ++runtime_events_.imu_received;
 
   // ROS_INFO("get imu at time: %.6f", msg_in->header.stamp.toSec());
   sensor_msgs::Imu::Ptr msg(new sensor_msgs::Imu(*msg_in));
@@ -2954,6 +3639,7 @@ void LIVMapper::imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
   while (max_imu_buffer_size_ > 0 && static_cast<int>(imu_buffer.size()) > max_imu_buffer_size_)
   {
     imu_buffer.pop_front();
+    ++runtime_events_.buffer_overflow;
   }
   // cout<<"got imu: "<<timestamp<<" imu size "<<imu_buffer.size()<<endl;
   mtx_buffer.unlock();
@@ -2966,6 +3652,7 @@ void LIVMapper::imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
       while (max_prop_imu_buffer_size_ > 0 && static_cast<int>(prop_imu_buffer.size()) > max_prop_imu_buffer_size_)
       {
         prop_imu_buffer.pop_front();
+        ++runtime_events_.buffer_overflow;
       }
     }
     newest_imu = *msg;
@@ -2985,6 +3672,7 @@ cv::Mat LIVMapper::getImageFromMsg(const sensor_msgs::ImageConstPtr &img_msg)
 void LIVMapper::img_cbk(const sensor_msgs::ImageConstPtr &msg_in)
 {
   if (!img_en) return;
+  ++runtime_events_.image_received;
   const double received_time = msg_in->header.stamp.toSec() + img_time_offset;
   logVisualImageFlow(received_time, "image_received", "subscriber_callback");
   sensor_msgs::Image::Ptr msg(new sensor_msgs::Image(*msg_in));
@@ -3068,6 +3756,7 @@ void LIVMapper::img_cbk(const sensor_msgs::ImageConstPtr &msg_in)
     logVisualImageFlow(img_time_buffer.front(), "image_dropped", "buffer_overflow");
     img_buffer.pop_front();
     img_time_buffer.pop_front();
+    ++runtime_events_.buffer_overflow;
   }
 
   // ROS_INFO("Correct Image time: %.6f", img_time_correct);
@@ -3320,6 +4009,7 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
       m.lio_time = meas.last_lio_update_time;
       m.img = deterministic_pending_vio_image_en_ ? pending_vio_img_ : img_buffer.front();
       logVisualImageFlow(img_capture_time, "image_synced", "vio_measurement");
+      ++runtime_events_.image_synced;
       mtx_buffer.lock();
       // while ((!imu_buffer.empty() && (imu_time < img_capture_time)))
       // {

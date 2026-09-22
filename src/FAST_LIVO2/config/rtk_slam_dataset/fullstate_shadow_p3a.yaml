@@ -1,0 +1,14 @@
+# P3-A shadow-only full-state smoother. No output from this node is consumed by
+# FAST-LIVO, its voxel map, IMU propagation, VIO, GNSS, or UWB.
+fullstate_shadow:
+  enable: true
+  geometry_topic: "/fullstate_shadow/lidar_geometry"
+  imu_topic: "/livox/imu"
+  odometry_topic: "/fullstate_shadow/optimized_odom"
+  lag_seconds: 20.0
+  maximum_imu_gap_s: 0.03
+  # These match the current frontend's hard-coded discrete bias covariances.
+  accel_bias_variance: 0.0001
+  gyro_bias_variance: 0.0001
+  # Numerical integration uncertainty only; no LiDAR information floor.
+  integration_covariance: 1.0e-8

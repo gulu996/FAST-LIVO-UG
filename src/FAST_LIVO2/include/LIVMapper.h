@@ -17,8 +17,10 @@ which is included as part of this source code package.
 #include "gnss_manager.h"
 #include "vio.h"
 #include "preprocess.h"
+#include "p4_fork_harness.h"
 #include "uwb_manager.h"
 #include "voxel_filter_utils.h"
+#include <fast_livo/FullStateLidarGeometry.h>
 #include <cv_bridge/cv_bridge.h>
 #include <image_transport/image_transport.h>
 #include <nav_msgs/Path.h>
@@ -61,6 +63,10 @@ public:
   void logLioDegeneracy(bool map_insert_skipped, const std::string &map_insert_skip_reason,
                         bool map_guard_requested, bool map_guard_enforced);
   void logLioDirectionalShadow();
+  void logLioTransaction();
+  void logLioMotionConsistency();
+  void logRuntimeEventCounts(bool final_snapshot);
+  void publishFullStateShadowGeometry();
   
   bool sync_packages(LidarMeasureGroup &meas);
   void prop_imu_once(StatesGroup &imu_prop_state, const double dt, V3D acc_avr, V3D angvel_avr);
@@ -94,6 +100,7 @@ public:
 
   SLAM_MODE slam_mode_;
   std::unordered_map<VOXEL_LOCATION, VoxelOctoTree *> voxel_map;
+  std::unique_ptr<fast_livo::p4b::P4ForkHarness> p4b_fork_harness_;
   
   string root_dir;
   string lid_topic, imu_topic, seq_name, img_topic;
@@ -299,9 +306,13 @@ public:
   PointCloudXYZI::Ptr pcl_wait_save_intensity;
 
   ofstream fout_pre, fout_out, fout_pcd_pos, fout_points, fout_lio_degeneracy,
-      fout_lio_directional_shadow, fout_runtime_memory, fout_visual_image_flow;
+      fout_lio_directional_shadow, fout_lio_transaction,
+      fout_lio_motion_consistency, fout_runtime_memory, fout_runtime_events,
+      fout_visual_image_flow;
   int visual_image_flow_pending_rows_ = 0;
   int lio_directional_shadow_pending_rows_ = 0;
+  int lio_transaction_pending_rows_ = 0;
+  int lio_motion_consistency_pending_rows_ = 0;
 
   V3D euler_cur;
 
@@ -334,6 +345,7 @@ public:
   ros::Publisher pubLaserCloudMap;
   ros::Publisher pubOdomAftMapped;
   ros::Publisher pubRawBackendOdom;
+  ros::Publisher pubFullStateShadowGeometry;
   ros::Publisher pubPath;
   ros::Publisher pubLaserCloudDyn;
   ros::Publisher pubLaserCloudDynRmed;
@@ -350,6 +362,9 @@ public:
   std::uint64_t raw_backend_odom_published_ = 0;
   std::uint64_t raw_backend_odom_duplicate_ = 0;
   std::uint64_t raw_backend_odom_non_monotonic_ = 0;
+  bool fullstate_shadow_enable_ = false;
+  std::string fullstate_shadow_geometry_topic_ =
+      "/fullstate_shadow/lidar_geometry";
   ros::Timer imu_prop_timer;
 
   int frame_num = 0;
@@ -361,6 +376,22 @@ public:
   int diagnostics_console_interval_frames_ = 20;
   int diagnostics_csv_flush_interval_rows_ = 100;
   int lio_diagnostics_pending_rows_ = 0;
+  bool deterministic_debug_en_ = false;
+  struct RuntimeEventCounters
+  {
+    std::uint64_t lidar_received = 0;
+    std::uint64_t imu_received = 0;
+    std::uint64_t image_received = 0;
+    std::uint64_t image_synced = 0;
+    std::uint64_t image_processed = 0;
+    std::uint64_t lio_attempted = 0;
+    std::uint64_t lio_committed = 0;
+    std::uint64_t lio_rejected = 0;
+    std::uint64_t vio_attempted = 0;
+    std::uint64_t vio_accepted = 0;
+    std::uint64_t vio_rejected = 0;
+    std::uint64_t buffer_overflow = 0;
+  } runtime_events_;
   bool lio_map_guard_active_ = false;
   bool lio_map_guard_hard_limit_latched_ = false;
   int lio_map_guard_recovery_frames_ = 0;

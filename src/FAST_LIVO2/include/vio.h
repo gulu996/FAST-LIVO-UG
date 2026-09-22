@@ -313,6 +313,19 @@ public:
   std::map<int, Eigen::Vector3d> aruco_relative_positions_;
 
   int patch_pyrimid_level, patch_size, patch_size_total, patch_size_half, border, warp_len;
+  enum class WarpRejectReason
+  {
+    None,
+    InvalidImage,
+    NonfiniteMatrix,
+    NonfiniteCoordinate,
+    OutOfBounds
+  };
+  WarpRejectReason last_warp_reject_reason = WarpRejectReason::None;
+  int last_visual_warp_invalid_image_rejects = 0;
+  int last_visual_warp_nonfinite_matrix_rejects = 0;
+  int last_visual_warp_nonfinite_coordinate_rejects = 0;
+  int last_visual_warp_oob_rejects = 0;
   int max_iterations, total_points;
   int min_retrieve_points = 30;
   bool visual_spatial_coverage_gate_en = false;
@@ -526,6 +539,7 @@ public:
   double last_visual_guard_time = -1.0;
   bool has_last_visual_guard_pos = false;
   V3D last_visual_guard_pos = V3D::Zero();
+  bool last_visual_update_accepted = false;
 
   string timing_log_dir;
   string timing_log_file_path;
@@ -592,7 +606,7 @@ public:
                            const int pyramid_level, const int halfpatch_size, Matrix2d &A_cur_ref);
   void getWarpMatrixAffineHomography(const vk::AbstractCamera &cam, const V2D &px_ref,
                                      const V3D &xyz_ref, const V3D &normal_ref, const SE3 &T_cur_ref, const int level_ref, Matrix2d &A_cur_ref);
-  void warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, const Vector2d &px_ref, const int level_ref, const int search_level,
+  bool warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, const Vector2d &px_ref, const int level_ref, const int search_level,
                   const int pyramid_level, const int halfpatch_size, float *patch);
   bool insertPointIntoVoxelMap(VisualPoint *pt_new);
   size_t getVisualPointCount() const;

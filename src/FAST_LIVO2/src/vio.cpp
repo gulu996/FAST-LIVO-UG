@@ -724,6 +724,8 @@ void VIOManager::logVisualFunnel(const std::string &skip_reason, bool ekf_attemp
            "good_tile_ratio,good_tile_horizontal_coverage,good_tile_vertical_coverage,"
            "map_points,map_voxels,projected_candidates,inside_image_candidates,good_tile_candidates,grid_candidates,"
            "depth_discontinuity_rejected,normal_uninitialized_rejected,warp_invalid_candidates,"
+           "warp_invalid_image_rejected,warp_nonfinite_matrix_rejected,"
+           "warp_nonfinite_coordinate_rejected,warp_oob_rejected,"
            "patch_quality_input,patch_quality_rejected,search_level_low_contrast_retried,"
            "search_level_low_contrast_recovered,patch_valid,ncc_rejected,ncc_pass,"
            "photometric_rejected,tracked_points,ref_input_mean_age,ref_input_max_age,"
@@ -785,6 +787,10 @@ void VIOManager::logVisualFunnel(const std::string &skip_reason, bool ekf_attemp
       << last_visual_depth_discontinuity_rejects << ','
       << last_visual_normal_uninitialized_rejects << ','
       << last_visual_warp_invalid_candidates << ','
+      << last_visual_warp_invalid_image_rejects << ','
+      << last_visual_warp_nonfinite_matrix_rejects << ','
+      << last_visual_warp_nonfinite_coordinate_rejects << ','
+      << last_visual_warp_oob_rejects << ','
       << patch_quality_input << ',' << last_visual_patch_quality_rejects << ','
       << last_visual_search_level_low_contrast_retries << ','
       << last_visual_search_level_low_contrast_recovered << ','
@@ -2080,32 +2086,75 @@ void VIOManager::getWarpMatrixAffine(const vk::AbstractCamera &cam, const Vector
   A_cur_ref.col(1) = (px_dv - px_cur) / halfpatch_size;
 }
 
-void VIOManager::warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, const Vector2d &px_ref, const int level_ref, const int search_level,
+bool VIOManager::warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, const Vector2d &px_ref, const int level_ref, const int search_level,
                                const int pyramid_level, const int halfpatch_size, float *patch)
 {
-  const int patch_size = halfpatch_size * 2;
-  const Matrix2f A_ref_cur = A_cur_ref.inverse().cast<float>();
-  if (isnan(A_ref_cur(0, 0)))
+  (void)level_ref;
+  last_warp_reject_reason = WarpRejectReason::None;
+  const auto reject = [&](WarpRejectReason reason)
   {
-    printf("Affine warp is NaN, probably camera has no translation\n"); // TODO
-    return;
-  }
+    last_warp_reject_reason = reason;
+    switch (reason)
+    {
+      case WarpRejectReason::InvalidImage: ++last_visual_warp_invalid_image_rejects; break;
+      case WarpRejectReason::NonfiniteMatrix: ++last_visual_warp_nonfinite_matrix_rejects; break;
+      case WarpRejectReason::NonfiniteCoordinate: ++last_visual_warp_nonfinite_coordinate_rejects; break;
+      case WarpRejectReason::OutOfBounds: ++last_visual_warp_oob_rejects; break;
+      case WarpRejectReason::None: break;
+    }
+    return false;
+  };
 
-  float *patch_ptr = patch;
+  const int patch_size = halfpatch_size * 2;
+  if (patch == nullptr || patch_size <= 0 || patch_size_total < patch_size * patch_size ||
+      pyramid_level < 0 || search_level < 0 || pyramid_level >= 30 || search_level >= 30 ||
+      img_ref.empty() || img_ref.type() != CV_8UC1 || img_ref.rows < 2 || img_ref.cols < 2 ||
+      img_ref.step[0] < static_cast<size_t>(img_ref.cols) ||
+      img_ref.step[0] > static_cast<size_t>(std::numeric_limits<int>::max()))
+    return reject(WarpRejectReason::InvalidImage);
+  if (!A_cur_ref.allFinite()) return reject(WarpRejectReason::NonfiniteMatrix);
+  const Matrix2f A_ref_cur = A_cur_ref.inverse().cast<float>();
+  if (!A_ref_cur.allFinite()) return reject(WarpRejectReason::NonfiniteMatrix);
+  if (!px_ref.allFinite()) return reject(WarpRejectReason::NonfiniteCoordinate);
+
+  const auto transformedPixel = [&](int x, int y, Vector2f &px)
+  {
+    Vector2f px_patch(x - halfpatch_size, y - halfpatch_size);
+    px_patch *= (1 << search_level);
+    px_patch *= (1 << pyramid_level);
+    const Vector2f raw_px = A_ref_cur * px_patch + px_ref.cast<float>();
+    if (!raw_px.allFinite()) return WarpRejectReason::NonfiniteCoordinate;
+    px = snapPixelForDeterminism(raw_px.cast<double>()).cast<float>();
+    if (!px.allFinite()) return WarpRejectReason::NonfiniteCoordinate;
+    // interpolateMat_8u reads floor(x/y) and the +1 neighbor in each axis.
+    if (px[0] < 0 || px[1] < 0 || px[0] >= img_ref.cols - 1 || px[1] >= img_ref.rows - 1)
+      return WarpRejectReason::OutOfBounds;
+    return WarpRejectReason::None;
+  };
+
+  // An affine coordinate reaches each axis extremum at a patch corner. Validate
+  // all four before the first unchecked bilinear read so a rejected patch never
+  // leaves partially initialized data behind.
+  for (int y : {0, patch_size - 1})
+    for (int x : {0, patch_size - 1})
+    {
+      Vector2f px;
+      const WarpRejectReason reason = transformedPixel(x, y, px);
+      if (reason != WarpRejectReason::None) return reject(reason);
+    }
+
   for (int y = 0; y < patch_size; ++y)
   {
-    for (int x = 0; x < patch_size; ++x) //, ++patch_ptr)
+    for (int x = 0; x < patch_size; ++x)
     {
-      Vector2f px_patch(x - halfpatch_size, y - halfpatch_size);
-      px_patch *= (1 << search_level);
-      px_patch *= (1 << pyramid_level);
-      const Vector2f px = snapPixelForDeterminism((A_ref_cur * px_patch + px_ref.cast<float>()).cast<double>()).cast<float>();
-      if (px[0] < 0 || px[1] < 0 || px[0] >= img_ref.cols - 1 || px[1] >= img_ref.rows - 1)
-        patch_ptr[patch_size_total * pyramid_level + y * patch_size + x] = 0;
-      else
-        patch_ptr[patch_size_total * pyramid_level + y * patch_size + x] = (float)vk::interpolateMat_8u(img_ref, px[0], px[1]);
+      Vector2f px;
+      const WarpRejectReason reason = transformedPixel(x, y, px);
+      if (reason != WarpRejectReason::None) return reject(reason);
+      patch[patch_size_total * pyramid_level + y * patch_size + x] =
+          static_cast<float>(vk::interpolateMat_8u(img_ref, px[0], px[1]));
     }
   }
+  return true;
 }
 
 int VIOManager::getBestSearchLevel(const Matrix2d &A_cur_ref, const int max_level)
@@ -2751,9 +2800,20 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
 
       // t_1 = omp_get_wtime();
 
+      bool warp_sampling_valid = true;
       for (int pyramid_level = 0; pyramid_level <= patch_pyrimid_level - 1; pyramid_level++)
       {
-        warpAffine(A_cur_ref_zero, ref_ftr->img_, ref_ftr->px_, ref_ftr->level_, search_level, pyramid_level, patch_size_half, patch_wrap.data());
+        if (!warpAffine(A_cur_ref_zero, ref_ftr->img_, ref_ftr->px_, ref_ftr->level_,
+                        search_level, pyramid_level, patch_size_half, patch_wrap.data()))
+        {
+          warp_sampling_valid = false;
+          break;
+        }
+      }
+      if (!warp_sampling_valid)
+      {
+        ++last_visual_warp_invalid_candidates;
+        continue;
       }
 
       // warp_patch[0] already uses the current search-level pixel spacing.
@@ -5033,6 +5093,7 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg,
                               const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map,
                               double img_time, bool tracking_only_dry_run)
 {
+  last_visual_update_accepted = false;
   current_visual_process_begin_wall_time = omp_get_wtime();
   last_visual_map_supply = VisualMapSupplyDiagnostics();
   last_visual_adaptive_covariance_shadow = VisualAdaptiveCovarianceShadowDiagnostics();
@@ -5073,6 +5134,10 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg,
   last_visual_depth_discontinuity_rejects = 0;
   last_visual_normal_uninitialized_rejects = 0;
   last_visual_warp_invalid_candidates = 0;
+  last_visual_warp_invalid_image_rejects = 0;
+  last_visual_warp_nonfinite_matrix_rejects = 0;
+  last_visual_warp_nonfinite_coordinate_rejects = 0;
+  last_visual_warp_oob_rejects = 0;
   last_visual_ncc_rejects = 0;
   last_visual_photometric_rejects = 0;
   last_visual_ref_age_count = 0;
@@ -6095,5 +6160,6 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg,
       visual_ekf_updated ? "none" : visual_ekf_skip_reason,
       true, visual_ekf_updated, false, false,
       state_before_visual_update, *state);
+  last_visual_update_accepted = visual_ekf_updated;
   rememberVisualGuardPose();
 }

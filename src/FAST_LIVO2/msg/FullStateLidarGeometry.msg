@@ -1,0 +1,17 @@
+std_msgs/Header header
+string factor_source
+bool geometry_valid
+bool production_commit
+bool frozen_submap
+uint32 correspondence_count
+uint32 residual_dof
+geometry_msgs/Pose linearization_pose
+geometry_msgs/Pose production_pose
+geometry_msgs/Vector3 production_velocity
+geometry_msgs/Vector3 production_gyro_bias
+geometry_msgs/Vector3 production_accel_bias
+geometry_msgs/Vector3 gravity
+float64 accel_scale
+float64[36] pose_information
+float64[6] pose_rhs
+float64 residual_weighted_energy

@@ -115,6 +115,7 @@ find_package(catkin REQUIRED COMPONENTS
 
 add_message_files(
   FILES
+  FullStateLidarGeometry.msg
   GnssStatus.msg
   RtkBackendStatus.msg
 )
@@ -191,17 +192,20 @@ add_library(vio src/vio.cpp src/frame.cpp src/visual_point.cpp)
 add_library(lio src/voxel_map.cpp)
 add_library(pre src/preprocess.cpp)
 add_library(imu_proc src/IMU_Processing.cpp)
+add_library(p4_fork_snapshot src/p4_fork_snapshot.cpp)
+add_library(p4_fork_harness src/p4_fork_harness.cpp)
 add_library(uwb src/uwb_manager.cpp)
 add_library(gnss src/gnss_manager.cpp)
 add_library(gnss_adapter src/gnss_adapter.cpp)
 add_library(gnss_fault_injector src/gnss_fault_injector.cpp)
 add_library(rtk_fixed_lag_backend src/rtk_fixed_lag_backend.cpp)
+add_library(fullstate_shadow_backend src/fullstate_shadow_backend.cpp)
 add_library(camera_aligned_neu_logger src/camera_aligned_neu_logger.cpp)
 add_library(laser_mapping src/LIVMapper.cpp)
 
 add_dependencies(gnss ${catkin_EXPORTED_TARGETS})
 add_dependencies(uwb ${catkin_EXPORTED_TARGETS})
-add_dependencies(laser_mapping ${catkin_EXPORTED_TARGETS})
+add_dependencies(laser_mapping ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
 # Add the main executable
 add_executable(fastlivo_mapping src/main.cpp)
@@ -214,10 +218,24 @@ add_executable(gnss_fault_injector_node src/gnss_fault_injector_node.cpp)
 add_executable(gnss_fault_injector_self_test src/gnss_fault_injector_self_test.cpp)
 add_executable(rtk_fixed_lag_backend_node src/rtk_fixed_lag_backend_node.cpp)
 add_executable(rtk_fixed_lag_backend_self_test src/rtk_fixed_lag_backend_self_test.cpp)
+add_executable(fullstate_shadow_backend_node src/fullstate_shadow_backend_node.cpp)
+add_executable(fullstate_shadow_backend_self_test src/fullstate_shadow_backend_self_test.cpp)
+target_compile_options(fullstate_shadow_backend_self_test PRIVATE -UNDEBUG)
 add_executable(camera_aligned_neu_logger_node src/camera_aligned_neu_logger_node.cpp)
 add_executable(camera_aligned_neu_logger_self_test src/camera_aligned_neu_logger_self_test.cpp)
 add_executable(voxel_filter_self_test src/voxel_filter_self_test.cpp)
 add_executable(lio_degeneracy_self_test src/lio_degeneracy_self_test.cpp)
+add_executable(lio_update_transaction_self_test src/lio_update_transaction_self_test.cpp)
+target_compile_options(lio_update_transaction_self_test PRIVATE -UNDEBUG)
+add_executable(lio_motion_consistency_self_test src/lio_motion_consistency_self_test.cpp)
+target_compile_options(lio_motion_consistency_self_test PRIVATE -UNDEBUG)
+add_executable(p4_frontend_diagnostics_self_test src/p4_frontend_diagnostics_self_test.cpp)
+target_compile_options(p4_frontend_diagnostics_self_test PRIVATE -UNDEBUG)
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(p4_frontend_diagnostics_self_test OpenMP::OpenMP_CXX)
+endif()
+add_executable(p4_fork_snapshot_self_test src/p4_fork_snapshot_self_test.cpp)
+target_compile_options(p4_fork_snapshot_self_test PRIVATE -UNDEBUG)
 add_executable(preprocess_xyzirt_self_test src/preprocess_xyzirt_self_test.cpp)
 add_executable(livo_point_time_split_self_test src/livo_point_time_split_self_test.cpp)
 target_compile_options(livo_point_time_split_self_test PRIVATE -UNDEBUG)
@@ -230,6 +248,7 @@ add_dependencies(fastlivo_mapping ${catkin_EXPORTED_TARGETS})
 add_dependencies(gnss_manager_self_test ${catkin_EXPORTED_TARGETS})
 add_dependencies(uwb_manager_self_test ${catkin_EXPORTED_TARGETS})
 add_dependencies(preprocess_xyzirt_self_test ${catkin_EXPORTED_TARGETS})
+add_dependencies(p4_fork_snapshot_self_test ${catkin_EXPORTED_TARGETS})
 
 add_dependencies(gnss_adapter ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 add_dependencies(gnss_adapter_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
@@ -241,6 +260,9 @@ add_dependencies(gnss_fault_injector_self_test ${${PROJECT_NAME}_EXPORTED_TARGET
 add_dependencies(rtk_fixed_lag_backend ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 add_dependencies(rtk_fixed_lag_backend_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 add_dependencies(rtk_fixed_lag_backend_self_test ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+add_dependencies(fullstate_shadow_backend ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+add_dependencies(fullstate_shadow_backend_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+add_dependencies(fullstate_shadow_backend_self_test ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 add_dependencies(camera_aligned_neu_logger ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 add_dependencies(camera_aligned_neu_logger_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 add_dependencies(camera_aligned_neu_logger_self_test ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
@@ -257,6 +279,31 @@ target_link_libraries(fastlivo_mapping
   lio
   pre
   imu_proc
+  p4_fork_snapshot
+  p4_fork_harness
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBRARIES}
+  ${Sophus_LIBRARIES}
+  ${Boost_LIBRARIES}
+)
+
+target_link_libraries(p4_fork_harness
+  p4_fork_snapshot
+  imu_proc
+  lio
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBRARIES}
+  ${Sophus_LIBRARIES}
+  ${Boost_LIBRARIES}
+)
+
+target_link_libraries(p4_fork_snapshot_self_test
+  p4_fork_harness
+  p4_fork_snapshot
+  imu_proc
+  lio
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
   ${OpenCV_LIBRARIES}
@@ -324,6 +371,24 @@ target_link_libraries(rtk_fixed_lag_backend_self_test
   ${GTSAM_UNSTABLE_LIBRARY}
 )
 
+target_link_libraries(fullstate_shadow_backend
+  ${catkin_LIBRARIES}
+  gtsam
+  ${GTSAM_UNSTABLE_LIBRARY}
+)
+
+target_link_libraries(fullstate_shadow_backend_node
+  fullstate_shadow_backend
+  ${catkin_LIBRARIES}
+)
+
+target_link_libraries(fullstate_shadow_backend_self_test
+  fullstate_shadow_backend
+  ${catkin_LIBRARIES}
+  gtsam
+  ${GTSAM_UNSTABLE_LIBRARY}
+)
+
 target_link_libraries(camera_aligned_neu_logger
   ${catkin_LIBRARIES}
 )
@@ -351,6 +416,7 @@ target_link_libraries(preprocess_xyzirt_self_test
 
 if(OpenMP_CXX_FOUND)
   target_link_libraries(vio_update_transaction_self_test ${OpenMP_CXX_FLAGS})
+  target_link_libraries(lio_motion_consistency_self_test ${OpenMP_CXX_FLAGS})
   target_link_libraries(gnss ${OpenMP_CXX_FLAGS})
   target_link_libraries(gnss_manager_self_test ${OpenMP_CXX_FLAGS})
   target_link_libraries(uwb_manager_self_test ${OpenMP_CXX_FLAGS})

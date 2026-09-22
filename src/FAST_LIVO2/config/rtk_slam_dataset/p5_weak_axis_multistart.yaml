@@ -1,0 +1,5 @@
+# P5's only permitted production prototype: S0 and weak-axis +/-0.5L.
+p5_seed_basin:
+  enable: false
+  prototype_enable: true
+  output_directory: ""

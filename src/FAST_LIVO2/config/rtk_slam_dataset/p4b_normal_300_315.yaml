@@ -1,0 +1,14 @@
+common:
+  img_en: 0
+  sub_lidar_queue_size: 256
+  sub_imu_queue_size: 10000
+  max_lidar_buffer_size: 256
+  max_imu_buffer_size: 10000
+
+p4b_snapshot:
+  enable: true
+  run_all_branches: true
+  pause_input_during_capture: true
+  retain_support_points: true
+  snapshot_relative_time_s: 300.0
+  end_relative_time_s: 315.0

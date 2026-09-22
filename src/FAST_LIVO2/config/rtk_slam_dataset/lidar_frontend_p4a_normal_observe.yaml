@@ -1,0 +1,9 @@
+p4_frontend:
+  enable: true
+  variant: "observe"
+  analysis_start_s: 0.0
+  analysis_end_s: 600.0
+  detail_start_s: 300.0
+  detail_end_s: 302.0
+  detail_frame_stride: 10
+  counterfactual_frame_stride: 5

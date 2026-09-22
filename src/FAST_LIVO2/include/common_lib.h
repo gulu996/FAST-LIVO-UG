@@ -21,6 +21,7 @@ which is included as part of this source code package.
 #include <sophus/se3.h>
 #include <tf/transform_broadcaster.h>
 #include <cmath>
+#include <limits>
 
 using namespace std;
 using namespace Eigen;
@@ -104,6 +105,7 @@ struct LidarMeasureGroup
 typedef struct pointWithVar
 {
   Eigen::Vector3d point_b;     // point in the lidar body frame
+  Eigen::Vector3d point_raw;   // nearest pre-deskew point, P4 detail only
   Eigen::Vector3d point_i;     // point in the imu body frame
   Eigen::Vector3d point_w;     // point in the world frame
   Eigen::Matrix3d var_nostate; // the var removed the state covarience
@@ -111,6 +113,12 @@ typedef struct pointWithVar
   Eigen::Matrix3d var;
   Eigen::Matrix3d point_crossmat;
   Eigen::Vector3d normal;
+  // Default-off P4 provenance. Negative IDs mean that diagnostics were not
+  // enabled when the point entered the map.
+  int source_frame_id;
+  int source_point_index;
+  double source_timestamp_s;
+  Eigen::Vector3d source_origin_w;
   pointWithVar()
   {
     var_nostate = Eigen::Matrix3d::Zero();
@@ -118,9 +126,16 @@ typedef struct pointWithVar
     body_var = Eigen::Matrix3d::Zero();
     point_crossmat = Eigen::Matrix3d::Zero();
     point_b = Eigen::Vector3d::Zero();
+    point_raw = Eigen::Vector3d::Constant(
+        std::numeric_limits<double>::quiet_NaN());
     point_i = Eigen::Vector3d::Zero();
     point_w = Eigen::Vector3d::Zero();
     normal = Eigen::Vector3d::Zero();
+    source_frame_id = -1;
+    source_point_index = -1;
+    source_timestamp_s = std::numeric_limits<double>::quiet_NaN();
+    source_origin_w = Eigen::Vector3d::Constant(
+        std::numeric_limits<double>::quiet_NaN());
   };
 } pointWithVar;
 

@@ -1,0 +1,7 @@
+# P5 fixed failure window. No production estimator parameter is changed.
+p5_seed_basin:
+  enable: true
+  output_directory: ""
+  start_s: 899.0
+  end_s: 906.0
+  frame_stride: 10

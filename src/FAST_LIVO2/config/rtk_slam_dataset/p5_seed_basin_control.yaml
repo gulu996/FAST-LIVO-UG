@@ -1,0 +1,7 @@
+# P5 fixed normal-control window, shared by seq2 and construction_seq2.
+p5_seed_basin:
+  enable: true
+  output_directory: ""
+  start_s: 300.0
+  end_s: 307.0
+  frame_stride: 10

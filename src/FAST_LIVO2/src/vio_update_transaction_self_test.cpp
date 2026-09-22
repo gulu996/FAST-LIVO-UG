@@ -385,7 +385,8 @@ bool checkVisualSearchScale(int magnification)
       vio.new_frame_->T_f_w_, 0, warp);
   const int search_level = vio.getBestSearchLevel(warp, 2);
   std::vector<float> warped(192), zero_level(192), matched_level(192);
-  vio.warpAffine(warp, reference_image, feature->px_, 0, search_level, 0, 4, warped.data());
+  if (!vio.warpAffine(warp, reference_image, feature->px_, 0, search_level, 0, 4, warped.data()))
+    return false;
   vio.getImagePatch(current_image, feature->px_, zero_level.data(), 0);
   vio.getImagePatch(current_image, feature->px_, matched_level.data(), search_level);
   double wrong_mse = 0, correct_mse = 0;
@@ -406,6 +407,104 @@ bool checkVisualSearchScale(int magnification)
             << " grid=" << vio.last_visual_grid_candidates << " tracked=" << vio.total_points
             << " photo_rejected=" << vio.last_visual_photometric_rejects << " pass=" << passed << '\n';
   return passed;
+}
+
+void checkWarpSamplingGuards()
+{
+  cv::Mat image(12, 12, CV_8UC1);
+  for (int y = 0; y < image.rows; ++y)
+    for (int x = 0; x < image.cols; ++x)
+      image.at<unsigned char>(y, x) = static_cast<unsigned char>(10 * y + x);
+
+  VIOManager vio;
+  vio.visual_submap = nullptr;
+  vio.patch_size_total = 4;
+  std::vector<float> patch(4, -17.0f);
+  const auto resetPatch = [&]() { std::fill(patch.begin(), patch.end(), -17.0f); };
+  const auto requireUntouched = [&]() {
+    require(std::all_of(patch.begin(), patch.end(), [](float value) { return value == -17.0f; }),
+            "rejected warp wrote a partial patch");
+  };
+  const auto reject = [&](const Matrix2d &warp, const V2D &center,
+                          VIOManager::WarpRejectReason reason, const char *message) {
+    resetPatch();
+    require(!vio.warpAffine(warp, image, center, 0, 0, 0, 1, patch.data()), message);
+    require(vio.last_warp_reject_reason == reason, "warp rejection reason mismatch");
+    requireUntouched();
+  };
+
+  Matrix2d identity = Matrix2d::Identity();
+  require(vio.warpAffine(identity, image, V2D(5, 5), 0, 0, 0, 1, patch.data()),
+          "finite identity warp rejected");
+  require(patch[0] == image.at<unsigned char>(4, 4) &&
+          patch[1] == image.at<unsigned char>(4, 5) &&
+          patch[2] == image.at<unsigned char>(5, 4) &&
+          patch[3] == image.at<unsigned char>(5, 5),
+          "identity warp changed valid samples");
+
+  Matrix2d affine;
+  affine << 1.2, 0.1, -0.05, 0.9;
+  resetPatch();
+  require(vio.warpAffine(affine, image, V2D(6, 6), 0, 0, 0, 1, patch.data()),
+          "finite normal affine warp rejected");
+  const Matrix2f inverse = affine.inverse().cast<float>();
+  int index = 0;
+  for (int y = 0; y < 2; ++y)
+    for (int x = 0; x < 2; ++x, ++index)
+    {
+      Vector2f px = inverse * Vector2f(x - 1, y - 1) + Vector2f(6, 6);
+      px[0] = static_cast<float>(std::round(static_cast<double>(px[0]) * 100.0) / 100.0);
+      px[1] = static_cast<float>(std::round(static_cast<double>(px[1]) * 100.0) / 100.0);
+      require(std::abs(patch[index] - vk::interpolateMat_8u(image, px[0], px[1])) < 1e-5,
+              "finite affine warp changed valid bilinear samples");
+    }
+
+  Matrix2d invalid = identity;
+  invalid(0, 0) = std::numeric_limits<double>::quiet_NaN();
+  reject(invalid, V2D(5, 5), VIOManager::WarpRejectReason::NonfiniteMatrix,
+         "NaN matrix accepted");
+  invalid = identity;
+  invalid(0, 0) = std::numeric_limits<double>::infinity();
+  reject(invalid, V2D(5, 5), VIOManager::WarpRejectReason::NonfiniteMatrix,
+         "+Inf matrix accepted");
+  invalid(0, 0) = -std::numeric_limits<double>::infinity();
+  reject(invalid, V2D(5, 5), VIOManager::WarpRejectReason::NonfiniteMatrix,
+         "-Inf matrix accepted");
+  invalid << std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(),
+             -std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity();
+  reject(invalid, V2D(5, 5), VIOManager::WarpRejectReason::NonfiniteMatrix,
+         "mixed-sign infinite crash-pattern matrix accepted");
+  reject(identity, V2D(std::numeric_limits<double>::max(), 5),
+         VIOManager::WarpRejectReason::NonfiniteCoordinate,
+         "finite center producing infinite float coordinate accepted");
+
+  reject(identity, V2D(0.5, 5), VIOManager::WarpRejectReason::OutOfBounds,
+         "left footprint overflow accepted");
+  reject(identity, V2D(image.cols - 1.0, 5), VIOManager::WarpRejectReason::OutOfBounds,
+         "right bilinear footprint overflow accepted");
+  reject(identity, V2D(5, 0.5), VIOManager::WarpRejectReason::OutOfBounds,
+         "top footprint overflow accepted");
+  reject(identity, V2D(5, image.rows - 1.0), VIOManager::WarpRejectReason::OutOfBounds,
+         "bottom bilinear footprint overflow accepted");
+
+  cv::Mat edge_image(4, 4, CV_8UC1, cv::Scalar(80));
+  resetPatch();
+  require(vio.warpAffine(identity, edge_image, V2D(2.99, 2.99), 0, 0, 0, 1, patch.data()),
+          "nearest legal bilinear footprint rejected");
+  cv::Mat wrong_type(4, 4, CV_8UC3, cv::Scalar(1, 2, 3));
+  resetPatch();
+  require(!vio.warpAffine(identity, wrong_type, V2D(2, 2), 0, 0, 0, 1, patch.data()),
+          "invalid image type accepted");
+  require(vio.last_warp_reject_reason == VIOManager::WarpRejectReason::InvalidImage,
+          "invalid image rejection reason mismatch");
+  requireUntouched();
+
+  require(vio.last_visual_warp_nonfinite_matrix_rejects == 4 &&
+          vio.last_visual_warp_nonfinite_coordinate_rejects == 1 &&
+          vio.last_visual_warp_oob_rejects == 4 &&
+          vio.last_visual_warp_invalid_image_rejects == 1,
+          "warp rejection counters mismatch");
+  std::cout << "warp sampling: finite results, non-finite guards and bilinear footprint checks passed\n";
 }
 
 void check(bool inverse)
@@ -589,6 +688,7 @@ int main(int argc, char **argv)
     checkPhotometricModel();
     checkReferencePatchScores();
     checkVisualVoxelBoundaries();
+    checkWarpSamplingGuards();
     for (int magnification : {1, 2, 4})
       require(checkVisualSearchScale(magnification), "visual retrieval compared unequal patch footprints");
     for (bool raycast : {false, true})

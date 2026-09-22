@@ -26,6 +26,12 @@
          value="$(arg run_dir)" />
   <param name="/gnss_adapter/input_topic" type="string"
          value="$(arg gnss_pose_topic)" />
+  <param name="/fullstate_shadow/output_directory" type="string"
+         value="$(arg run_dir)" />
+  <param name="/p4_frontend/output_directory" type="string"
+         value="$(arg run_dir)" />
+  <param name="/p4b_snapshot/output_directory" type="string"
+         value="$(arg run_dir)/p4b_same_snapshot" />
 
   <!-- The bag's topic is /camera/image_raw/compressed. Ours consumes Image. -->
   <node pkg="image_transport" type="republish"
@@ -48,6 +54,11 @@
         name="rtk_fixed_lag_backend" required="true" output="screen">
     <param name="use_gnss_fusion_enable" value="true" />
   </node>
+
+  <!-- Always alive for child-exit auditing. With enable=false it has no
+       subscribers and performs no graph work. -->
+  <node pkg="fast_livo" type="fullstate_shadow_backend_node"
+        name="fullstate_shadow_backend" required="true" output="screen" />
 
   <!-- No RViz, UWB node, fault injector, GT reader, or camera-aligned logger. -->
 </launch>

@@ -195,6 +195,54 @@ aruco_landmarks:
 adaptive_selector:
   en: false
 
+# Production default remains off. P3-A enables this only through its recorded
+# experiment override; this node is a one-way diagnostic consumer.
+fullstate_shadow:
+  enable: false
+  geometry_topic: "/fullstate_shadow/lidar_geometry"
+  imu_topic: "/livox/imu"
+  odometry_topic: "/fullstate_shadow/optimized_odom"
+  lag_seconds: 20.0
+  maximum_imu_gap_s: 0.03
+  accel_bias_variance: 0.0001
+  gyro_bias_variance: 0.0001
+  integration_covariance: 1.0e-8
+
+# P4-A LiDAR frontend causality instrumentation. This is inert unless an
+# offline experiment override enables it.
+p4_frontend:
+  enable: false
+  variant: "observe"
+  output_directory: ""
+  analysis_start_s: 0.0
+  analysis_end_s: 0.0
+  detail_start_s: 1.0
+  detail_end_s: 0.0
+  frozen_map_start_s: 1.0e300
+  detail_frame_stride: 1
+  counterfactual_frame_stride: 1
+
+# P4-B same-snapshot causal replay. It is inert in every production/default
+# launch; experiment overrides must explicitly enable it.
+p4b_snapshot:
+  enable: false
+  run_all_branches: false
+  pause_input_during_capture: false
+  retain_support_points: false
+  snapshot_relative_time_s: 895.0
+  end_relative_time_s: 910.0
+  output_directory: ""
+
+# P5 registration landscape diagnostic and its one permitted prototype.
+# Both remain off in production; experiment overrides enable exactly one.
+p5_seed_basin:
+  enable: false
+  prototype_enable: false
+  output_directory: ""
+  start_s: 0.0
+  end_s: 0.0
+  frame_stride: 10
+
 runtime_guard:
   # Do not let wall-clock load silently change the estimator between runs.
   enable: false

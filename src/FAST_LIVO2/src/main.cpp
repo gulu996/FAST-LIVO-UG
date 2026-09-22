@@ -13,8 +13,10 @@ int main(int argc, char **argv)
   ros::NodeHandle nh;
 
   bool force_single_thread = false;
+  bool deterministic_debug = false;
+  nh.param<bool>("deterministic_debug/en", deterministic_debug, false);
   nh.param<bool>("deterministic_debug/force_single_thread", force_single_thread, false);
-  if (force_single_thread)
+  if (deterministic_debug || force_single_thread)
   {
     setenv("OMP_NUM_THREADS", "1", 1);
     setenv("OMP_DYNAMIC", "FALSE", 1);

@@ -1,0 +1,10 @@
+p4_frontend:
+  enable: true
+  variant: "frozen_map"
+  analysis_start_s: 880.0
+  analysis_end_s: 930.0
+  detail_start_s: 899.0
+  detail_end_s: 907.0
+  frozen_map_start_s: 890.0
+  detail_frame_stride: 10
+  counterfactual_frame_stride: 5

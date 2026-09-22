@@ -30,9 +30,92 @@ ImuProcess::ImuProcess() : Eye3d(M3D::Identity()),
   Lid_rot_to_IMU = Eye3d;
   last_imu.reset(new sensor_msgs::Imu());
   cur_pcl_un_.reset(new PointCloudXYZI());
+  p4_raw_cloud_.reset(new PointCloudXYZI());
+  p4_fixed_velocity_cloud_.reset(new PointCloudXYZI());
 }
 
 ImuProcess::~ImuProcess() {}
+
+ImuProcess::Snapshot ImuProcess::captureSnapshot() const
+{
+  Snapshot result;
+  result.pcl_wait_proc = pcl_wait_proc;
+  result.has_last_imu = static_cast<bool>(last_imu);
+  if (last_imu) result.last_imu = *last_imu;
+  if (cur_pcl_un_) result.cur_pcl_un = *cur_pcl_un_;
+  result.imu_pose = IMUpose;
+  result.lidar_rotation_to_imu = Lid_rot_to_IMU;
+  result.lidar_offset_to_imu = Lid_offset_to_IMU;
+  result.mean_acc = mean_acc;
+  result.mean_gyr = mean_gyr;
+  result.angular_velocity_last = angvel_last;
+  result.specific_acceleration_last = acc_s_last;
+  result.last_propagation_end_time = last_prop_end_time;
+  result.last_scan_time = time_last_scan;
+  result.initialization_iteration = init_iter_num;
+  result.maximum_initialization_count = MAX_INI_COUNT;
+  result.first_frame = b_first_frame;
+  result.imu_enabled = imu_en;
+  result.gravity_estimation_enabled = gravity_est_en;
+  result.bias_estimation_enabled = ba_bg_est_en;
+  result.exposure_estimation_enabled = exposure_estimate_en;
+  result.imu_mean_acc_norm = IMU_mean_acc_norm;
+  result.unbiased_gyr = unbiased_gyr;
+  result.covariance_acc = cov_acc;
+  result.covariance_gyr = cov_gyr;
+  result.covariance_bias_gyr = cov_bias_gyr;
+  result.covariance_bias_acc = cov_bias_acc;
+  result.covariance_inverse_exposure = cov_inv_expo;
+  result.first_lidar_time = first_lidar_time;
+  result.imu_time_initialized = imu_time_init;
+  result.imu_needs_initialization = imu_need_init;
+  result.lidar_type = lidar_type;
+  result.identity3 = Eye3d;
+  result.zero3 = Zero3d;
+  return result;
+}
+
+void ImuProcess::restoreSnapshot(const Snapshot &snapshot)
+{
+  pcl_wait_proc = snapshot.pcl_wait_proc;
+  if (snapshot.has_last_imu)
+    last_imu.reset(new sensor_msgs::Imu(snapshot.last_imu));
+  else
+    last_imu.reset();
+  cur_pcl_un_.reset(new PointCloudXYZI(snapshot.cur_pcl_un));
+  IMUpose = snapshot.imu_pose;
+  Lid_rot_to_IMU = snapshot.lidar_rotation_to_imu;
+  Lid_offset_to_IMU = snapshot.lidar_offset_to_imu;
+  mean_acc = snapshot.mean_acc;
+  mean_gyr = snapshot.mean_gyr;
+  angvel_last = snapshot.angular_velocity_last;
+  acc_s_last = snapshot.specific_acceleration_last;
+  last_prop_end_time = snapshot.last_propagation_end_time;
+  time_last_scan = snapshot.last_scan_time;
+  init_iter_num = snapshot.initialization_iteration;
+  MAX_INI_COUNT = snapshot.maximum_initialization_count;
+  b_first_frame = snapshot.first_frame;
+  imu_en = snapshot.imu_enabled;
+  gravity_est_en = snapshot.gravity_estimation_enabled;
+  ba_bg_est_en = snapshot.bias_estimation_enabled;
+  exposure_estimate_en = snapshot.exposure_estimation_enabled;
+  IMU_mean_acc_norm = snapshot.imu_mean_acc_norm;
+  unbiased_gyr = snapshot.unbiased_gyr;
+  cov_acc = snapshot.covariance_acc;
+  cov_gyr = snapshot.covariance_gyr;
+  cov_bias_gyr = snapshot.covariance_bias_gyr;
+  cov_bias_acc = snapshot.covariance_bias_acc;
+  cov_inv_expo = snapshot.covariance_inverse_exposure;
+  first_lidar_time = snapshot.first_lidar_time;
+  imu_time_init = snapshot.imu_time_initialized;
+  imu_need_init = snapshot.imu_needs_initialization;
+  lidar_type = snapshot.lidar_type;
+  Eye3d = snapshot.identity3;
+  Zero3d = snapshot.zero3;
+  p4_deskew_diagnostics_ = fast_livo::p4::DeskewDiagnostics();
+  p4_raw_cloud_->clear();
+  p4_fixed_velocity_cloud_->clear();
+}
 
 void ImuProcess::Reset()
 {
@@ -46,6 +129,9 @@ void ImuProcess::Reset()
   IMUpose.clear();
   last_imu.reset(new sensor_msgs::Imu());
   cur_pcl_un_.reset(new PointCloudXYZI());
+  p4_raw_cloud_->clear();
+  p4_fixed_velocity_cloud_->clear();
+  p4_deskew_diagnostics_ = fast_livo::p4::DeskewDiagnostics();
 }
 
 void ImuProcess::disable_imu()
@@ -248,6 +334,11 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
   const double &imu_beg_time = v_imu.front()->header.stamp.toSec();
   const double &imu_end_time = v_imu.back()->header.stamp.toSec();
   const double prop_beg_time = last_prop_end_time;
+  const V3D p4_seed_velocity = state_inout.vel_end;
+  const V3D p4_seed_position = state_inout.pos_end;
+  const V3D p4_seed_gyro_bias = state_inout.bias_g;
+  const V3D p4_seed_accel_bias = state_inout.bias_a;
+  const V3D p4_seed_gravity = state_inout.gravity;
   // printf("[ IMU ] undistort input size: %zu \n", lidar_meas.pcl_proc_cur->points.size());
   // printf("[ IMU ] IMU data sequence size: %zu \n", meas.imu.size());
   // printf("[ IMU ] lidar_scan_index_now: %d \n", lidar_meas.lidar_scan_index_now);
@@ -281,6 +372,45 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
     pcl_wait_proc = *(lidar_meas.pcl_proc_cur);
     lidar_meas.lidar_scan_index_now = 0;
     IMUpose.push_back(set_pose6d(0.0, acc_s_last, angvel_last, state_inout.vel_end, state_inout.pos_end, state_inout.rot_end));
+    if (p4_diagnostics_enabled_)
+    {
+      *p4_raw_cloud_ = pcl_wait_proc;
+      *p4_fixed_velocity_cloud_ = pcl_wait_proc;
+      p4_deskew_diagnostics_ = fast_livo::p4::DeskewDiagnostics();
+      auto &diagnostics = p4_deskew_diagnostics_;
+      diagnostics.valid = !pcl_wait_proc.empty();
+      diagnostics.point_count = pcl_wait_proc.size();
+      diagnostics.imu_count = v_imu.size();
+      diagnostics.scan_begin_s = lidar_meas.lidar_frame_beg_time;
+      diagnostics.scan_end_s = prop_end_time;
+      diagnostics.imu_begin_s = imu_beg_time;
+      diagnostics.imu_end_s = imu_end_time;
+      diagnostics.propagation_begin_s = prop_beg_time;
+      diagnostics.propagation_end_s = prop_end_time;
+      diagnostics.imu_covers_propagation =
+          imu_beg_time <= prop_beg_time + 1e-6 &&
+          imu_end_time >= prop_end_time - 1e-6;
+      diagnostics.seed_velocity = p4_seed_velocity;
+      diagnostics.gyro_bias = p4_seed_gyro_bias;
+      diagnostics.accel_bias = p4_seed_accel_bias;
+      diagnostics.gravity = p4_seed_gravity;
+      diagnostics.point_offset_min_s =
+          pcl_wait_proc.front().curvature / 1000.0;
+      diagnostics.point_offset_max_s =
+          pcl_wait_proc.front().curvature / 1000.0;
+      diagnostics.point_time_monotonic = true;
+      double previous_offset = -std::numeric_limits<double>::infinity();
+      for (const PointType &point : pcl_wait_proc.points)
+      {
+        const double offset = point.curvature / 1000.0;
+        diagnostics.point_offset_min_s =
+            std::min(diagnostics.point_offset_min_s, offset);
+        diagnostics.point_offset_max_s =
+            std::max(diagnostics.point_offset_max_s, offset);
+        diagnostics.point_time_monotonic &= offset >= previous_offset;
+        previous_offset = offset;
+      }
+    }
   }
 
   // printf("[ IMU ] pcl_wait_proc size: %zu \n", pcl_wait_proc.points.size());
@@ -445,6 +575,8 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
   state_inout.rot_end = R_imu;
   state_inout.pos_end = pos_imu;
   state_inout.inv_expo_time = tau;
+  if (p4_diagnostics_enabled_)
+    p4_deskew_diagnostics_.end_velocity = state_inout.vel_end;
 
   /*** calculated the pos and attitude prediction at the frame-end ***/
   // if (imu_end_time>prop_beg_time)
@@ -497,8 +629,13 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
   if (lidar_meas.lio_vio_flg == LIO)
   {
     auto it_pcl = pcl_wait_proc.points.end() - 1;
+    auto it_p4 = p4_diagnostics_enabled_
+        ? p4_fixed_velocity_cloud_->points.end() - 1
+        : p4_fixed_velocity_cloud_->points.end();
     M3D extR_Ri(Lid_rot_to_IMU.transpose() * state_inout.rot_end.transpose());
     V3D exrR_extT(Lid_rot_to_IMU.transpose() * Lid_offset_to_IMU);
+    const V3D p4_fixed_end_position =
+        p4_seed_position + p4_seed_velocity * (prop_end_time - prop_beg_time);
     for (auto it_kp = IMUpose.end() - 1; it_kp != IMUpose.begin(); it_kp--)
     {
       auto head = it_kp - 1;
@@ -528,15 +665,51 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
         // Lid_offset_to_IMU) + T_ei) - Lid_offset_to_IMU);
         V3D P_compensate = (extR_Ri * (R_i * (Lid_rot_to_IMU * P_i + Lid_offset_to_IMU) + T_ei) - exrR_extT);
 
+        if (p4_diagnostics_enabled_)
+        {
+          const double point_time = it_p4->curvature / 1000.0;
+          const V3D fixed_position =
+              p4_seed_position + p4_seed_velocity * point_time;
+          const V3D fixed_translation = fixed_position - p4_fixed_end_position;
+          const V3D raw_point(it_p4->x, it_p4->y, it_p4->z);
+          const V3D fixed_compensate =
+              extR_Ri * (R_i * (Lid_rot_to_IMU * raw_point + Lid_offset_to_IMU) +
+                           fixed_translation) -
+              exrR_extT;
+          it_p4->x = fixed_compensate.x();
+          it_p4->y = fixed_compensate.y();
+          it_p4->z = fixed_compensate.z();
+        }
+
         /// save Undistorted points and their rotation
         it_pcl->x = P_compensate(0);
         it_pcl->y = P_compensate(1);
         it_pcl->z = P_compensate(2);
 
         if (it_pcl == pcl_wait_proc.points.begin()) break;
+        if (p4_diagnostics_enabled_) --it_p4;
       }
     }
     pcl_out = pcl_wait_proc;
+    if (p4_diagnostics_enabled_ &&
+        p4_fixed_velocity_cloud_->size() == pcl_out.size())
+    {
+      double delta_sum = 0.0;
+      double delta_max = 0.0;
+      for (std::size_t i = 0; i < pcl_out.size(); ++i)
+      {
+        const V3D production(pcl_out[i].x, pcl_out[i].y, pcl_out[i].z);
+        const V3D fixed((*p4_fixed_velocity_cloud_)[i].x,
+                        (*p4_fixed_velocity_cloud_)[i].y,
+                        (*p4_fixed_velocity_cloud_)[i].z);
+        const double delta = (production - fixed).norm();
+        delta_sum += delta;
+        delta_max = std::max(delta_max, delta);
+      }
+      p4_deskew_diagnostics_.fixed_velocity_point_delta_mean_m =
+          pcl_out.empty() ? 0.0 : delta_sum / pcl_out.size();
+      p4_deskew_diagnostics_.fixed_velocity_point_delta_max_m = delta_max;
+    }
     pcl_wait_proc.clear();
     IMUpose.clear();
   }
