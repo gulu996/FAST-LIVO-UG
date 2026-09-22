@@ -15,7 +15,7 @@ gnss_adapter:
   gnss_pose_covariance_authoritative: true
 
   # Unused in status-only mode; retained as valid defaults for the shared adapter.
-  origin_mode: "first_fixed"
+  origin_mode: "average_fixed"
   origin_lla: [0.0, 0.0, 0.0]
   origin_average_count: 10
   origin_average_max_gap_s: 2.0

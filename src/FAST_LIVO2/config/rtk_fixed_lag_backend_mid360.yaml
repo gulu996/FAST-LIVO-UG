@@ -48,7 +48,7 @@ rtk_backend:
   # The endpoint must represent the physical point corresponding to the GNSS
   # position measurement, preferably the antenna ARP or calibrated APC,
   # not an arbitrary enclosure edge or top surface.
-  antenna_lever_arm_body_m: [-0.151, -0.02329, 0.05512]
+  antenna_lever_arm_body_m: [-0.140, 0.000, 0.011]
 
   min_gnss_sigma_xy_m: 0.03
   min_gnss_sigma_z_m: 0.05
