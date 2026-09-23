@@ -665,6 +665,40 @@ void check(bool inverse)
   }
   std::cout << (inverse ? "inverse" : "forward") << ": real estimator scale checks passed\n";
 }
+
+void checkVisualShadowProductionRestore()
+{
+  cv::Mat image(32, 32, CV_8UC1, cv::Scalar(80));
+  vk::PinholeCamera camera(32, 32, 1.0, 20, 20, 16, 16);
+  StatesGroup production, candidate;
+  production.pos_end = V3D(1, 2, 3);
+  production.vel_end = V3D(0.1, 0.2, 0.3);
+  production.cov.setIdentity();
+  candidate = production;
+  candidate.pos_end += V3D(4, 5, 6);
+  candidate.vel_end += V3D(0.4, 0.5, 0.6);
+  candidate.cov *= 2.0;
+
+  VIOManager vio;
+  vio.visual_submap = new SubSparseMap;
+  vio.cam = &camera;
+  vio.new_frame_.reset(new Frame(&camera, image));
+  vio.Rci.setIdentity();
+  vio.Pci.setZero();
+  vio.state = &candidate;
+
+  std::unordered_map<int, int> lidar_map{{1, 11}, {2, 22}};
+  const auto lidar_map_before = lidar_map;
+  vio.restoreVisualShadowProductionState(production);
+  require((candidate - production).norm() == 0.0 &&
+          (candidate.cov - production.cov).cwiseAbs().maxCoeff() == 0.0,
+          "visual shadow retained production state or covariance");
+  require(lidar_map == lidar_map_before,
+          "visual shadow changed the independent LiDAR map boundary");
+  require((vio.new_frame_->T_f_w_.translation() - V3D(-1, -2, -3)).norm() == 0.0,
+          "visual shadow left the cached frame on the candidate pose");
+  std::cout << "visual shadow: production state/covariance/LiDAR-map boundary passed\n";
+}
 }
 
 int main(int argc, char **argv)
@@ -697,6 +731,7 @@ int main(int argc, char **argv)
           require(checkVisualVoxelLookup(size, x, raycast), "actual visual voxel lookup mismatch");
     check(false);
     check(true);
+    checkVisualShadowProductionRestore();
     return 0;
   }
   catch (const std::exception &error)

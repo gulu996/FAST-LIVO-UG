@@ -239,6 +239,8 @@ target_compile_options(p4_fork_snapshot_self_test PRIVATE -UNDEBUG)
 add_executable(preprocess_xyzirt_self_test src/preprocess_xyzirt_self_test.cpp)
 add_executable(livo_point_time_split_self_test src/livo_point_time_split_self_test.cpp)
 target_compile_options(livo_point_time_split_self_test PRIVATE -UNDEBUG)
+add_executable(livo_scan_transaction_self_test src/livo_scan_transaction_self_test.cpp)
+target_compile_options(livo_scan_transaction_self_test PRIVATE -UNDEBUG)
 add_executable(vio_update_transaction_self_test src/vio_update_transaction_self_test.cpp)
 target_link_libraries(vio_update_transaction_self_test
   vio lio ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBRARIES}

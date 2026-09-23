@@ -69,6 +69,8 @@ ImuProcess::Snapshot ImuProcess::captureSnapshot() const
   result.first_lidar_time = first_lidar_time;
   result.imu_time_initialized = imu_time_init;
   result.imu_needs_initialization = imu_need_init;
+  result.scan_history_active = scan_history_active_;
+  result.scan_history_origin_time = scan_history_origin_time_;
   result.lidar_type = lidar_type;
   result.identity3 = Eye3d;
   result.zero3 = Zero3d;
@@ -109,6 +111,8 @@ void ImuProcess::restoreSnapshot(const Snapshot &snapshot)
   first_lidar_time = snapshot.first_lidar_time;
   imu_time_init = snapshot.imu_time_initialized;
   imu_need_init = snapshot.imu_needs_initialization;
+  scan_history_active_ = snapshot.scan_history_active;
+  scan_history_origin_time_ = snapshot.scan_history_origin_time;
   lidar_type = snapshot.lidar_type;
   Eye3d = snapshot.identity3;
   Zero3d = snapshot.zero3;
@@ -127,6 +131,8 @@ void ImuProcess::Reset()
   imu_need_init = true;
   init_iter_num = 1;
   IMUpose.clear();
+  scan_history_active_ = false;
+  scan_history_origin_time_ = 0.0;
   last_imu.reset(new sensor_msgs::Imu());
   cur_pcl_un_.reset(new PointCloudXYZI());
   p4_raw_cloud_->clear();
@@ -188,6 +194,65 @@ void ImuProcess::set_inv_expo_cov(const double &inv_expo) { cov_inv_expo = inv_e
 void ImuProcess::set_acc_bias_cov(const V3D &b_a) { cov_bias_acc = b_a; }
 
 void ImuProcess::set_imu_init_frame_num(const int &num) { MAX_INI_COUNT = num; }
+
+void ImuProcess::beginLidarScan(double scan_begin_time, const StatesGroup &state)
+{
+  if (!std::isfinite(scan_begin_time))
+    throw std::invalid_argument("non-finite LiDAR scan begin time");
+  pcl_wait_proc.clear();
+  IMUpose.clear();
+  scan_history_active_ = true;
+  scan_history_origin_time_ = scan_begin_time;
+  double seed_time = last_prop_end_time;
+  if (seed_time <= 0.0 && last_imu)
+    seed_time = last_imu->header.stamp.toSec();
+  if (seed_time <= 0.0) seed_time = scan_begin_time;
+  if (last_prop_end_time <= 0.0) last_prop_end_time = seed_time;
+  IMUpose.push_back(set_pose6d(seed_time - scan_history_origin_time_,
+                              acc_s_last, angvel_last, state.vel_end,
+                              state.pos_end, state.rot_end));
+}
+
+void ImuProcess::updateLidarScanPose(double timestamp, const StatesGroup &state)
+{
+  if (!scan_history_active_) return;
+  const double offset = timestamp - scan_history_origin_time_;
+  if (!std::isfinite(offset))
+    throw std::invalid_argument("non-finite image-time scan pose");
+  if (!IMUpose.empty() && offset < IMUpose.back().offset_time - 1e-6)
+    throw std::logic_error("image-time scan pose moved backwards");
+  const Pose6D pose = set_pose6d(offset, acc_s_last, angvel_last,
+                                state.vel_end, state.pos_end, state.rot_end);
+  if (!IMUpose.empty() && std::fabs(offset - IMUpose.back().offset_time) <= 1e-6)
+    IMUpose.back() = pose;
+  else
+    IMUpose.push_back(pose);
+}
+
+void ImuProcess::enable_competition_startup_telemetry(bool enabled)
+{
+  competition_startup_telemetry_enabled_ = enabled;
+  if (!enabled) return;
+  competition_startup_telemetry_.open(
+      log_dir_ + "competition_startup_deskew.csv", std::ios::out);
+  if (!competition_startup_telemetry_.is_open())
+  {
+    ROS_WARN("[COMPETITION_STARTUP] Failed to open deskew telemetry in %s",
+             log_dir_.c_str());
+    competition_startup_telemetry_enabled_ = false;
+    return;
+  }
+  competition_startup_telemetry_
+      << "scan_begin_s,scan_end_s,point_count,imu_count,imu_begin_s,imu_end_s,"
+         "imu_begin_minus_scan_begin_s,scan_end_minus_imu_end_s,point_offset_min_s,point_offset_max_s,"
+         "deskew_delta_median_m,deskew_delta_p95_m,deskew_delta_max_m,"
+         "seed_px,seed_py,seed_pz,seed_vx,seed_vy,seed_vz,"
+         "seed_gx,seed_gy,seed_gz,seed_bgx,seed_bgy,seed_bgz,seed_bax,seed_bay,seed_baz,"
+         "seed_qx,seed_qy,seed_qz,seed_qw,"
+         "end_px,end_py,end_pz,end_vx,end_vy,end_vz,"
+         "end_gx,end_gy,end_gz,end_bgx,end_bgy,end_bgz,end_bax,end_bay,end_baz,"
+         "end_qx,end_qy,end_qz,end_qw\n";
+}
 
 void ImuProcess::IMU_init(const MeasureGroup &meas, StatesGroup &state_inout, int &N)
 {
@@ -334,16 +399,21 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
   const double &imu_beg_time = v_imu.front()->header.stamp.toSec();
   const double &imu_end_time = v_imu.back()->header.stamp.toSec();
   const double prop_beg_time = last_prop_end_time;
+  const double prop_end_time = lidar_meas.lio_vio_flg == LIO ? meas.lio_time : meas.vio_time;
+  if (prop_end_time < prop_beg_time - 1e-6)
+    throw std::logic_error("IMU propagation timestamp moved backwards");
+  const double pose_time_origin = scan_history_active_
+      ? scan_history_origin_time_ : prop_beg_time;
   const V3D p4_seed_velocity = state_inout.vel_end;
   const V3D p4_seed_position = state_inout.pos_end;
   const V3D p4_seed_gyro_bias = state_inout.bias_g;
   const V3D p4_seed_accel_bias = state_inout.bias_a;
   const V3D p4_seed_gravity = state_inout.gravity;
+  const M3D competition_seed_rotation = state_inout.rot_end;
+  PointCloudXYZI competition_raw_cloud;
   // printf("[ IMU ] undistort input size: %zu \n", lidar_meas.pcl_proc_cur->points.size());
   // printf("[ IMU ] IMU data sequence size: %zu \n", meas.imu.size());
   // printf("[ IMU ] lidar_scan_index_now: %d \n", lidar_meas.lidar_scan_index_now);
-
-  const double prop_end_time = lidar_meas.lio_vio_flg == LIO ? meas.lio_time : meas.vio_time;
 
   /*** cut lidar point based on the propagation-start time and required
    * propagation-end time ***/
@@ -371,7 +441,12 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
     pcl_wait_proc.resize(lidar_meas.pcl_proc_cur->points.size());
     pcl_wait_proc = *(lidar_meas.pcl_proc_cur);
     lidar_meas.lidar_scan_index_now = 0;
-    IMUpose.push_back(set_pose6d(0.0, acc_s_last, angvel_last, state_inout.vel_end, state_inout.pos_end, state_inout.rot_end));
+    if (!scan_history_active_)
+      IMUpose.push_back(set_pose6d(0.0, acc_s_last, angvel_last,
+                                  state_inout.vel_end, state_inout.pos_end,
+                                  state_inout.rot_end));
+    if (competition_startup_telemetry_enabled_)
+      competition_raw_cloud = pcl_wait_proc;
     if (p4_diagnostics_enabled_)
     {
       *p4_raw_cloud_ = pcl_wait_proc;
@@ -489,19 +564,19 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
       {
         // printf("00 \n");
         dt = tail->header.stamp.toSec() - last_prop_end_time;
-        offs_t = tail->header.stamp.toSec() - prop_beg_time;
+        offs_t = tail->header.stamp.toSec() - pose_time_origin;
       }
       else if (i != v_imu.size() - 2)
       {
         // printf("11 \n");
         dt = tail->header.stamp.toSec() - head->header.stamp.toSec();
-        offs_t = tail->header.stamp.toSec() - prop_beg_time;
+        offs_t = tail->header.stamp.toSec() - pose_time_origin;
       }
       else
       {
         // printf("22 \n");
         dt = prop_end_time - head->header.stamp.toSec();
-        offs_t = prop_end_time - prop_beg_time;
+        offs_t = prop_end_time - pose_time_origin;
       }
 
       dt_all += dt;
@@ -691,6 +766,56 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
       }
     }
     pcl_out = pcl_wait_proc;
+    if (competition_startup_telemetry_enabled_ &&
+        competition_startup_telemetry_.is_open() &&
+        competition_raw_cloud.size() == pcl_out.size() && !pcl_out.empty())
+    {
+      std::vector<double> displacement;
+      displacement.reserve(pcl_out.size());
+      for (std::size_t i = 0; i < pcl_out.size(); ++i)
+      {
+        const V3D raw(competition_raw_cloud[i].x, competition_raw_cloud[i].y,
+                      competition_raw_cloud[i].z);
+        const V3D deskewed(pcl_out[i].x, pcl_out[i].y, pcl_out[i].z);
+        displacement.push_back((deskewed - raw).norm());
+      }
+      std::sort(displacement.begin(), displacement.end());
+      const auto quantile = [&](double fraction) {
+        const std::size_t index = static_cast<std::size_t>(
+            std::round(fraction * static_cast<double>(displacement.size() - 1)));
+        return displacement[index];
+      };
+      const Eigen::Quaterniond seed_q(competition_seed_rotation);
+      const Eigen::Quaterniond end_q(state_inout.rot_end);
+      const double point_min_s = competition_raw_cloud.front().curvature / 1000.0;
+      const double point_max_s = competition_raw_cloud.back().curvature / 1000.0;
+      competition_startup_telemetry_ << std::setprecision(17)
+          << lidar_meas.lidar_frame_beg_time << ',' << prop_end_time << ','
+          << pcl_out.size() << ',' << v_imu.size() << ',' << imu_beg_time << ','
+          << imu_end_time << ',' << imu_beg_time - lidar_meas.lidar_frame_beg_time
+          << ',' << prop_end_time - imu_end_time << ',' << point_min_s << ','
+          << point_max_s << ',' << quantile(0.5) << ',' << quantile(0.95) << ','
+          << displacement.back();
+      const auto write_vector = [&](const V3D &value) {
+        competition_startup_telemetry_ << ',' << value.x() << ',' << value.y()
+                                       << ',' << value.z();
+      };
+      write_vector(p4_seed_position);
+      write_vector(p4_seed_velocity);
+      write_vector(p4_seed_gravity);
+      write_vector(p4_seed_gyro_bias);
+      write_vector(p4_seed_accel_bias);
+      competition_startup_telemetry_ << ',' << seed_q.x() << ',' << seed_q.y()
+                                     << ',' << seed_q.z() << ',' << seed_q.w();
+      write_vector(state_inout.pos_end);
+      write_vector(state_inout.vel_end);
+      write_vector(state_inout.gravity);
+      write_vector(state_inout.bias_g);
+      write_vector(state_inout.bias_a);
+      competition_startup_telemetry_ << ',' << end_q.x() << ',' << end_q.y()
+                                     << ',' << end_q.z() << ',' << end_q.w() << '\n';
+      competition_startup_telemetry_.flush();
+    }
     if (p4_diagnostics_enabled_ &&
         p4_fixed_velocity_cloud_->size() == pcl_out.size())
     {
@@ -712,6 +837,8 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
     }
     pcl_wait_proc.clear();
     IMUpose.clear();
+    scan_history_active_ = false;
+    scan_history_origin_time_ = 0.0;
   }
   // printf("[ IMU ] time forward: %lf, backward: %lf.\n", t1 - t0, omp_get_wtime() - t1);
 }

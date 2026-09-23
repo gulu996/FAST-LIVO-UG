@@ -3,12 +3,14 @@
 		<arg name="cmd_name" default="" />
 		<arg name="rviz" default="true" />
 		<arg name="sustained_visual_updates" default="false" />
+		<arg name="livo_scan_contract" default="false" />
 
 		<!-- Clear a stale value before the main node publishes this run. -->
 		<param name="/fast_livo/run_log_directory" value="__PENDING__" />
 		<rosparam command="load" file="$(find fast_livo)/config/mid360.yaml" />
 		<rosparam command="load" file="$(find fast_livo)/config/gnss_adapter_mid360.yaml" />
 		<rosparam command="load" file="$(find fast_livo)/config/rtk_fixed_lag_backend_mid360.yaml" />
+		<param name="/diagnostics/livo_scan_contract_en" value="$(arg livo_scan_contract)" />
 		<!-- Explicit low-texture profile; safe default remains suitable for repetitive tunnels. -->
 		<group if="$(arg sustained_visual_updates)">
 			<param name="/vio/relaxed_min_retrieve_points" value="5" />

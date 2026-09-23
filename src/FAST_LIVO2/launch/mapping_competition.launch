@@ -1,0 +1,46 @@
+<launch>
+  <arg name="rviz" default="true" />
+  <arg name="use_sim_time" default="false" />
+  <arg name="output_root" default="/tmp/fast_livo_competition" />
+  <!-- image_transport names compressed input as <base>/compressed. -->
+  <arg name="compressed_image_base_topic"
+       default="/tiaozhanbei/camera/left/image" />
+  <arg name="decoded_image_topic"
+       default="/petrochemical/camera/left/image_raw" />
+
+  <param name="/use_sim_time" value="$(arg use_sim_time)" />
+  <rosparam command="load" file="$(find fast_livo)/config/petrochemical_site/mapping.yaml" />
+  <rosparam command="load" file="$(find fast_livo)/config/petrochemical_site/calibration.yaml" />
+  <param name="/common/img_topic" value="$(arg decoded_image_topic)" />
+  <param name="/common/img_en" type="int" value="1" />
+  <param name="/common/lidar_en" type="int" value="1" />
+
+  <!-- First validate the competition frontend without external backends. -->
+  <param name="/gnss_fusion/enable" value="false" />
+  <param name="/uwb/enable" value="false" />
+  <param name="/uwb/update_en" value="false" />
+  <param name="/gps/enable" value="false" />
+  <param name="/gps/update_en" value="false" />
+  <param name="/uav/gravity_align_en" value="false" />
+  <param name="/camera_aligned_neu/enable" value="false" />
+  <param name="/p4_frontend/enable" value="false" />
+  <param name="/p4b_snapshot/enable" value="false" />
+  <param name="/p5_seed_basin/enable" value="false" />
+  <param name="/p5_seed_basin/prototype_enable" value="false" />
+
+  <node pkg="image_transport" type="republish"
+        name="competition_image_decoder"
+        args="compressed in:=$(arg compressed_image_base_topic) raw out:=$(arg decoded_image_topic)"
+        output="screen" />
+
+  <node pkg="fast_livo" type="fastlivo_mapping"
+        name="laserMapping" output="screen">
+    <param name="save_path" value="$(arg output_root)" />
+    <rosparam file="$(find fast_livo)/config/petrochemical_site/camera_left.yaml" />
+  </node>
+
+  <group if="$(arg rviz)">
+    <node launch-prefix="nice" pkg="rviz" type="rviz" name="rviz"
+          args="-d $(find fast_livo)/rviz_cfg/fast_livo2.rviz" />
+  </group>
+</launch>

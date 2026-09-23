@@ -1557,6 +1557,8 @@ void VIOManager::logVisualDelta(double timestamp, int tracked_point_count,
   const V3D delta_velocity = attempted.vel_end - before.vel_end;
   const V3D delta_acc_bias = attempted.bias_a - before.bias_a;
   const V3D delta_gyro_bias = attempted.bias_g - before.bias_g;
+  const double covariance_max_change =
+      (attempted.cov - before.cov).cwiseAbs().maxCoeff();
   std::ostringstream oss;
   oss << std::setprecision(9)
       << "[VIO_DELTA] timestamp=" << timestamp
@@ -1566,11 +1568,16 @@ void VIOManager::logVisualDelta(double timestamp, int tracked_point_count,
       << " image_tile_saturated_fraction=" << image_tile_saturated_fraction
       << " image_contrast=" << image_contrast
       << " skip_reason=" << (skip_reason.empty() ? "none" : skip_reason)
+      << " before_position=(" << before.pos_end.transpose() << ")"
+      << " candidate_position=(" << attempted.pos_end.transpose() << ")"
+      << " before_velocity=(" << before.vel_end.transpose() << ")"
+      << " candidate_velocity=(" << attempted.vel_end.transpose() << ")"
       << " delta_position=(" << delta_position.transpose() << ")"
       << " delta_rotation=(" << delta_rotation.transpose() << ")"
       << " delta_velocity=(" << delta_velocity.transpose() << ")"
       << " delta_acc_bias=(" << delta_acc_bias.transpose() << ")"
       << " delta_gyro_bias=(" << delta_gyro_bias.transpose() << ")"
+      << " covariance_max_change=" << covariance_max_change
       << " total_nis=" << visual_total_nis
       << " normalized_nis=" << last_visual_normalized_nis
       << " candidate_patches=" << last_visual_candidate_patches
@@ -4237,6 +4244,12 @@ void VIOManager::updateFrameState(StatesGroup state)
   new_frame_->T_f_w_ = SE3(Rcw, Pcw);
 }
 
+void VIOManager::restoreVisualShadowProductionState(const StatesGroup &before)
+{
+  *state = before;
+  updateFrameState(*state);
+}
+
 void VIOManager::plotTrackedPoints()
 {
   int total_points = visual_submap->voxel_points.size();
@@ -5977,11 +5990,13 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg,
   const std::string visual_ekf_skip_reason = last_visual_nis_rejected ? "normalized_nis" :
       (last_visual_observability_rejected ? "observability_reject" :
        (last_visual_numerical_rejected ? "non_finite_visual_update" : "ekf_no_valid_measurement"));
-  logVisualDelta(img_time, total_points, saturated_fraction,
-                 max_tile_saturated_fraction, intensity_std,
-                 visual_ekf_updated ? "" : visual_ekf_skip_reason,
-                 state_before_visual_update, *state, last_visual_total_nis,
-                 visual_ekf_updated);
+  const StatesGroup visual_candidate_state = *state;
+  if (!visual_shadow_no_commit_en)
+    logVisualDelta(img_time, total_points, saturated_fraction,
+                   max_tile_saturated_fraction, intensity_std,
+                   visual_ekf_updated ? "" : visual_ekf_skip_reason,
+                   state_before_visual_update, visual_candidate_state,
+                   last_visual_total_nis, visual_ekf_updated);
 
   double t3 = omp_get_wtime();
 
@@ -6154,12 +6169,39 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg,
 
     appendTimingLogLines(lines);
   }
-  logVisualFunnel(visual_ekf_updated ? "none" : visual_ekf_skip_reason,
-                  true, false, visual_ekf_updated);
-  logVisualAdaptiveCovarianceRelaxed(
-      visual_ekf_updated ? "none" : visual_ekf_skip_reason,
-      true, visual_ekf_updated, false, false,
-      state_before_visual_update, *state);
-  last_visual_update_accepted = visual_ekf_updated;
+  if (visual_shadow_no_commit_en)
+  {
+    // ponytail: the visual map remains live so the next frame follows the same
+    // frontend lifecycle as normal LIVO; only production state/covariance and
+    // the visual-to-LiDAR observation-hint bridge are forbidden to commit.
+    restoreVisualShadowProductionState(state_before_visual_update);
+    const double state_delta = ((*state) - state_before_visual_update).norm();
+    const double covariance_delta =
+        (state->cov - cov_before_visual_update).cwiseAbs().maxCoeff();
+    if (state_delta != 0.0 || covariance_delta != 0.0)
+      throw std::runtime_error("visual shadow failed to restore production state");
+    const std::string shadow_reason = visual_ekf_updated
+        ? "shadow_no_commit_candidate_accepted"
+        : "shadow_no_commit_" + visual_ekf_skip_reason;
+    logVisualDelta(img_time, total_points, saturated_fraction,
+                   max_tile_saturated_fraction, intensity_std, shadow_reason,
+                   state_before_visual_update, visual_candidate_state,
+                   last_visual_total_nis, false);
+    logVisualFunnel(shadow_reason, true, false, false);
+    logVisualAdaptiveCovarianceRelaxed(
+        shadow_reason, true, false, false, visual_ekf_updated,
+        state_before_visual_update, visual_candidate_state);
+    last_visual_update_accepted = false;
+  }
+  else
+  {
+    logVisualFunnel(visual_ekf_updated ? "none" : visual_ekf_skip_reason,
+                    true, false, visual_ekf_updated);
+    logVisualAdaptiveCovarianceRelaxed(
+        visual_ekf_updated ? "none" : visual_ekf_skip_reason,
+        true, visual_ekf_updated, false, false,
+        state_before_visual_update, *state);
+    last_visual_update_accepted = visual_ekf_updated;
+  }
   rememberVisualGuardPose();
 }

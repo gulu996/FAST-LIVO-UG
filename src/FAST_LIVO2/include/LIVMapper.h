@@ -18,6 +18,7 @@ which is included as part of this source code package.
 #include "vio.h"
 #include "preprocess.h"
 #include "p4_fork_harness.h"
+#include "livo_scan_lifecycle.h"
 #include "uwb_manager.h"
 #include "voxel_filter_utils.h"
 #include <fast_livo/FullStateLidarGeometry.h>
@@ -65,6 +66,7 @@ public:
   void logLioDirectionalShadow();
   void logLioTransaction();
   void logLioMotionConsistency();
+  void logLivoScanContract();
   void logRuntimeEventCounts(bool final_snapshot);
   void publishFullStateShadowGeometry();
   
@@ -173,6 +175,7 @@ public:
   bool visual_map_supply_diagnostics_en_ = false;
   bool visual_map_fov_fallback_en_ = false;
   bool visual_tracking_only_dry_run_en_ = false;
+  bool visual_shadow_no_commit_en_ = false;
   bool visual_adaptive_covariance_shadow_en_ = false;
   bool visual_adaptive_covariance_relaxed_en_ = false;
   int visual_adaptive_covariance_relaxed_min_points_ = 15;
@@ -308,11 +311,14 @@ public:
   ofstream fout_pre, fout_out, fout_pcd_pos, fout_points, fout_lio_degeneracy,
       fout_lio_directional_shadow, fout_lio_transaction,
       fout_lio_motion_consistency, fout_runtime_memory, fout_runtime_events,
-      fout_visual_image_flow;
+      fout_visual_image_flow, fout_livo_scan_contract;
   int visual_image_flow_pending_rows_ = 0;
   int lio_directional_shadow_pending_rows_ = 0;
   int lio_transaction_pending_rows_ = 0;
   int lio_motion_consistency_pending_rows_ = 0;
+  bool livo_scan_contract_diagnostics_en_ = false;
+  std::uint64_t next_livo_scan_id_ = 0;
+  fast_livo::LivoScanLifecycle livo_scan_lifecycle_;
 
   V3D euler_cur;
 

@@ -60,6 +60,8 @@ public:
     double first_lidar_time = 0.0;
     bool imu_time_initialized = false;
     bool imu_needs_initialization = true;
+    bool scan_history_active = false;
+    double scan_history_origin_time = 0.0;
     int lidar_type = 0;
     M3D identity3 = M3D::Identity();
     V3D zero3 = V3D::Zero();
@@ -85,7 +87,10 @@ public:
   void disable_exposure_est();
   void Process2(LidarMeasureGroup &lidar_meas, StatesGroup &stat, PointCloudXYZI::Ptr cur_pcl_un_);
   void UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_inout, PointCloudXYZI &pcl_out);
+  void beginLidarScan(double scan_begin_time, const StatesGroup &state);
+  void updateLidarScanPose(double timestamp, const StatesGroup &state);
   void set_log_dir(const std::string &log_dir) { log_dir_ = log_dir; }
+  void enable_competition_startup_telemetry(bool enabled);
   void enable_p4_diagnostics(bool enabled) { p4_diagnostics_enabled_ = enabled; }
   const fast_livo::p4::DeskewDiagnostics &p4_deskew_diagnostics() const
   {
@@ -129,6 +134,8 @@ private:
   V3D angvel_last;
   V3D acc_s_last;
   double last_prop_end_time;
+  bool scan_history_active_ = false;
+  double scan_history_origin_time_ = 0.0;
   double time_last_scan;
   int init_iter_num = 1, MAX_INI_COUNT = 20;
   bool b_first_frame = true;
@@ -137,6 +144,8 @@ private:
   bool ba_bg_est_en = true;
   bool exposure_estimate_en = true;
   std::string log_dir_;
+  bool competition_startup_telemetry_enabled_ = false;
+  std::ofstream competition_startup_telemetry_;
   bool p4_diagnostics_enabled_ = false;
   fast_livo::p4::DeskewDiagnostics p4_deskew_diagnostics_;
   PointCloudXYZI::Ptr p4_raw_cloud_{new PointCloudXYZI()};

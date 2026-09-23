@@ -102,6 +102,22 @@ adapter/backend configuration; MID-360 retains its existing quality policy.
 Its default runtime-output directory is `/tmp/fast_livo_petrochemical`; pass
 `cmd_name:=/some/writable/path` when logs or maps need to be retained elsewhere.
 
+## Competition bag image topic
+
+`competition.bag` records the left camera on
+`/tiaozhanbei/camera/left/image/compressed`, not the compact-dataset topic above.
+Use the dataset-specific one-command frontend launch; it starts the required
+decoder and keeps the generic mapper subscribed to a raw image topic:
+
+```bash
+source /home/gulu/catkin_ws/devel/setup.bash
+roslaunch fast_livo mapping_competition.launch rviz:=false use_sim_time:=true
+```
+
+The compressed input base and decoded output remain launch arguments:
+`compressed_image_base_topic` and `decoded_image_topic`. No competition camera
+topic is hard-coded in the mapper source.
+
 ## Full conversion
 
 Run this only after the 30-second replay succeeds and after checking free disk space:

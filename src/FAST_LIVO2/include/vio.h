@@ -493,6 +493,7 @@ public:
   bool visual_map_supply_diagnostics_en = false;
   bool visual_map_fov_fallback_en = false;
   bool visual_adaptive_covariance_shadow_en = false;
+  bool visual_shadow_no_commit_en = false;
   int visual_map_fov_fallback_target_grid_candidates = 60;
   int last_visual_fov_fallback_added_grid_candidates = 0;
   VisualMapSupplyDiagnostics last_visual_map_supply;
@@ -589,6 +590,7 @@ public:
   void processFrame(cv::Mat &img, vector<pointWithVar> &pg,
                     const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &feat_map,
                     double img_time, bool tracking_only_dry_run = false);
+  void restoreVisualShadowProductionState(const StatesGroup &before);
   void retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &pg, const unordered_map<VOXEL_LOCATION, VoxelOctoTree *> &plane_map);
   void generateVisualMapPoints(cv::Mat img, vector<pointWithVar> &pg);
   void clearVisualMap();
