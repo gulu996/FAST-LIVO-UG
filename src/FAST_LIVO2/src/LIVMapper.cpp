@@ -167,6 +167,7 @@ LIVMapper::LIVMapper(ros::NodeHandle &nh)
 
 LIVMapper::~LIVMapper()
 {
+  if (vio_manager) vio_manager->shutdownPersistentLandmarkBackend();
   logRuntimeEventCounts(true);
   if (fout_lio_degeneracy.is_open()) fout_lio_degeneracy.flush();
   if (fout_lio_transaction.is_open()) fout_lio_transaction.flush();

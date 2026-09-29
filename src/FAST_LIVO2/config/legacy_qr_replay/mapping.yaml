@@ -1,0 +1,35 @@
+# Isolated replay overlay on config/mid360.yaml, not a production profile.
+extrin_calib:
+  # Candidate A: first commented old 1280x1024 calibration in mid360.yaml.
+  extrinsic_T: [-0.011, -0.02329, 0.04412]
+  extrinsic_R: [1, 0, 0, 0, 1, 0, 0, 0, 1]
+  Rcl: [-0.011008, -0.999940, 0.000187,
+         0.539054, -0.006092, -0.842250,
+         0.842200, -0.009171, 0.539089]
+  Pcl: [0.086367, -0.365243, -0.070319]
+
+gnss_fusion:
+  enable: false
+gps:
+  enable: false
+  update_en: false
+uwb:
+  enable: false
+  update_en: false
+
+aruco_landmarks:
+  aruco_landmarks_en: true
+  fusion_mode: global_backend
+  board_identity_mode: legacy_same_id_board
+  dictionary: DICT_6X6_250
+  # Historical config/mid360.yaml lists physical boards 1/2/3/4.
+  # A detected ID outside this roster remains diagnostic-only.
+  legacy_board_ids: [1, 2, 3, 4]
+  legacy_geometry:
+    # Source: git HEAD config/mid360.yaml and old src/vio.cpp.
+    # Historic horizontal width=0.8, vertical height=0.6 m; marker 0.16 m.
+    marker_size_m: 0.16
+    half_center_x_m: 0.28
+    half_center_y_m: 0.18
+  # The compatibility adapter writes legacy_association.csv under save_path.
+  diagnostics_csv_enable: true

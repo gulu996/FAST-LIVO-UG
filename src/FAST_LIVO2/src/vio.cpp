@@ -21,6 +21,7 @@ which is included as part of this source code package.
 #include <limits>
 #include <numeric>
 #include <sstream>
+#include <stdexcept>
 
 namespace
 {
@@ -202,6 +203,11 @@ VIOManager::VIOManager()
 
 VIOManager::~VIOManager()
 {
+  shutdownPersistentLandmarkBackend();
+  if (landmark_diagnostics_file_.is_open())
+    landmark_diagnostics_file_.close();
+  if (legacy_association_file_.is_open())
+    legacy_association_file_.close();
   if (timing_log_file.is_open()) timing_log_file.close();
   if (visual_patch_quality_file.is_open()) visual_patch_quality_file.close();
   if (visual_funnel_file.is_open()) visual_funnel_file.close();
@@ -215,6 +221,48 @@ VIOManager::~VIOManager()
   warp_map.clear();
   for (auto& pair : feat_map) delete pair.second;
   feat_map.clear();
+}
+
+void VIOManager::shutdownPersistentLandmarkBackend()
+{
+  if (!persistent_landmark_backend_ || landmark_backend_final_summary_written_)
+    return;
+  persistent_landmark_backend_->shutdown();
+  const auto t = persistent_landmark_backend_->telemetry();
+  std::ostringstream summary;
+  summary << "LANDMARK_BACKEND_FINAL"
+          << " worker_started=" << t.worker_started
+          << " worker_start_count=" << t.worker_start_count
+          << " shutdown_requested=" << t.shutdown_requested
+          << " drain_started=" << t.drain_started
+          << " drain_completed=" << t.drain_completed
+          << " worker_stopped=" << t.worker_stopped
+          << " worker_stop_count=" << t.worker_stop_count
+          << " join_completed=" << t.join_completed
+          << " queue_capacity=" << t.queue_capacity
+          << " queue_current_size=" << t.queue_current_size
+          << " queue_peak_size=" << t.queue_peak_size
+          << " queue_size_at_shutdown=" << t.queue_size_at_shutdown
+          << " submitted=" << t.counters.submitted
+          << " accepted=" << t.counters.accepted
+          << " processed=" << t.counters.processed
+          << " duplicate=" << t.counters.duplicate
+          << " overflow=" << t.counters.overflow
+          << " out_of_order=" << t.counters.out_of_order
+          << " invalid=" << t.counters.invalid
+          << " rejected=" << t.rejected;
+  summary << persistent_landmark_backend_->graphSummary();
+  const std::string line = summary.str();
+  std::cerr << line << std::endl;
+  if (!timing_log_dir.empty())
+  {
+    std::string path = timing_log_dir;
+    if (path.back() != '/') path += '/';
+    std::ofstream out(path + "landmark_backend_final.txt", std::ios::out);
+    if (out) { out << line << '\n'; out.flush(); }
+    else std::cerr << "LANDMARK_BACKEND_FINAL_FILE_ERROR path=" << path << std::endl;
+  }
+  landmark_backend_final_summary_written_ = true;
 }
 
 void VIOManager::clearVisualMap()
@@ -272,10 +320,7 @@ void VIOManager::initializeVIO(ros::NodeHandle &nh)
   printf("distCoeffs: %.6lf, %.6lf, %.6lf, %.6lf\n", d0, d1, d2, d3);
 
   parameters_ = cv::aruco::DetectorParameters::create();
-  dictionary_ = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_6X6_250);
 
-  //loadArucoWorldPositions
-  // 检查参数是否存在
   if (!nh.hasParam("/aruco_landmarks") || !aruco_landmarks_en) 
   {
     if (!nh.hasParam("/aruco_landmarks")) ROS_WARN("[Aruco] No aruco_landmarks parameter found");
@@ -283,95 +328,369 @@ void VIOManager::initializeVIO(ros::NodeHandle &nh)
   }
   else
   {
-    nh.param<double>("/aruco_landmarks/width", board_config_.width, 0.8);
-    nh.param<double>("/aruco_landmarks/height", board_config_.height, 0.6);
-    nh.param<double>("/aruco_landmarks/marker_size", marker_size, 0.16);
-    nh.param<double>("/aruco_landmarks/delta_width_qr_center", board_config_.delta_width_qr_center, 0.28);
-    nh.param<double>("/aruco_landmarks/delta_height_qr_center", board_config_.delta_height_qr_center, 0.18);
-    aruco_min_quad_area_px = 300.0;
-    aruco_pair_distance_rel_tol = 0.2;
-    aruco_max_normal_diff_deg = 15.0;
-    aruco_max_marker_depth_diff = 0.6;
-    aruco_min_marker_depth = 0.1;
-    aruco_max_marker_depth = 10.0;
-    aruco_max_position_residual = 0.6;
-    aruco_max_orientation_residual_deg = 25.0;
-    aruco_position_noise_base = 0.01;
-    aruco_orientation_noise_base = 0.1;
-    aruco_process_stride = 4;
-    aruco_use_orientation_update = false;
-    aruco_normal_gate_deg = 35.0;
-    aruco_update_max_rot_step_deg = 1.0;
-    aruco_update_max_trans_step_m = 0.08;
+    std::string fusion_mode_name = "observe_only";
+    nh.param<std::string>("/aruco_landmarks/fusion_mode", fusion_mode_name,
+                          fusion_mode_name);
+    if (!landmark::parseFusionMode(fusion_mode_name, &landmark_fusion_mode_))
+      throw std::runtime_error(
+          "[Aruco] fusion_mode must be observe_only, legacy_esikf or global_backend");
+    landmark_observation_router_.setMode(landmark_fusion_mode_);
+    if (landmark_fusion_mode_ == landmark::FusionMode::GlobalBackend)
+    {
+      landmark::PersistentBackendConfig backend_config;
+      int queue_capacity = 128;
+      nh.param<int>("/aruco_landmarks/global_backend/queue_capacity",
+                    queue_capacity, queue_capacity);
+      nh.param<double>("/aruco_landmarks/global_backend/keypose_translation_m",
+                       backend_config.keypose_policy.translation_threshold_m,
+                       backend_config.keypose_policy.translation_threshold_m);
+      nh.param<double>("/aruco_landmarks/global_backend/keypose_rotation_deg",
+                       backend_config.keypose_policy.rotation_threshold_deg,
+                       backend_config.keypose_policy.rotation_threshold_deg);
+      nh.param<double>("/aruco_landmarks/global_backend/keypose_max_interval_s",
+                       backend_config.keypose_policy.maximum_interval_s,
+                       backend_config.keypose_policy.maximum_interval_s);
+      nh.param<double>("/aruco_landmarks/global_backend/coalesce_time_s",
+                       backend_config.keypose_policy.coalesce_time_s,
+                       backend_config.keypose_policy.coalesce_time_s);
+      nh.param<double>("/aruco_landmarks/global_backend/coalesce_translation_m",
+                       backend_config.keypose_policy.coalesce_translation_m,
+                       backend_config.keypose_policy.coalesce_translation_m);
+      nh.param<double>("/aruco_landmarks/global_backend/coalesce_rotation_deg",
+                       backend_config.keypose_policy.coalesce_rotation_deg,
+                       backend_config.keypose_policy.coalesce_rotation_deg);
+      nh.param<double>("/aruco_landmarks/global_backend/episode_gap_s",
+                       backend_config.keypose_policy.episode_gap_s,
+                       backend_config.keypose_policy.episode_gap_s);
+      auto &motion = backend_config.motion_uncertainty;
+      nh.param<double>("/aruco_landmarks/global_backend/motion_rotation_floor_rad",
+                       motion.rotation_floor_rad, motion.rotation_floor_rad);
+      nh.param<double>("/aruco_landmarks/global_backend/motion_rotation_per_second_rad",
+                       motion.rotation_per_second_rad, motion.rotation_per_second_rad);
+      nh.param<double>("/aruco_landmarks/global_backend/motion_rotation_per_meter_rad",
+                       motion.rotation_per_meter_rad, motion.rotation_per_meter_rad);
+      nh.param<double>("/aruco_landmarks/global_backend/motion_rotation_ceiling_rad",
+                       motion.rotation_ceiling_rad, motion.rotation_ceiling_rad);
+      nh.param<double>("/aruco_landmarks/global_backend/motion_translation_floor_m",
+                       motion.translation_floor_m, motion.translation_floor_m);
+      nh.param<double>("/aruco_landmarks/global_backend/motion_translation_per_second_m",
+                       motion.translation_per_second_m, motion.translation_per_second_m);
+      nh.param<double>("/aruco_landmarks/global_backend/motion_translation_per_meter_m",
+                       motion.translation_per_meter_m, motion.translation_per_meter_m);
+      nh.param<double>("/aruco_landmarks/global_backend/motion_translation_per_radian_m",
+                       motion.translation_per_radian_m, motion.translation_per_radian_m);
+      nh.param<double>("/aruco_landmarks/global_backend/motion_translation_ceiling_m",
+                       motion.translation_ceiling_m, motion.translation_ceiling_m);
+      nh.param<double>("/aruco_landmarks/global_backend/motion_weak_geometry_multiplier",
+                       motion.weak_geometry_multiplier, motion.weak_geometry_multiplier);
+      if (queue_capacity <= 0)
+        throw std::runtime_error("[Aruco] global backend queue_capacity must be positive");
+      backend_config.queue_capacity = static_cast<std::size_t>(queue_capacity);
+      persistent_landmark_backend_.reset(
+          new landmark::PersistentLandmarkBackend(backend_config));
+      ROS_INFO("[Aruco] global_backend=PERSISTENT_INFRASTRUCTURE_ONLY correction_output=0 queue_capacity=%d",
+               queue_capacity);
+    }
 
-    aruco_relative_positions_[1] = Eigen::Vector3d(-board_config_.delta_width_qr_center, board_config_.delta_height_qr_center, 0);   // 左上
-    aruco_relative_positions_[2] = Eigen::Vector3d(board_config_.delta_width_qr_center, board_config_.delta_height_qr_center, 0);    // 右上
-    aruco_relative_positions_[3] = Eigen::Vector3d(-board_config_.delta_width_qr_center, -board_config_.delta_height_qr_center, 0);  // 左下
-    aruco_relative_positions_[4] = Eigen::Vector3d(board_config_.delta_width_qr_center, -board_config_.delta_height_qr_center, 0);   // 右下
+    std::string dictionary_name;
+    if (!nh.getParam("/aruco_landmarks/dictionary", dictionary_name))
+      throw std::runtime_error("[Aruco] enabled configuration requires dictionary");
+    int dictionary_id = -1;
+    if (!landmark::arucoDictionaryIdFromName(dictionary_name, &dictionary_id))
+      throw std::runtime_error("[Aruco] unsupported dictionary: " + dictionary_name);
+    dictionary_ = cv::aruco::getPredefinedDictionary(dictionary_id);
 
-    ROS_INFO("[Aruco] Marker size: %.3f meters", marker_size);
-    ROS_INFO("[Aruco] Same-ID gating: area>=%.1f px^2, pair tol<=%.2f, normal<=%.1f deg",
-         aruco_min_quad_area_px, aruco_pair_distance_rel_tol, aruco_max_normal_diff_deg);
-    // 清空现有地标
+    bool corner_refinement = true;
+    int corner_refinement_win_size = 5;
+    int corner_refinement_max_iterations = 30;
+    double corner_refinement_min_accuracy = 0.1;
+    nh.param<bool>("/aruco_landmarks/corner_refinement", corner_refinement, true);
+    nh.param<int>("/aruco_landmarks/corner_refinement_win_size", corner_refinement_win_size, 5);
+    nh.param<int>("/aruco_landmarks/corner_refinement_max_iterations", corner_refinement_max_iterations, 30);
+    nh.param<double>("/aruco_landmarks/corner_refinement_min_accuracy", corner_refinement_min_accuracy, 0.1);
+    parameters_->cornerRefinementMethod = corner_refinement ?
+        cv::aruco::CORNER_REFINE_SUBPIX : cv::aruco::CORNER_REFINE_NONE;
+    parameters_->cornerRefinementWinSize = std::max(1, corner_refinement_win_size);
+    parameters_->cornerRefinementMaxIterations = std::max(1, corner_refinement_max_iterations);
+    parameters_->cornerRefinementMinAccuracy =
+        std::max(1e-9, corner_refinement_min_accuracy);
+
+    nh.param<double>("/aruco_landmarks/min_depth_m", aruco_min_marker_depth, 0.1);
+    nh.param<double>("/aruco_landmarks/max_distance_m", aruco_max_marker_depth, 10.0);
+    nh.param<double>("/aruco_landmarks/max_reprojection_rmse_px", aruco_max_reprojection_rmse_px, 8.0);
+    nh.param<int>("/aruco_landmarks/process_stride", aruco_process_stride, 4);
+    nh.param<double>("/aruco_landmarks/max_position_residual_m", aruco_max_position_residual, 0.6);
+    nh.param<double>("/aruco_landmarks/max_orientation_residual_deg", aruco_max_orientation_residual_deg, 25.0);
+    nh.param<bool>("/aruco_landmarks/use_orientation_update", aruco_use_orientation_update, false);
+    nh.param<double>("/aruco_landmarks/normal_gate_deg", aruco_normal_gate_deg, 35.0);
+    nh.param<double>("/aruco_landmarks/update_max_rot_step_deg", aruco_update_max_rot_step_deg, 1.0);
+    nh.param<double>("/aruco_landmarks/update_max_trans_step_m", aruco_update_max_trans_step_m, 0.08);
+    nh.param<bool>("/aruco_landmarks/partial_fusion_enable", aruco_partial_fusion_en, false);
+    nh.param<int>("/aruco_landmarks/partial_min_markers", aruco_partial_min_markers, 3);
+    nh.param<int>("/aruco_landmarks/initialization_min_markers", aruco_initialization_min_markers, 4);
+    nh.param<double>("/aruco_landmarks/max_view_angle_deg", aruco_max_view_angle_deg, 70.0);
+    nh.param<double>("/aruco_landmarks/min_visible_hull_area_px2", aruco_min_visible_hull_area_px2, 100.0);
+    nh.param<double>("/aruco_landmarks/nis_confidence", aruco_nis_confidence, 0.99);
+    nh.param<double>("/aruco_landmarks/nis_max_condition", aruco_nis_max_condition, 1e10);
+    nh.param<double>("/aruco_landmarks/initialized_rotation_variance_rad2", aruco_initialized_rotation_variance_rad2, 0.01);
+    nh.param<double>("/aruco_landmarks/initialized_translation_variance_m2", aruco_initialized_translation_variance_m2, 0.04);
+    nh.param<bool>("/aruco_landmarks/diagnostics_csv_enable", aruco_diagnostics_csv_en, false);
+    nh.param<std::string>("/aruco_landmarks/diagnostics_csv_path", aruco_diagnostics_csv_path, "landmark_diagnostics.csv");
+    nh.param<int>("/aruco_landmarks/diagnostics_flush_rows", aruco_diagnostics_flush_rows, 20);
+    aruco_process_stride = std::max(1, aruco_process_stride);
+    if (!std::isfinite(aruco_min_marker_depth) || aruco_min_marker_depth <= 0.0 ||
+        !std::isfinite(aruco_max_marker_depth) ||
+        aruco_max_marker_depth <= aruco_min_marker_depth ||
+        !std::isfinite(aruco_max_reprojection_rmse_px) ||
+        aruco_max_reprojection_rmse_px <= 0.0)
+      throw std::runtime_error("[Aruco] invalid pose validation thresholds");
+    aruco_partial_min_markers = std::clamp(aruco_partial_min_markers, 1, 4);
+    aruco_initialization_min_markers =
+        std::clamp(aruco_initialization_min_markers, 1, 4);
+    aruco_diagnostics_flush_rows = std::max(1, aruco_diagnostics_flush_rows);
+    if (!std::isfinite(aruco_max_view_angle_deg) ||
+        aruco_max_view_angle_deg <= 0.0 || aruco_max_view_angle_deg >= 90.0 ||
+        !std::isfinite(aruco_min_visible_hull_area_px2) ||
+        aruco_min_visible_hull_area_px2 < 0.0 ||
+        !std::isfinite(aruco_nis_max_condition) ||
+        aruco_nis_max_condition <= 1.0 ||
+        !std::isfinite(aruco_initialized_rotation_variance_rad2) ||
+        aruco_initialized_rotation_variance_rad2 <= 0.0 ||
+        !std::isfinite(aruco_initialized_translation_variance_m2) ||
+        aruco_initialized_translation_variance_m2 <= 0.0 ||
+        !std::isfinite(landmark::chiSquareThreshold(3, aruco_nis_confidence)) ||
+        !std::isfinite(landmark::chiSquareThreshold(6, aruco_nis_confidence)))
+      throw std::runtime_error(
+          "[Aruco] invalid L2 quality/NIS configuration; confidence must be 0.95, 0.99 or 0.999");
+
+    landmark::PoseValidationOptions validation_options;
+    validation_options.min_depth_m = aruco_min_marker_depth;
+    validation_options.max_distance_m = aruco_max_marker_depth;
+    validation_options.max_reprojection_rmse_px = aruco_max_reprojection_rmse_px;
+    landmark_frontend_.setPoseValidationOptions(validation_options);
+
+    landmark::UncertaintyOptions uncertainty_options;
+    nh.param<double>("/aruco_landmarks/covariance/corner_sigma_px", uncertainty_options.corner_sigma_px, 0.5);
+    nh.param<double>("/aruco_landmarks/covariance/rotation_difference_rad", uncertainty_options.rotation_difference_rad, 1e-5);
+    nh.param<double>("/aruco_landmarks/covariance/translation_difference_m", uncertainty_options.translation_difference_m, 1e-4);
+    nh.param<double>("/aruco_landmarks/covariance/min_rotation_variance_rad2", uncertainty_options.min_rotation_variance_rad2, 1e-8);
+    nh.param<double>("/aruco_landmarks/covariance/max_rotation_variance_rad2", uncertainty_options.max_rotation_variance_rad2, 0.25);
+    nh.param<double>("/aruco_landmarks/covariance/min_translation_variance_m2", uncertainty_options.min_translation_variance_m2, 1e-8);
+    nh.param<double>("/aruco_landmarks/covariance/max_translation_variance_m2", uncertainty_options.max_translation_variance_m2, 4.0);
+    nh.param<double>("/aruco_landmarks/covariance/max_information_condition", uncertainty_options.max_information_condition, 1e12);
+    nh.param<double>("/aruco_landmarks/covariance/fallback_rotation_sigma_rad", uncertainty_options.fallback_rotation_sigma_rad, 0.03);
+    nh.param<double>("/aruco_landmarks/covariance/fallback_translation_sigma_m", uncertainty_options.fallback_translation_sigma_m, 0.03);
+    if (!std::isfinite(uncertainty_options.corner_sigma_px) ||
+        uncertainty_options.corner_sigma_px <= 0.0 ||
+        uncertainty_options.rotation_difference_rad <= 0.0 ||
+        uncertainty_options.translation_difference_m <= 0.0 ||
+        uncertainty_options.min_rotation_variance_rad2 <= 0.0 ||
+        uncertainty_options.max_rotation_variance_rad2 <
+            uncertainty_options.min_rotation_variance_rad2 ||
+        uncertainty_options.min_translation_variance_m2 <= 0.0 ||
+        uncertainty_options.max_translation_variance_m2 <
+            uncertainty_options.min_translation_variance_m2 ||
+        uncertainty_options.max_information_condition <= 1.0 ||
+        uncertainty_options.fallback_rotation_sigma_rad <= 0.0 ||
+        uncertainty_options.fallback_translation_sigma_m <= 0.0)
+      throw std::runtime_error("[Aruco] invalid covariance configuration");
+    landmark_frontend_.setUncertaintyOptions(uncertainty_options);
+
     board_world_positions_.clear();
     board_world_orientations_.clear();
     board_world_flag_.clear();
+    board_world_covariances_.clear();
 
-    // 使用列表格式
-    XmlRpc::XmlRpcValue markers_list;
-    if (nh.getParam("/aruco_landmarks/markers", markers_list) && markers_list.getType() == XmlRpc::XmlRpcValue::TypeArray) 
+    auto xmlNumber = [](const XmlRpc::XmlRpcValue &value) -> double {
+      if (value.getType() == XmlRpc::XmlRpcValue::TypeInt)
+        return static_cast<int>(value);
+      if (value.getType() == XmlRpc::XmlRpcValue::TypeDouble)
+        return static_cast<double>(value);
+      throw std::runtime_error("expected numeric XML-RPC value");
+    };
+    auto xmlVector3 = [&](const XmlRpc::XmlRpcValue &value,
+                          const std::string &field) -> Eigen::Vector3d {
+      if (value.getType() != XmlRpc::XmlRpcValue::TypeArray || value.size() != 3)
+        throw std::runtime_error("[Aruco] " + field + " must contain three numbers");
+      return Eigen::Vector3d(xmlNumber(value[0]), xmlNumber(value[1]),
+                             xmlNumber(value[2]));
+    };
+
+    std::string identity_mode;
+    nh.param<std::string>("/aruco_landmarks/board_identity_mode", identity_mode,
+                          "unique_child_ids");
+    if (identity_mode != "unique_child_ids" &&
+        identity_mode != "legacy_same_id_board")
+      throw std::runtime_error("[Aruco] invalid board_identity_mode");
+    legacy_same_id_mode_ = identity_mode == "legacy_same_id_board";
+    if (legacy_same_id_mode_ &&
+        landmark_fusion_mode_ != landmark::FusionMode::GlobalBackend)
+      throw std::runtime_error(
+          "[Aruco] legacy same-ID replay requires shadow global_backend");
+    std::vector<landmark::LandmarkDefinition> definitions;
+    std::size_t configured_landmarks = 0;
+    if (!legacy_same_id_mode_)
     {
-      ROS_INFO("[Aruco] Loading landmarks from list format");
-      for (int i = 0; i < markers_list.size(); i++) 
+    XmlRpc::XmlRpcValue landmarks;
+    if (!nh.getParam("/aruco_landmarks/landmarks", landmarks) ||
+        landmarks.getType() != XmlRpc::XmlRpcValue::TypeArray)
+      throw std::runtime_error("[Aruco] unique-ID mode requires landmarks");
+    definitions.reserve(landmarks.size());
+    for (int i = 0; i < landmarks.size(); ++i)
+    {
+      XmlRpc::XmlRpcValue entry = landmarks[i];
+      if (!entry.hasMember("landmark_id") || !entry.hasMember("markers"))
+        throw std::runtime_error("[Aruco] each landmark requires landmark_id and markers");
+      landmark::LandmarkDefinition definition;
+      definition.landmark_id = static_cast<int>(entry["landmark_id"]);
+      XmlRpc::XmlRpcValue markers = entry["markers"];
+      if (markers.getType() != XmlRpc::XmlRpcValue::TypeArray)
+        throw std::runtime_error("[Aruco] landmark markers must be a list");
+
+      for (int marker_index = 0; marker_index < markers.size(); ++marker_index)
       {
-        XmlRpc::XmlRpcValue marker = markers_list[i];
-        if (!marker.hasMember("id")) continue;
-
-        int id = static_cast<int>(marker["id"]);
-        int flag = 0;
-        if (marker.hasMember("flag"))
-        {
-          flag = static_cast<int>(marker["flag"]);
-        }
-
-        board_world_orientations_[id] = Eigen::Matrix3d::Identity();
-
-        if (flag)
-        {
-          if (!marker.hasMember("position"))
-          {
-            board_world_flag_[id] = false;
-            board_world_positions_[id] = Eigen::Vector3d::Zero();
-            ROS_WARN("[Aruco] Marker %d has flag=1 but no position, fallback to uninitialized.", id);
-            continue;
-          }
-
-          XmlRpc::XmlRpcValue pos = marker["position"];
-          if (pos.size() != 3)
-          {
-            board_world_flag_[id] = false;
-            board_world_positions_[id] = Eigen::Vector3d::Zero();
-            ROS_WARN("[Aruco] Marker %d has invalid position size, fallback to uninitialized.", id);
-            continue;
-          }
-
-          board_world_flag_[id] = true;
-          Eigen::Vector3d position(
-            static_cast<double>(pos[0]),
-            static_cast<double>(pos[1]),
-            static_cast<double>(pos[2])
-          );
-          board_world_positions_[id] = position;
-          ROS_INFO("[Aruco] Loaded marker %d at [%.2f, %.2f, %.2f]", id, position.x(), position.y(), position.z());
-        }
-        else
-        {
-          board_world_flag_[id] = false;
-          board_world_positions_[id] = Eigen::Vector3d::Zero();
-          ROS_INFO("[Aruco] Created marker %d as uninitialized", id);
-        }
+        XmlRpc::XmlRpcValue marker = markers[marker_index];
+        if (!marker.hasMember("marker_id") || !marker.hasMember("size_m") ||
+            !marker.hasMember("T_landmark_marker"))
+          throw std::runtime_error(
+              "[Aruco] each marker requires marker_id, size_m and T_landmark_marker");
+        landmark::MarkerGeometry geometry;
+        geometry.marker_id = static_cast<int>(marker["marker_id"]);
+        geometry.size_m = xmlNumber(marker["size_m"]);
+        XmlRpc::XmlRpcValue transform = marker["T_landmark_marker"];
+        if (!transform.hasMember("translation") ||
+            !transform.hasMember("rotation_rpy_deg"))
+          throw std::runtime_error(
+              "[Aruco] T_landmark_marker requires translation and rotation_rpy_deg");
+        const Eigen::Vector3d translation =
+            xmlVector3(transform["translation"], "translation");
+        const Eigen::Vector3d rpy_deg =
+            xmlVector3(transform["rotation_rpy_deg"], "rotation_rpy_deg");
+        const Eigen::Vector3d rpy = rpy_deg * M_PI / 180.0;
+        geometry.T_landmark_marker = Eigen::Isometry3d::Identity();
+        geometry.T_landmark_marker.linear() =
+            (Eigen::AngleAxisd(rpy.z(), Eigen::Vector3d::UnitZ()) *
+             Eigen::AngleAxisd(rpy.y(), Eigen::Vector3d::UnitY()) *
+             Eigen::AngleAxisd(rpy.x(), Eigen::Vector3d::UnitX())).toRotationMatrix();
+        geometry.T_landmark_marker.translation() = translation;
+        definition.markers.push_back(geometry);
       }
-    }    
+      definitions.push_back(definition);
+
+      bool initialized = false;
+      if (entry.hasMember("initialized"))
+        initialized = static_cast<bool>(entry["initialized"]);
+      board_world_flag_[definition.landmark_id] = initialized;
+      board_world_positions_[definition.landmark_id] = Eigen::Vector3d::Zero();
+      board_world_orientations_[definition.landmark_id] = Eigen::Matrix3d::Identity();
+      board_world_covariances_[definition.landmark_id] =
+          landmark::Matrix6d::Constant(
+              std::numeric_limits<double>::quiet_NaN());
+      if (initialized)
+      {
+        if (!entry.hasMember("world_position") ||
+            !entry.hasMember("world_rotation_rpy_deg"))
+          throw std::runtime_error(
+              "[Aruco] initialized landmark requires world position and rotation");
+        board_world_positions_[definition.landmark_id] =
+            xmlVector3(entry["world_position"], "world_position");
+        const Eigen::Vector3d world_rpy =
+            xmlVector3(entry["world_rotation_rpy_deg"],
+                       "world_rotation_rpy_deg") * M_PI / 180.0;
+        board_world_orientations_[definition.landmark_id] =
+            (Eigen::AngleAxisd(world_rpy.z(), Eigen::Vector3d::UnitZ()) *
+             Eigen::AngleAxisd(world_rpy.y(), Eigen::Vector3d::UnitY()) *
+             Eigen::AngleAxisd(world_rpy.x(), Eigen::Vector3d::UnitX())).toRotationMatrix();
+        board_world_covariances_[definition.landmark_id].setZero();
+        board_world_covariances_[definition.landmark_id].diagonal().head<3>()
+            .setConstant(aruco_initialized_rotation_variance_rad2);
+        board_world_covariances_[definition.landmark_id].diagonal().tail<3>()
+            .setConstant(aruco_initialized_translation_variance_m2);
+      }
+    }
+    std::string config_error;
+    if (!landmark_frontend_.configure(definitions, &config_error))
+      throw std::runtime_error("[Aruco] invalid landmark geometry: " + config_error);
+    configured_landmarks = definitions.size();
+    }
+    else
+    {
+      XmlRpc::XmlRpcValue ids;
+      if (!nh.getParam("/aruco_landmarks/legacy_board_ids", ids) ||
+          ids.getType() != XmlRpc::XmlRpcValue::TypeArray)
+        throw std::runtime_error("[Aruco] legacy replay requires board ID list");
+      std::vector<int> board_ids;
+      for (int i = 0; i < ids.size(); ++i)
+      {
+        if (ids[i].getType() != XmlRpc::XmlRpcValue::TypeInt)
+          throw std::runtime_error("[Aruco] legacy board IDs must be integers");
+        board_ids.push_back(static_cast<int>(ids[i]));
+      }
+      landmark::LegacyBoardGeometry geometry;
+      nh.param<double>("/aruco_landmarks/legacy_geometry/marker_size_m",
+                       geometry.marker_size_m, 0.0);
+      nh.param<double>("/aruco_landmarks/legacy_geometry/half_center_x_m",
+                       geometry.half_center_x_m, 0.0);
+      nh.param<double>("/aruco_landmarks/legacy_geometry/half_center_y_m",
+                       geometry.half_center_y_m, 0.0);
+      std::string config_error;
+      if (!legacy_board_adapter_.configure(
+              board_ids, geometry, validation_options, uncertainty_options,
+              &config_error))
+        throw std::runtime_error("[Aruco] invalid legacy replay geometry: " +
+                                 config_error);
+      configured_landmarks = board_ids.size();
+      std::string path = timing_log_dir;
+      if (path.empty())
+        throw std::runtime_error("[Aruco] legacy replay requires output directory");
+      if (!path.empty() && path.back() != '/') path += '/';
+      legacy_association_file_.open(path + "legacy_association.csv",
+                                    std::ios::out | std::ios::trunc);
+      if (!legacy_association_file_)
+        throw std::runtime_error("[Aruco] cannot open legacy association CSV");
+      legacy_association_file_
+          << "timestamp,landmark_id,detected_markers,assignment_count,"
+             "feasible_assignments,selected_slots,best_rmse_px,"
+             "second_assignment_rmse_px,assignment_gap_px,assignment_ratio,"
+             "pnp_feasible,factor_admitted,reason\n";
+      ROS_WARN("[Aruco] isolated legacy_same_id_board replay IDs=%zu; formal unique-ID mode remains default",
+               configured_landmarks);
+    }
+    ROS_INFO("[Aruco] L1 frontend: dictionary=%s landmarks=%zu corner_refinement=%s win=%d iterations=%d accuracy=%.3g",
+             dictionary_name.c_str(), configured_landmarks,
+             corner_refinement ? "SUBPIX" : "NONE",
+             parameters_->cornerRefinementWinSize,
+             parameters_->cornerRefinementMaxIterations,
+             parameters_->cornerRefinementMinAccuracy);
+    ROS_INFO("[Aruco] L2 policy: init_min=%d partial=%d partial_min=%d NIS_confidence=%.3f orientation=%d",
+             aruco_initialization_min_markers,
+             static_cast<int>(aruco_partial_fusion_en),
+             aruco_partial_min_markers, aruco_nis_confidence,
+             static_cast<int>(aruco_use_orientation_update));
+    ROS_INFO("[Aruco] L2.5 fusion_mode=%s primary_consumer=exclusive",
+             landmark::fusionModeName(landmark_fusion_mode_));
+    if (aruco_diagnostics_csv_en)
+    {
+      if (legacy_same_id_mode_ && !aruco_diagnostics_csv_path.empty() &&
+          aruco_diagnostics_csv_path.front() != '/')
+      {
+        aruco_diagnostics_csv_path = timing_log_dir + aruco_diagnostics_csv_path;
+      }
+      landmark_diagnostics_file_.open(
+          aruco_diagnostics_csv_path, std::ios::out | std::ios::trunc);
+      if (!landmark_diagnostics_file_)
+        throw std::runtime_error(
+            "[Aruco] cannot open diagnostics CSV: " +
+            aruco_diagnostics_csv_path);
+      landmark_diagnostics_file_
+          << "timestamp,landmark_id,visible_marker_ids,marker_count,corner_count,"
+             "tx_m,ty_m,tz_m,qw,qx,qy,qz,normal_x,normal_y,normal_z,"
+             "distance_m,view_angle_deg,visible_corner_hull_area_px2,rmse_px,"
+             "pnp_method,candidate_count,selected_candidate,best_rmse_px,"
+             "second_rmse_px,rmse_gap_px,rmse_ratio,positive_depth,front_facing,"
+             "pose_valid,covariance_valid,covariance_method,cov_rot_trace_rad2,"
+             "cov_trans_trace_m2,stage,reason,nis,dof\n";
+    }
   }
 
   width = cam->width();
@@ -4339,229 +4658,6 @@ void VIOManager::dumpDataForColmap()
   cnt++;
 }
 
-namespace
-{
-constexpr double kRadToDeg = 57.29577951308232;
-
-cv::Point2f markerCenter2D(const std::vector<cv::Point2f> &corner_pts)
-{
-  cv::Point2f center(0.0f, 0.0f);
-  for (const auto &pt : corner_pts) center += pt;
-  center *= 0.25f;
-  return center;
-}
-
-bool checkQuadGeometry2D(const std::vector<std::vector<cv::Point2f>> &corners,
-                         double min_area_px,
-                         double &quad_area_px)
-{
-  quad_area_px = 0.0;
-  if (corners.size() != 4) return false;
-
-  std::vector<cv::Point2f> centers;
-  centers.reserve(4);
-  for (const auto &corner_pts : corners)
-  {
-    if (corner_pts.size() != 4) return false;
-    centers.push_back(markerCenter2D(corner_pts));
-  }
-
-  std::vector<cv::Point2f> hull;
-  cv::convexHull(centers, hull);
-  if (hull.size() != 4) return false;
-
-  quad_area_px = std::fabs(cv::contourArea(hull));
-  return quad_area_px >= min_area_px;
-}
-
-bool checkPairwiseDistanceConsistency(const std::vector<Eigen::Vector3d> &points,
-                                      double dx,
-                                      double dy,
-                                      double rel_tol,
-                                      double &max_rel_err)
-{
-  max_rel_err = 0.0;
-  if (points.size() != 4) return false;
-
-  const double expected_dx = 2.0 * std::fabs(dx);
-  const double expected_dy = 2.0 * std::fabs(dy);
-  const double expected_diag = 2.0 * std::sqrt(dx * dx + dy * dy);
-
-  std::array<double, 6> expected = {
-      expected_dx, expected_dx,
-      expected_dy, expected_dy,
-      expected_diag, expected_diag};
-  std::sort(expected.begin(), expected.end());
-
-  std::array<double, 6> measured;
-  int idx = 0;
-  for (size_t i = 0; i < points.size(); i++)
-  {
-    for (size_t j = i + 1; j < points.size(); j++)
-    {
-      measured[idx++] = (points[i] - points[j]).norm();
-    }
-  }
-  std::sort(measured.begin(), measured.end());
-
-  for (size_t i = 0; i < expected.size(); i++)
-  {
-    const double denom = std::max(expected[i], 1e-6);
-    const double rel_err = std::fabs(measured[i] - expected[i]) / denom;
-    max_rel_err = std::max(max_rel_err, rel_err);
-    if (rel_err > rel_tol) return false;
-  }
-
-  return true;
-}
-
-bool checkNormalConsistency(const std::vector<VIOManager::ArucoObservation> &aruco_obs,
-                           double max_normal_diff_deg,
-                           double &observed_max_diff_deg)
-{
-  observed_max_diff_deg = 0.0;
-  if (aruco_obs.size() != 4) return false;
-
-  std::vector<Eigen::Vector3d> normals;
-  normals.reserve(4);
-
-  const Eigen::Vector3d ref_n = aruco_obs.front().R_cam_marker.col(2).normalized();
-  normals.push_back(ref_n);
-
-  for (size_t i = 1; i < aruco_obs.size(); i++)
-  {
-    Eigen::Vector3d n = aruco_obs[i].R_cam_marker.col(2).normalized();
-    if (n.dot(ref_n) < 0.0) n = -n;
-    normals.push_back(n);
-  }
-
-  Eigen::Vector3d avg_n = Eigen::Vector3d::Zero();
-  for (const auto &n : normals) avg_n += n;
-  if (avg_n.norm() < 1e-6) return false;
-  avg_n.normalize();
-
-  for (const auto &n : normals)
-  {
-    const double cos_angle = std::clamp(n.dot(avg_n), -1.0, 1.0);
-    const double diff_deg = std::acos(cos_angle) * kRadToDeg;
-    observed_max_diff_deg = std::max(observed_max_diff_deg, diff_deg);
-  }
-
-  return observed_max_diff_deg <= max_normal_diff_deg;
-}
-
-double computeCenterSpread(const std::vector<VIOManager::ArucoObservation> &aruco_obs,
-                           const Eigen::Vector3d &board_center)
-{
-  if (aruco_obs.empty()) return 0.0;
-
-  double sqr_sum = 0.0;
-  for (const auto &obs : aruco_obs)
-  {
-    sqr_sum += (obs.tvec - board_center).squaredNorm();
-  }
-  return std::sqrt(sqr_sum / static_cast<double>(aruco_obs.size()));
-}
-
-double computeRotationDispersionDeg(const std::vector<VIOManager::ArucoObservation> &aruco_obs,
-                                    const Eigen::Matrix3d &avg_rotation)
-{
-  if (aruco_obs.empty()) return 0.0;
-
-  double max_diff_deg = 0.0;
-  for (const auto &obs : aruco_obs)
-  {
-    const Eigen::Matrix3d delta_R = avg_rotation.transpose() * obs.R_cam_marker;
-    Eigen::AngleAxisd aa(delta_R);
-    const double diff_deg = std::fabs(aa.angle()) * kRadToDeg;
-    max_diff_deg = std::max(max_diff_deg, diff_deg);
-  }
-  return max_diff_deg;
-}
-
-bool estimateBoardPoseFromCentersPnP(const std::vector<std::vector<cv::Point2f>> &corners,
-                                     double half_dx,
-                                     double half_dy,
-                                     const cv::Mat &camera_matrix,
-                                     const cv::Mat &dist_coeffs,
-                                     Eigen::Vector3d &board_center,
-                                     Eigen::Matrix3d &board_rotation,
-                                     double &mean_reproj_error_px)
-{
-  mean_reproj_error_px = std::numeric_limits<double>::infinity();
-  if (corners.size() != 4) return false;
-
-  std::vector<cv::Point2f> image_centers;
-  image_centers.reserve(4);
-  for (const auto &corner_pts : corners)
-  {
-    if (corner_pts.size() != 4) return false;
-    image_centers.push_back(markerCenter2D(corner_pts));
-  }
-
-  const std::vector<cv::Point3f> object_points = {
-      cv::Point3f(static_cast<float>(-half_dx), static_cast<float>(half_dy), 0.0f),
-      cv::Point3f(static_cast<float>(half_dx), static_cast<float>(half_dy), 0.0f),
-      cv::Point3f(static_cast<float>(-half_dx), static_cast<float>(-half_dy), 0.0f),
-      cv::Point3f(static_cast<float>(half_dx), static_cast<float>(-half_dy), 0.0f)};
-
-  std::array<int, 4> perm = {0, 1, 2, 3};
-  cv::Vec3d best_rvec(0, 0, 0);
-  cv::Vec3d best_tvec(0, 0, 0);
-  bool found = false;
-
-  do
-  {
-    std::vector<cv::Point2f> ordered_image_points = {
-        image_centers[perm[0]], image_centers[perm[1]], image_centers[perm[2]], image_centers[perm[3]]};
-
-    cv::Vec3d rvec(0, 0, 0), tvec(0, 0, 0);
-    const bool pnp_ok = cv::solvePnP(object_points,
-                                     ordered_image_points,
-                                     camera_matrix,
-                                     dist_coeffs,
-                                     rvec,
-                                     tvec,
-                                     false,
-                                     cv::SOLVEPNP_ITERATIVE);
-    if (!pnp_ok) continue;
-
-    cv::solvePnPRefineLM(object_points, ordered_image_points, camera_matrix, dist_coeffs, rvec, tvec);
-
-    std::vector<cv::Point2f> reproj_points;
-    cv::projectPoints(object_points, rvec, tvec, camera_matrix, dist_coeffs, reproj_points);
-
-    double reproj_err_sum = 0.0;
-    for (size_t i = 0; i < reproj_points.size(); i++)
-    {
-      reproj_err_sum += cv::norm(reproj_points[i] - ordered_image_points[i]);
-    }
-    const double mean_err = reproj_err_sum / static_cast<double>(reproj_points.size());
-
-    if (!found || mean_err < mean_reproj_error_px)
-    {
-      found = true;
-      mean_reproj_error_px = mean_err;
-      best_rvec = rvec;
-      best_tvec = tvec;
-    }
-  } while (std::next_permutation(perm.begin(), perm.end()));
-
-  if (!found) return false;
-
-  cv::Mat R_cv;
-  cv::Rodrigues(best_rvec, R_cv);
-  for (int r = 0; r < 3; r++)
-  {
-    for (int c = 0; c < 3; c++)
-    {
-      board_rotation(r, c) = R_cv.at<double>(r, c);
-    }
-  }
-  board_center = Eigen::Vector3d(best_tvec[0], best_tvec[1], best_tvec[2]);
-  return true;
-}
-} // namespace
 
 // 添加辅助函数：反对称矩阵
 Eigen::Matrix3d VIOManager::skewSymmetric(const Eigen::Vector3d& v)
@@ -4594,204 +4690,97 @@ void VIOManager::detect_qr(cv::Mat img)
   aruco_time_pnp = 0.0;
   aruco_board_candidates = 0;
   aruco_board_accepted = 0;
-
-  current_board_observations_.clear();
+  current_landmark_observations_.clear();
 
   std::vector<int> ids;
-  std::vector<std::vector<cv::Point2f>> corners, rejectedCandidates;
-
+  std::vector<std::vector<cv::Point2f>> corners, rejected_candidates;
   const double t_detect_begin = omp_get_wtime();
-  cv::aruco::detectMarkers(img, dictionary_, corners, ids, parameters_, rejectedCandidates);
+  cv::aruco::detectMarkers(img, dictionary_, corners, ids, parameters_,
+                           rejected_candidates);
   aruco_time_detect_markers = omp_get_wtime() - t_detect_begin;
-  
-  if (ids.empty()) 
+  if (ids.empty())
   {
     aruco_time_total = omp_get_wtime() - t_aruco_begin;
     return;
   }
 
   const double t_draw_begin = omp_get_wtime();
-  draw_qr(ids, corners, rejectedCandidates);
+  draw_qr(ids, corners, rejected_candidates);
   aruco_time_draw = omp_get_wtime() - t_draw_begin;
 
-  const double t_group_begin = omp_get_wtime();
-  std::map<int, std::vector<size_t>> grouped_indices;
-  for (size_t i = 0; i < ids.size(); i++)
+  const double t_pnp_begin = omp_get_wtime();
+  if (legacy_same_id_mode_)
   {
-    grouped_indices[ids[i]].push_back(i);
+    const auto results = legacy_board_adapter_.estimate(
+        current_visual_time, ids, corners, cameraMatrix_, distCoeffs_);
+    for (const auto &result : results)
+    {
+      current_landmark_observations_.push_back(result.observation);
+      const auto &d = result.diagnostic;
+      legacy_association_file_ << std::setprecision(12)
+          << current_visual_time << ',' << d.landmark_id << ','
+          << d.detected_markers << ',' << d.assignment_count << ','
+          << d.feasible_assignment_count << ',';
+      for (std::size_t i = 0; i < d.selected_slots.size(); ++i)
+      {
+        if (i) legacy_association_file_ << '|';
+        legacy_association_file_ << d.selected_slots[i];
+      }
+      legacy_association_file_ << ',' << d.best_rmse_px << ','
+          << d.second_assignment_rmse_px << ',' << d.assignment_gap_px
+          << ',' << d.assignment_ratio << ',' << d.pnp_feasible << ','
+          << d.factor_admitted << ',' << d.reason << '\n';
+      if (++legacy_association_pending_rows_ >= aruco_diagnostics_flush_rows)
+      {
+        legacy_association_file_.flush();
+        legacy_association_pending_rows_ = 0;
+      }
+    }
   }
-  aruco_board_candidates = static_cast<int>(grouped_indices.size());
+  else
+    current_landmark_observations_ = landmark_frontend_.estimate(
+        current_visual_time, ids, corners, cameraMatrix_, distCoeffs_);
+  aruco_time_pnp = omp_get_wtime() - t_pnp_begin;
+  aruco_board_candidates =
+      static_cast<int>(current_landmark_observations_.size());
 
-  for (const auto& group : grouped_indices)
+  for (const landmark::LandmarkObservation &observation :
+       current_landmark_observations_)
   {
-    double t_gate_anchor = omp_get_wtime();
-    const int board_id = group.first;
-    const std::vector<size_t>& indices = group.second;
-
-    if (indices.size() != 4)
+    if (observation.pose_valid)
     {
-      printf("\033[1;33m[Aruco] Skip board %d: require exactly 4 same-ID markers, got %zu.\033[0m\n",
-             board_id, indices.size());
-      continue;
+      ++aruco_board_accepted;
+      ROS_DEBUG("[Aruco] t=%.6f landmark=%d markers=%d corners=%d method=%s candidates=%d selected=%d rmse=%.3f second=%.3f gap=%.3f distance=%.3f angle=%.2f area=%.1f covariance=%s pose_valid=1",
+                observation.timestamp,
+                observation.landmark_id,
+                observation.visible_marker_count,
+                observation.visible_corner_count,
+                observation.pnp_method.c_str(),
+                observation.pnp_candidate_count,
+                observation.selected_candidate_index,
+                observation.reprojection_rmse_px,
+                observation.second_candidate_rmse_px,
+                observation.candidate_rmse_gap_px,
+                observation.estimated_distance_m,
+                observation.view_angle_deg,
+                observation.visible_corner_hull_area_px2,
+                observation.covariance_method.c_str());
     }
-
-    std::vector<std::vector<cv::Point2f>> board_corners;
-    board_corners.reserve(4);
-    for (size_t idx : indices)
+    else
     {
-      board_corners.push_back(corners[idx]);
+      ROS_WARN_THROTTLE(
+          2.0,
+          "[Aruco] landmark=%d markers=%d corners=%d method=%s pnp=%d pose_valid=0 reason=%s",
+          observation.landmark_id,
+          observation.visible_marker_count,
+          observation.visible_corner_count,
+          observation.pnp_method.c_str(),
+          static_cast<int>(observation.pnp_success),
+          observation.reject_reason.c_str());
     }
-
-    double quad_area_px = 0.0;
-    if (!checkQuadGeometry2D(board_corners, aruco_min_quad_area_px, quad_area_px))
-    {
-      printf("\033[1;33m[Aruco] Skip board %d: invalid 2D quad geometry, area %.1f px^2.\033[0m\n",
-             board_id, quad_area_px);
-      continue;
-    }
-
-    aruco_time_group_gate += omp_get_wtime() - t_gate_anchor;
-
-    const double t_pose_begin = omp_get_wtime();
-    std::vector<cv::Vec3d> rvecs, tvecs;
-    cv::aruco::estimatePoseSingleMarkers(board_corners, marker_size, cameraMatrix_, distCoeffs_, rvecs, tvecs);
-    aruco_time_pose_estimate += omp_get_wtime() - t_pose_begin;
-    if (rvecs.size() != 4 || tvecs.size() != 4)
-    {
-      printf("\033[1;33m[Aruco] Skip board %d: pose estimation size mismatch.\033[0m\n", board_id);
-      continue;
-    }
-
-    t_gate_anchor = omp_get_wtime();
-
-    auto it = board_world_positions_.find(board_id);
-    if (it == board_world_positions_.end())
-    {
-      board_world_positions_[board_id] = Eigen::Vector3d::Zero();
-      board_world_orientations_[board_id] = Eigen::Matrix3d::Identity();
-      board_world_flag_[board_id] = false;
-      printf("\033[1;33m[Aruco] Auto-register board %d as uninitialized.\033[0m\n", board_id);
-    }
-
-    std::vector<ArucoObservation> aruco_obs;
-    aruco_obs.reserve(4);
-    std::vector<Eigen::Vector3d> marker_positions;
-    marker_positions.reserve(4);
-
-    double min_marker_z = std::numeric_limits<double>::max();
-    double max_marker_z = -std::numeric_limits<double>::max();
-    bool depth_valid = true;
-
-    for (size_t i = 0; i < 4; i++)
-    {
-      ArucoObservation obs;
-      obs.id = board_id;
-      obs.tvec = Eigen::Vector3d(tvecs[i][0], tvecs[i][1], tvecs[i][2]);
-
-      const double marker_distance = obs.tvec.norm();
-      if (marker_distance < aruco_min_marker_depth || marker_distance > aruco_max_marker_depth)
-      {
-        printf("\033[1;33m[Aruco] Skip board %d: marker distance %.3f m out of range.\033[0m\n",
-               board_id, marker_distance);
-        depth_valid = false;
-        break;
-      }
-
-      min_marker_z = std::min(min_marker_z, obs.tvec.z());
-      max_marker_z = std::max(max_marker_z, obs.tvec.z());
-
-      cv::Mat R_cam_marker_cv;
-      cv::Rodrigues(rvecs[i], R_cam_marker_cv);
-      for (int row = 0; row < 3; row++)
-      {
-        for (int col = 0; col < 3; col++)
-        {
-          obs.R_cam_marker(row, col) = R_cam_marker_cv.at<double>(row, col);
-        }
-      }
-
-      aruco_obs.push_back(obs);
-      marker_positions.push_back(obs.tvec);
-
-      cv::drawFrameAxes(img_cp, cameraMatrix_, distCoeffs_, rvecs[i], tvecs[i], 0.1);
-    }
-    if (!depth_valid) continue;
-
-    if ((max_marker_z - min_marker_z) > aruco_max_marker_depth_diff)
-    {
-      printf("\033[1;33m[Aruco] Skip board %d: depth spread %.3f m too large.\033[0m\n",
-             board_id, max_marker_z - min_marker_z);
-      continue;
-    }
-
-    double max_rel_pair_err = 0.0;
-    if (!checkPairwiseDistanceConsistency(marker_positions,
-                                          board_config_.delta_width_qr_center,
-                                          board_config_.delta_height_qr_center,
-                                          aruco_pair_distance_rel_tol,
-                                          max_rel_pair_err))
-    {
-      printf("\033[1;33m[Aruco] Skip board %d: pairwise distance inconsistency %.3f.\033[0m\n",
-             board_id, max_rel_pair_err);
-      continue;
-    }
-
-    double max_normal_diff_deg = 0.0;
-    if (!checkNormalConsistency(aruco_obs, aruco_max_normal_diff_deg, max_normal_diff_deg))
-    {
-      printf("\033[1;33m[Aruco] Skip board %d: normal inconsistency %.2f deg.\033[0m\n",
-             board_id, max_normal_diff_deg);
-      continue;
-    }
-
-    aruco_time_group_gate += omp_get_wtime() - t_gate_anchor;
-
-    Eigen::Vector3d board_center;
-    Eigen::Matrix3d board_rotation;
-    int valid_count = 4;
-    double board_reproj_error_px = 0.0;
-    const double t_pnp_begin = omp_get_wtime();
-    const bool pnp_ok = estimateBoardPoseFromCentersPnP(board_corners,
-                                                        board_config_.delta_width_qr_center,
-                                                        board_config_.delta_height_qr_center,
-                                                        cameraMatrix_,
-                                                        distCoeffs_,
-                                                        board_center,
-                                                        board_rotation,
-                                                        board_reproj_error_px);
-    aruco_time_pnp += omp_get_wtime() - t_pnp_begin;
-    if (!pnp_ok)
-    {
-      printf("\033[1;33m[Aruco] Skip board %d: joint board pose optimization failed.\033[0m\n", board_id);
-      continue;
-    }
-
-    BoardObservation board_obs;
-    board_obs.board_id = board_id;
-    board_obs.center_tvec = board_center;
-    board_obs.center_R_cam_board = board_rotation;
-    board_obs.valid_count = valid_count;
-    board_obs.geometry_valid = true;
-    board_obs.center_spread_m = computeCenterSpread(aruco_obs, board_center);
-    board_obs.rotation_dispersion_deg = computeRotationDispersionDeg(aruco_obs, board_rotation);
-    current_board_observations_.push_back(board_obs);
-    aruco_board_accepted++;
-
-    printf("\033[1;32m[Aruco] Board %d accepted: center [%.3f, %.3f, %.3f], spread %.3f m, rot-disp %.2f deg, area %.1f px^2, reproj %.3f px\033[0m\n",
-           board_id,
-           board_center.x(),
-           board_center.y(),
-           board_center.z(),
-           board_obs.center_spread_m,
-           board_obs.rotation_dispersion_deg,
-           quad_area_px,
-           board_reproj_error_px);
   }
-
-  aruco_time_group_gate = omp_get_wtime() - t_group_begin;
   aruco_time_total = omp_get_wtime() - t_aruco_begin;
 }
-
 void VIOManager::draw_qr(
   std::vector<int>& ids, 
   std::vector<std::vector<cv::Point2f>>& corners, 
@@ -4800,7 +4789,7 @@ void VIOManager::draw_qr(
   // 绘制检测到的标签
   //if (ids.size() > 0) cv::aruco::drawDetectedMarkers(imageCopy_, corners, ids);
 
-  // 遍历每一个检测到的 Aruco 标记
+  // 遍历每一个 Aruco 标记
   for (size_t i = 0; i < ids.size(); i++)
   {
       // 获取当前 marker 的四个角点 [4个点, 2坐标(x,y)]，数据类型是 float
@@ -4869,237 +4858,405 @@ void VIOManager::draw_qr(
 
 }
 
-void VIOManager::updateStateWithBoardObservation()
+void VIOManager::logLandmarkDiagnostic(
+    const landmark::LandmarkObservation &observation,
+    const std::string &stage,
+    const std::string &reason,
+    double nis, int dof)
 {
-  if (current_board_observations_.empty()) return;
-
-  for (const auto& board_obs : current_board_observations_)
+  if (!landmark_diagnostics_file_.is_open()) return;
+  auto csvText = [](std::string text) {
+    std::replace(text.begin(), text.end(), ',', ';');
+    std::replace(text.begin(), text.end(), '\n', ' ');
+    return text;
+  };
+  std::ostringstream marker_ids;
+  for (size_t i = 0; i < observation.visible_marker_ids.size(); ++i)
   {
-    if (board_obs.valid_count != 4 || !board_obs.geometry_valid)
+    if (i) marker_ids << '|';
+    marker_ids << observation.visible_marker_ids[i];
+  }
+  const Eigen::Vector3d &t = observation.T_camera_landmark.translation();
+  const Eigen::Quaterniond q(observation.T_camera_landmark.linear());
+  const landmark::Matrix6d &covariance =
+      observation.pose_covariance_camera;
+  const double rotation_trace = covariance.topLeftCorner<3, 3>().trace();
+  const double translation_trace = covariance.bottomRightCorner<3, 3>().trace();
+  landmark_diagnostics_file_ << std::setprecision(12)
+      << observation.timestamp << ',' << observation.landmark_id << ','
+      << marker_ids.str() << ',' << observation.visible_marker_count << ','
+      << observation.visible_corner_count << ','
+      << t.x() << ',' << t.y() << ',' << t.z() << ','
+      << q.w() << ',' << q.x() << ',' << q.y() << ',' << q.z() << ','
+      << observation.board_normal_camera.x() << ','
+      << observation.board_normal_camera.y() << ','
+      << observation.board_normal_camera.z() << ','
+      << observation.estimated_distance_m << ','
+      << observation.view_angle_deg << ','
+      << observation.visible_corner_hull_area_px2 << ','
+      << observation.reprojection_rmse_px << ','
+      << csvText(observation.pnp_method) << ','
+      << observation.pnp_candidate_count << ','
+      << observation.selected_candidate_index << ','
+      << observation.best_candidate_rmse_px << ','
+      << observation.second_candidate_rmse_px << ','
+      << observation.candidate_rmse_gap_px << ','
+      << observation.candidate_rmse_ratio << ','
+      << observation.positive_depth << ',' << observation.front_facing << ','
+      << observation.pose_valid << ',' << observation.covariance_valid << ','
+      << csvText(observation.covariance_method) << ','
+      << rotation_trace << ',' << translation_trace << ','
+      << csvText(stage) << ',' << csvText(reason) << ','
+      << nis << ',' << dof << '\n';
+  if (++landmark_diagnostics_pending_rows_ >= aruco_diagnostics_flush_rows)
+  {
+    landmark_diagnostics_file_.flush();
+    landmark_diagnostics_pending_rows_ = 0;
+  }
+}
+
+void VIOManager::routeLandmarkObservations()
+{
+  const landmark::RouteResult result = landmark_observation_router_.route(
+      current_landmark_observations_,
+      [this](const landmark::LandmarkObservationRouter::Batch &) {
+        updateStateWithBoardObservation(false);
+      },
+      [this](const landmark::LandmarkObservationRouter::Batch &) {
+        updateStateWithBoardObservation(true);
+      },
+      [this](const landmark::LandmarkObservationRouter::Batch &batch) {
+        for (const auto &observation : batch)
+        {
+          if (!observation.pose_valid || !observation.covariance_valid)
+          {
+            logLandmarkDiagnostic(observation, "GLOBAL_INPUT_REJECT",
+                                  "INVALID_FRONTEND_OBSERVATION",
+                                  std::numeric_limits<double>::quiet_NaN(), 0);
+            continue;
+          }
+          if (!persistent_landmark_backend_)
+          {
+            logLandmarkDiagnostic(observation, "GLOBAL_INPUT_REJECT",
+                                  "GLOBAL_BACKEND_UNAVAILABLE",
+                                  std::numeric_limits<double>::quiet_NaN(), 0);
+            continue;
+          }
+          if (next_landmark_observation_id_ == 0)
+          {
+            logLandmarkDiagnostic(observation, "GLOBAL_INPUT_REJECT",
+                                  "OBSERVATION_ID_EXHAUSTED",
+                                  std::numeric_limits<double>::quiet_NaN(), 0);
+            continue;
+          }
+          landmark::GlobalLandmarkInput input;
+          input.observation_id = next_landmark_observation_id_++;
+          input.observation = observation;
+          input.local_pose_timestamp = observation.timestamp;
+          input.local_pose_reference.linear() = state->rot_end;
+          input.local_pose_reference.translation() = state->pos_end;
+          input.local_pose_covariance = state->cov.block<6, 6>(0, 0);
+          input.raw_lio_weak_geometry = lidar_degenerated;
+          input.camera_extrinsic_id = "active_Rci_Pci";
+          const M3D R_ic = Rci.transpose();
+          const V3D p_ic = -R_ic * Pci;
+          input.T_body_camera.linear() = R_ic;
+          input.T_body_camera.translation() = p_ic;
+          input.landmark_initial_guess.linear() =
+              state->rot_end * R_ic * observation.T_camera_landmark.linear();
+          input.landmark_initial_guess.translation() = state->pos_end +
+              state->rot_end * (p_ic + R_ic *
+              observation.T_camera_landmark.translation());
+          input.landmark_initial_covariance =
+              landmark::initializeLandmarkCovariance(
+                  input.local_pose_covariance,
+                  observation.pose_covariance_camera,
+                  state->rot_end, R_ic, p_ic,
+                  observation.T_camera_landmark.translation());
+          std::string reason;
+          const bool accepted = persistent_landmark_backend_->submit(input, &reason);
+          logLandmarkDiagnostic(observation,
+                                accepted ? "GLOBAL_INPUT_QUEUED" : "GLOBAL_INPUT_REJECT",
+                                reason, std::numeric_limits<double>::quiet_NaN(), 0);
+          if (!accepted)
+            ROS_WARN_THROTTLE(2.0, "[Aruco] global input id=%lu landmark=%d rejected=%s",
+                              static_cast<unsigned long>(input.observation_id),
+                              observation.landmark_id, reason.c_str());
+        }
+      });
+  if (result.accepted) return;
+
+  for (const landmark::LandmarkObservation &observation :
+       current_landmark_observations_)
+    logLandmarkDiagnostic(observation, "ROUTER_REJECT", result.reason,
+                          std::numeric_limits<double>::quiet_NaN(), 0);
+  ROS_WARN_THROTTLE(
+      2.0, "[Aruco] fusion_mode=%s rejected %zu observations: %s; no fallback consumer was invoked",
+      landmark::fusionModeName(result.mode),
+      current_landmark_observations_.size(), result.reason.c_str());
+}
+
+void VIOManager::updateStateWithBoardObservation(bool apply_esikf_update)
+{
+  if (current_landmark_observations_.empty()) return;
+  bool state_changed = false;
+  const M3D R_ic = Rci.transpose();
+  const V3D p_ic = -R_ic * Pci;
+
+  for (const landmark::LandmarkObservation &observation :
+       current_landmark_observations_)
+  {
+    auto reject = [&](const std::string &stage, const std::string &reason,
+                      double nis = std::numeric_limits<double>::quiet_NaN(),
+                      int dof = 0) {
+      logLandmarkDiagnostic(observation, stage, reason, nis, dof);
+      ROS_DEBUG("[Aruco] landmark=%d stage=%s rejected=%s markers=%d",
+                observation.landmark_id, stage.c_str(), reason.c_str(),
+                observation.visible_marker_count);
+    };
+
+    if (!observation.pose_valid)
     {
-      printf("\033[1;33m[Aruco] Skip update: invalid board observation (count=%d, geometry=%d).\033[0m\n",
-             board_obs.valid_count, static_cast<int>(board_obs.geometry_valid));
+      reject("FRONTEND_REJECT", observation.reject_reason);
+      continue;
+    }
+    if (!observation.covariance_valid)
+    {
+      reject("COVARIANCE_REJECT", observation.covariance_reason);
+      continue;
+    }
+    if (observation.view_angle_deg > aruco_max_view_angle_deg)
+    {
+      reject("QUALITY_REJECT", "view_angle_above_limit");
+      continue;
+    }
+    if (observation.visible_corner_hull_area_px2 <
+        aruco_min_visible_hull_area_px2)
+    {
+      reject("QUALITY_REJECT", "visible_corner_hull_area_below_limit");
       continue;
     }
 
-    int board_id = board_obs.board_id;
+    const int board_id = observation.landmark_id;
+    const M3D R_wi(state->rot_end);
+    const V3D p_wi(state->pos_end);
+    const landmark::Matrix6d robot_pose_covariance =
+        state->cov.block<6, 6>(0, 0);
     auto flag_it = board_world_flag_.find(board_id);
     if (flag_it == board_world_flag_.end())
     {
       board_world_flag_[board_id] = false;
       board_world_positions_[board_id] = Eigen::Vector3d::Zero();
       board_world_orientations_[board_id] = Eigen::Matrix3d::Identity();
+      board_world_covariances_[board_id] =
+          landmark::Matrix6d::Constant(
+              std::numeric_limits<double>::quiet_NaN());
       flag_it = board_world_flag_.find(board_id);
     }
 
-    M3D R_wi(state->rot_end);
-    V3D P_wi(state->pos_end);
-
-    M3D R_ic = Rci.transpose();
-    V3D P_ic = -R_ic * Pci;
-
-    M3D R_wc = R_wi * R_ic;
-    V3D P_wc = P_wi + R_wi * P_ic;
-
-    V3D P_w_board_estimated = R_wc * board_obs.center_tvec + P_wc;
-    M3D R_w_board_estimated = R_wc * board_obs.center_R_cam_board;
+    const landmark::MeasurementLinearization estimate =
+        landmark::linearizeLandmarkMeasurement(
+            R_wi, p_wi, R_ic, p_ic,
+            observation.T_camera_landmark.linear(),
+            observation.T_camera_landmark.translation(),
+            flag_it->second ? board_world_orientations_[board_id]
+                            : Eigen::Matrix3d::Identity(),
+            flag_it->second ? board_world_positions_[board_id]
+                            : Eigen::Vector3d::Zero());
 
     if (!flag_it->second)
     {
-      printf("\033[1;33m===========================================\033[0m\n");
-      printf("\033[1;33m[Board %d] FIRST OBSERVATION - Initializing Landmark\033[0m\n", board_id);
-
-      board_world_positions_[board_id] = P_w_board_estimated;
-      board_world_orientations_[board_id] = R_w_board_estimated;
-      board_world_flag_[board_id] = true;
-
-      printf("\033[1;33m  Initialized world position: [%.3f, %.3f, %.3f] meters\033[0m\n",
-            P_w_board_estimated.x(), P_w_board_estimated.y(), P_w_board_estimated.z());
-
-      Eigen::Vector3d euler_angles = R_w_board_estimated.eulerAngles(0, 1, 2);
-      printf("\033[1;33m  Initialized orientation (RPY): [%.1f, %.1f, %.1f] degrees\033[0m\n",
-            euler_angles.x() * 180.0 / M_PI,
-            euler_angles.y() * 180.0 / M_PI,
-            euler_angles.z() * 180.0 / M_PI);
-
-      printf("\033[1;33m  Valid markers: %d\033[0m\n", board_obs.valid_count);
-      printf("\033[1;33m===========================================\033[0m\n");
-      continue;
-    }
-
-    const Eigen::Vector3d& P_w_board = board_world_positions_[board_id];
-    const Eigen::Matrix3d& R_w_board = board_world_orientations_[board_id];
-
-    printf("\033[1;32m===========================================\033[0m\n");
-    printf("\033[1;32m[Board %d] RE-OBSERVATION - Updating State\033[0m\n", board_id);
-    printf("\033[1;32m  Estimated:  [%.3f, %.3f, %.3f] meters\033[0m\n",
-          P_w_board_estimated.x(), P_w_board_estimated.y(), P_w_board_estimated.z());
-    printf("\033[1;32m  Landmark:   [%.3f, %.3f, %.3f] meters\033[0m\n",
-          P_w_board.x(), P_w_board.y(), P_w_board.z());
-
-    V3D position_error = P_w_board_estimated - P_w_board;
-    const double position_error_norm = position_error.norm();
-    printf("\033[1;32m  Position Error: [%.3f, %.3f, %.3f] meters, Norm: %.3fm\033[0m\n",
-        position_error.x(), position_error.y(), position_error.z(), position_error_norm);
-
-    const M3D R_flip_pi_x = (Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitX())).toRotationMatrix();
-    const M3D R_flip_pi_y = (Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitY())).toRotationMatrix();
-    const M3D R_flip_pi_z = (Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitZ())).toRotationMatrix();
-
-    auto computeRotationErrorDeg = [](const M3D &R_candidate, const M3D &R_ref) {
-      Eigen::AngleAxisd aa(R_candidate * R_ref.transpose());
-      return aa.angle() * 180.0 / M_PI;
-    };
-
-    const std::array<M3D, 4> candidate_flips = {
-        M3D::Identity(),
-        R_flip_pi_x,
-        R_flip_pi_y,
-        R_flip_pi_z};
-
-    M3D R_cam_board_used = board_obs.center_R_cam_board;
-    double orientation_error_deg = std::numeric_limits<double>::infinity();
-    double orientation_error_before = computeRotationErrorDeg(R_w_board_estimated, R_w_board);
-
-    for (const auto &R_flip : candidate_flips)
-    {
-      const M3D R_cam_candidate = board_obs.center_R_cam_board * R_flip;
-      const M3D R_w_candidate = R_wc * R_cam_candidate;
-      const double err_deg = computeRotationErrorDeg(R_w_candidate, R_w_board);
-      if (err_deg < orientation_error_deg)
+      if (observation.visible_marker_count <
+          aruco_initialization_min_markers)
       {
-        orientation_error_deg = err_deg;
-        R_cam_board_used = R_cam_candidate;
-        R_w_board_estimated = R_w_candidate;
+        reject("INITIALIZATION_REJECT", "insufficient_markers_for_initialization");
+        continue;
       }
-    }
-
-    if (orientation_error_deg + 1e-3 < orientation_error_before)
-    {
-      printf("\033[1;33m[Aruco] Board %d: resolve orientation ambiguity (%.2f -> %.2f deg).\033[0m\n",
-             board_id,
-             orientation_error_before,
-             orientation_error_deg);
-    }
-
-    printf("\033[1;32m  Orientation Error: %.2f degrees\033[0m\n", orientation_error_deg);
-
-    const Eigen::Vector3d n_est = R_w_board_estimated.col(2).normalized();
-    const Eigen::Vector3d n_ref = R_w_board.col(2).normalized();
-    const double normal_error_deg =
-        std::acos(std::clamp(n_est.dot(n_ref), -1.0, 1.0)) * 180.0 / M_PI;
-    printf("\033[1;32m  Normal Error: %.2f degrees\033[0m\n", normal_error_deg);
-
-    if (position_error_norm > aruco_max_position_residual ||
-        normal_error_deg > aruco_normal_gate_deg)
-    {
-      printf("\033[1;33m[Aruco] Reject update for board %d: residual gate failed (pos %.3f/%.3f m, normal %.2f/%.2f deg).\033[0m\n",
-             board_id,
-             position_error_norm,
-             aruco_max_position_residual,
-             normal_error_deg,
-             aruco_normal_gate_deg);
+      board_world_positions_[board_id] =
+          estimate.p_world_landmark_estimate;
+      board_world_orientations_[board_id] =
+          estimate.R_world_landmark_estimate;
+      board_world_covariances_[board_id] =
+          landmark::initializeLandmarkCovariance(
+              robot_pose_covariance, observation.pose_covariance_camera,
+              R_wi, R_ic, p_ic,
+              observation.T_camera_landmark.translation());
+      if (!board_world_covariances_[board_id].allFinite())
+      {
+        board_world_positions_[board_id].setZero();
+        board_world_orientations_[board_id].setIdentity();
+        reject("INITIALIZATION_REJECT", "initialized_covariance_nonfinite");
+        continue;
+      }
+      board_world_flag_[board_id] = true;
+      logLandmarkDiagnostic(observation,
+                            apply_esikf_update ? "LEGACY_INITIALIZED"
+                                               : "OBSERVE_ONLY_INITIALIZED",
+                            "first_observation_covariance_propagated",
+                            std::numeric_limits<double>::quiet_NaN(), 0);
+      ROS_INFO("[Aruco] landmark=%d initialized markers=%d covariance=%s",
+               board_id, observation.visible_marker_count,
+               observation.covariance_method.c_str());
       continue;
     }
 
-    double distance = board_obs.center_tvec.norm();
-    printf("\033[1;32m  Distance from camera: %.3f meters\033[0m\n", distance);
-
-    Eigen::Vector3d euler_angles = R_w_board.eulerAngles(0, 1, 2);
-    printf("\033[1;32m  Landmark orientation (RPY): [%.1f, %.1f, %.1f] degrees\033[0m\n",
-          euler_angles.x() * 180.0 / M_PI,
-          euler_angles.y() * 180.0 / M_PI,
-          euler_angles.z() * 180.0 / M_PI);
-
-    printf("\033[1;32m  Valid markers: %d\033[0m\n", board_obs.valid_count);
-
-    int observed_count = 0;
-    for (const auto& flag : board_world_flag_)
+    if (observation.visible_marker_count < 4 &&
+        (!aruco_partial_fusion_en ||
+         observation.visible_marker_count < aruco_partial_min_markers))
     {
-      if (flag.second) observed_count++;
+      reject("FUSION_POLICY_REJECT",
+             aruco_partial_fusion_en ? "below_partial_min_markers"
+                                     : "partial_fusion_disabled");
+      continue;
     }
-    printf("\033[1;32m  Total observed landmarks: %d/%zu\033[0m\n", observed_count, board_world_flag_.size());
-    printf("\033[1;32m===========================================\033[0m\n");
+    const auto covariance_it = board_world_covariances_.find(board_id);
+    if (covariance_it == board_world_covariances_.end() ||
+        !covariance_it->second.allFinite())
+    {
+      reject("COVARIANCE_REJECT", "landmark_prior_covariance_invalid");
+      continue;
+    }
 
-    V3D position_residual = P_w_board - P_w_board_estimated;
-
-    const bool use_orientation_update =
-        aruco_use_orientation_update && (orientation_error_deg <= aruco_max_orientation_residual_deg);
-
-    Eigen::MatrixXd H_aruco;
-    Eigen::MatrixXd R_aruco;
-    Eigen::VectorXd z_aruco;
-
-    M3D p_hat = skewSymmetric(board_obs.center_tvec);
-    MD(3, 3) J_pos_R = -R_wc * p_hat;
-    MD(3, 3) J_pos_t = -M3D::Identity();
-
-    double quality_weight = 1.0 + board_obs.center_spread_m + board_obs.rotation_dispersion_deg / 45.0;
-    quality_weight = std::max(1.0, quality_weight);
-
+    const bool use_orientation_update = aruco_use_orientation_update;
+    const landmark::Matrix6d repeated_covariance =
+        landmark::repeatedObservationCovariance(
+            observation.pose_covariance_camera, covariance_it->second,
+            estimate.R_world_camera,
+            observation.T_camera_landmark.linear(),
+            estimate.R_world_landmark_estimate,
+            estimate.residual.head<3>());
+    Eigen::VectorXd residual;
+    Eigen::MatrixXd H;
+    Eigen::MatrixXd measurement_covariance;
+    int dof = use_orientation_update ? 6 : 3;
     if (use_orientation_update)
     {
-      M3D R_cw = R_wc.transpose();
-      M3D residual_R = R_cam_board_used.transpose() * R_cw * R_w_board;
-      Eigen::AngleAxisd angle_axis(residual_R);
-      V3D orientation_residual = angle_axis.angle() * angle_axis.axis();
-
-      z_aruco.resize(6);
-      z_aruco.segment<3>(0) = position_residual;
-      z_aruco.segment<3>(3) = orientation_residual;
-
-      H_aruco = Eigen::MatrixXd::Zero(6, 6);
-      MD(3, 3) J_ori_R = -M3D::Identity();
-      MD(3, 3) J_ori_t = MD(3, 3)::Zero();
-      H_aruco.block<3, 3>(0, 0) = J_pos_R;
-      H_aruco.block<3, 3>(0, 3) = J_pos_t;
-      H_aruco.block<3, 3>(3, 0) = J_ori_R;
-      H_aruco.block<3, 3>(3, 3) = J_ori_t;
-
-      R_aruco = Eigen::MatrixXd::Zero(6, 6);
-      R_aruco.block<3, 3>(0, 0) = Eigen::Matrix3d::Identity() * aruco_position_noise_base * quality_weight;
-      R_aruco.block<3, 3>(3, 3) = Eigen::Matrix3d::Identity() * aruco_orientation_noise_base * quality_weight;
+      residual = estimate.residual;
+      H = estimate.H;
+      measurement_covariance = repeated_covariance;
     }
     else
     {
-      z_aruco = position_residual;
-      H_aruco = Eigen::MatrixXd::Zero(3, 6);
-      H_aruco.block<3, 3>(0, 0) = J_pos_R;
-      H_aruco.block<3, 3>(0, 3) = J_pos_t;
-      R_aruco = Eigen::MatrixXd::Identity(3, 3) * aruco_position_noise_base * quality_weight;
+      residual = estimate.residual.tail<3>();
+      H = estimate.H.bottomRows<3>();
+      measurement_covariance =
+          repeated_covariance.bottomRightCorner<3, 3>();
     }
 
-    Eigen::MatrixXd H_T = H_aruco.transpose();
-    Eigen::MatrixXd S = H_aruco * state->cov.block<6, 6>(0, 0) * H_T + R_aruco;
-    Eigen::MatrixXd K = state->cov.block<6, 6>(0, 0) * H_T * S.inverse();
+    const Eigen::MatrixXd innovation_covariance =
+        H * robot_pose_covariance * H.transpose() +
+        measurement_covariance;
+    const double nis_threshold =
+        landmark::chiSquareThreshold(dof, aruco_nis_confidence);
+    const landmark::NisResult nis = landmark::evaluateNis(
+        residual, innovation_covariance, nis_threshold,
+        aruco_nis_max_condition);
+    if (!nis.valid || !nis.accepted)
+    {
+      reject("NIS_REJECT", nis.reason, nis.value, dof);
+      continue;
+    }
 
-    Eigen::VectorXd dx = K * z_aruco;
+    // NIS is primary. These legacy geometric limits remain only as a
+    // secondary safety layer with explicit reasons.
+    const double position_error_norm = estimate.residual.tail<3>().norm();
+    const double orientation_error_deg =
+        estimate.residual.head<3>().norm() * 180.0 / M_PI;
+    const Eigen::Vector3d n_est =
+        estimate.R_world_landmark_estimate.col(2).normalized();
+    const Eigen::Vector3d n_ref =
+        board_world_orientations_[board_id].col(2).normalized();
+    const double normal_error_deg = std::acos(std::clamp(
+        n_est.dot(n_ref), -1.0, 1.0)) * 180.0 / M_PI;
+    if (position_error_norm > aruco_max_position_residual)
+    {
+      reject("SECONDARY_GATE_REJECT", "position_residual_above_limit",
+             nis.value, dof);
+      continue;
+    }
+    if (normal_error_deg > aruco_normal_gate_deg)
+    {
+      reject("SECONDARY_GATE_REJECT", "normal_residual_above_limit",
+             nis.value, dof);
+      continue;
+    }
+    if (use_orientation_update &&
+        orientation_error_deg > aruco_max_orientation_residual_deg)
+    {
+      reject("SECONDARY_GATE_REJECT", "orientation_residual_above_limit",
+             nis.value, dof);
+      continue;
+    }
 
-    V3D rot_add = dx.head<3>();
-    V3D trans_add = dx.tail<3>();
-    const double rot_step_deg = rot_add.norm() * 57.3;
-    const double trans_step_m = trans_add.norm();
-    const double max_rot_step_deg = std::max(0.1, aruco_update_max_rot_step_deg);
-    const double max_trans_step_m = std::max(0.01, aruco_update_max_trans_step_m);
+    if (!apply_esikf_update)
+    {
+      logLandmarkDiagnostic(observation, "OBSERVE_ONLY_NIS_ACCEPT",
+                            "diagnostic_only_no_state_update",
+                            nis.value, dof);
+      continue;
+    }
+
+    Eigen::LDLT<Eigen::MatrixXd> innovation_ldlt(
+        0.5 * (innovation_covariance + innovation_covariance.transpose()));
+    if (innovation_ldlt.info() != Eigen::Success)
+    {
+      reject("NUMERICAL_REJECT", "innovation_factorization_failed",
+             nis.value, dof);
+      continue;
+    }
+    const Eigen::MatrixXd K =
+        innovation_ldlt.solve(H * robot_pose_covariance).transpose();
+    Eigen::VectorXd dx = K * residual;
+    if (!K.allFinite() || !dx.allFinite())
+    {
+      reject("NUMERICAL_REJECT", "kalman_solution_nonfinite",
+             nis.value, dof);
+      continue;
+    }
+
+    const double rot_step_deg = dx.head<3>().norm() * 180.0 / M_PI;
+    const double trans_step_m = dx.tail<3>().norm();
+    const double max_rot_step_deg =
+        std::max(0.1, aruco_update_max_rot_step_deg);
+    const double max_trans_step_m =
+        std::max(0.01, aruco_update_max_trans_step_m);
     double step_scale = 1.0;
-    if (rot_step_deg > max_rot_step_deg) step_scale = std::min(step_scale, max_rot_step_deg / std::max(rot_step_deg, 1e-6));
-    if (trans_step_m > max_trans_step_m) step_scale = std::min(step_scale, max_trans_step_m / std::max(trans_step_m, 1e-6));
+    if (rot_step_deg > max_rot_step_deg)
+      step_scale = std::min(
+          step_scale, max_rot_step_deg / std::max(rot_step_deg, 1e-9));
+    if (trans_step_m > max_trans_step_m)
+      step_scale = std::min(
+          step_scale, max_trans_step_m / std::max(trans_step_m, 1e-9));
     if (step_scale < 1.0) dx *= step_scale;
 
-    state->rot_end = state->rot_end * Exp(dx.head<3>());
+    state->rot_end =
+        state->rot_end * landmark::so3Exp(dx.head<3>());
     state->pos_end += dx.tail<3>();
-
-    Eigen::MatrixXd I_KH = Eigen::Matrix<double, 6, 6>::Identity() - K * H_aruco;
-    state->cov.block<6, 6>(0, 0) = I_KH * state->cov.block<6, 6>(0, 0) * I_KH.transpose() + K * R_aruco * K.transpose();
-
-    printf("[Aruco] Updated with board %d, mode=%s, residual norm: %.6f, quality weight: %.3f\n",
-           board_id,
-           use_orientation_update ? "pos+ori" : "pos-only",
-           z_aruco.norm(),
-           quality_weight);
+    const landmark::Matrix6d I_KH =
+        landmark::Matrix6d::Identity() - K * H;
+    state->cov.block<6, 6>(0, 0) =
+        I_KH * robot_pose_covariance * I_KH.transpose() +
+        K * measurement_covariance * K.transpose();
+    state->cov.block<6, 6>(0, 0) =
+        0.5 * (state->cov.block<6, 6>(0, 0) +
+               state->cov.block<6, 6>(0, 0).transpose());
+    state_changed = true;
+    logLandmarkDiagnostic(
+        observation,
+        observation.visible_marker_count == 4 ? "LEGACY_FULL_FUSION_ACCEPT"
+                                              : "LEGACY_PARTIAL_FUSION_ACCEPT",
+        step_scale < 1.0 ? "accepted_step_limited" : "accepted",
+        nis.value, dof);
+    ROS_DEBUG("[Aruco] landmark=%d fused mode=%s markers=%d NIS=%.3f/%.3f",
+              board_id, use_orientation_update ? "SE3" : "POSITION",
+              observation.visible_marker_count, nis.value, nis_threshold);
   }
-  snapStateForDeterminism(*state);
-  updateFrameState(*state);
+
+  if (state_changed)
+  {
+    snapStateForDeterminism(*state);
+    updateFrameState(*state);
+  }
 }
 
 void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg,
@@ -5414,7 +5571,7 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg,
       return;
     }
     resetGrid();
-    current_board_observations_.clear();
+    current_landmark_observations_.clear();
     aruco_time_detect_markers = 0.0;
     aruco_time_draw = 0.0;
     aruco_time_group_gate = 0.0;
@@ -5498,7 +5655,7 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg,
   }
   else
   {
-    current_board_observations_.clear();
+    current_landmark_observations_.clear();
     aruco_time_detect_markers = 0.0;
     aruco_time_draw = 0.0;
     aruco_time_group_gate = 0.0;
@@ -5592,7 +5749,7 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg,
     if (run_aruco_this_frame)
     {
       const double t_aruco_update_begin = omp_get_wtime();
-      updateStateWithBoardObservation();
+      routeLandmarkObservations();
       aruco_time_update = omp_get_wtime() - t_aruco_update_begin;
     }
     else
@@ -5602,12 +5759,12 @@ void VIOManager::processFrame(cv::Mat &img, vector<pointWithVar> &pg,
   }
   else
   {
-    const bool aruco_update_ran = run_aruco_this_frame && !current_board_observations_.empty();
+    const bool aruco_update_ran = run_aruco_this_frame && !current_landmark_observations_.empty();
 
     if (aruco_update_ran)
     {
       const double t_aruco_update_begin = omp_get_wtime();
-      updateStateWithBoardObservation();
+      routeLandmarkObservations();
       aruco_time_update = omp_get_wtime() - t_aruco_update_begin;
     }
     else

@@ -7,6 +7,8 @@
        default="/tiaozhanbei/camera/left/image" />
   <arg name="decoded_image_topic"
        default="/petrochemical/camera/left/image_raw" />
+  <arg name="aruco_landmarks_en" default="false" />
+  <arg name="landmark_fusion_mode" default="observe_only" />
 
   <param name="/use_sim_time" value="$(arg use_sim_time)" />
   <rosparam command="load" file="$(find fast_livo)/config/petrochemical_site/mapping.yaml" />
@@ -27,6 +29,10 @@
   <param name="/p4b_snapshot/enable" value="false" />
   <param name="/p5_seed_basin/enable" value="false" />
   <param name="/p5_seed_basin/prototype_enable" value="false" />
+  <param name="/aruco_landmarks/aruco_landmarks_en"
+         value="$(arg aruco_landmarks_en)" />
+  <param name="/aruco_landmarks/fusion_mode"
+         value="$(arg landmark_fusion_mode)" />
 
   <node pkg="image_transport" type="republish"
         name="competition_image_decoder"

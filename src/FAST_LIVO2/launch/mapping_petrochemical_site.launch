@@ -5,12 +5,18 @@
   <arg name="img_time_offset" default="0.0" />
   <arg name="visual_adaptive_covariance_relaxed_en" default="false" />
   <arg name="visual_adaptive_covariance_relaxed_min_points" default="20" />
+  <arg name="aruco_landmarks_en" default="false" />
+  <arg name="landmark_fusion_mode" default="observe_only" />
 
   <param name="/use_sim_time" value="$(arg use_sim_time)" />
   <rosparam command="load" file="$(find fast_livo)/config/petrochemical_site/mapping.yaml" />
   <rosparam command="load" file="$(find fast_livo)/config/petrochemical_site/calibration.yaml" />
   <rosparam command="load" file="$(find fast_livo)/config/petrochemical_site/gnss_adapter.yaml" />
   <rosparam command="load" file="$(find fast_livo)/config/petrochemical_site/rtk_fixed_lag_backend.yaml" />
+  <param name="/aruco_landmarks/aruco_landmarks_en"
+         value="$(arg aruco_landmarks_en)" />
+  <param name="/aruco_landmarks/fusion_mode"
+         value="$(arg landmark_fusion_mode)" />
   <!-- Diagnostic override; the default preserves the dataset configuration. -->
   <param name="/time_offset/img_time_offset" value="$(arg img_time_offset)" />
   <param name="/vio/visual_adaptive_covariance_relaxed_en"

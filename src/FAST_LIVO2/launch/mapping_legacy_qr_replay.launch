@@ -1,0 +1,12 @@
+<launch>
+  <arg name="output_root" default="/tmp/legacy_qr_replay" />
+  <arg name="use_sim_time" default="true" />
+  <param name="/use_sim_time" value="$(arg use_sim_time)" />
+  <rosparam command="load" file="$(find fast_livo)/config/mid360.yaml" />
+  <rosparam command="load" file="$(find fast_livo)/config/legacy_qr_replay/mapping.yaml" />
+  <param name="/diagnostics/livo_scan_contract_en" value="true" />
+  <node pkg="fast_livo" type="fastlivo_mapping" name="laserMapping" output="screen">
+    <param name="save_path" value="$(arg output_root)" />
+    <rosparam file="$(find fast_livo)/config/legacy_qr_replay/camera_1280x1024.yaml" />
+  </node>
+</launch>

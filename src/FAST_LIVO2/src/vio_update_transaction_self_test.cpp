@@ -699,12 +699,117 @@ void checkVisualShadowProductionRestore()
           "visual shadow left the cached frame on the candidate pose");
   std::cout << "visual shadow: production state/covariance/LiDAR-map boundary passed\n";
 }
+
+void checkLandmarkFirstObservationIsInitializationOnly()
+{
+  cv::Mat image(32, 32, CV_8UC1, cv::Scalar(80));
+  vk::PinholeCamera camera(32, 32, 1.0, 20, 20, 16, 16);
+  StatesGroup state;
+  state.cov.setIdentity();
+  const StatesGroup before = state;
+
+  VIOManager vio;
+  vio.visual_submap = new SubSparseMap;
+  vio.cam = &camera;
+  vio.new_frame_.reset(new Frame(&camera, image));
+  vio.Rci.setIdentity();
+  vio.Pci.setZero();
+  vio.state = &state;
+
+  landmark::LandmarkObservation observation;
+  observation.landmark_id = 7;
+  observation.visible_marker_ids = {0, 1, 2, 3};
+  observation.visible_marker_count = 4;
+  observation.visible_corner_count = 16;
+  observation.pose_finite = true;
+  observation.se3_valid = true;
+  observation.positive_depth = true;
+  observation.front_facing = true;
+  observation.pose_valid = true;
+  observation.view_angle_deg = 0.0;
+  observation.visible_corner_hull_area_px2 = 1000.0;
+  observation.covariance_valid = true;
+  observation.covariance_method = "SELF_TEST_DIAGONAL";
+  observation.pose_covariance_camera.setZero();
+  observation.pose_covariance_camera.diagonal().head<3>().setConstant(1e-4);
+  observation.pose_covariance_camera.diagonal().tail<3>().setConstant(4e-4);
+  observation.T_camera_landmark.linear() =
+      Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitX()).toRotationMatrix();
+  observation.T_camera_landmark.translation() = V3D(0.1, -0.2, 3.0);
+  vio.current_landmark_observations_.push_back(observation);
+  vio.board_world_flag_[7] = false;
+  vio.board_world_positions_[7] = V3D::Zero();
+  vio.board_world_orientations_[7] = M3D::Identity();
+  vio.landmark_observation_router_.setMode(
+      landmark::FusionMode::LegacyEsikf);
+
+  vio.routeLandmarkObservations();
+  require(vio.board_world_flag_[7], "first landmark observation did not initialize");
+  require((vio.board_world_positions_[7] -
+           observation.T_camera_landmark.translation()).norm() < 1e-12,
+          "first landmark world pose composition is wrong");
+  require((state - before).norm() == 0.0 &&
+          (state.cov - before.cov).cwiseAbs().maxCoeff() == 0.0,
+          "first landmark observation constrained the pose that initialized it");
+
+  observation.visible_marker_count = 3;
+  observation.visible_corner_count = 12;
+  observation.T_camera_landmark.translation().x() += 0.2;
+  vio.current_landmark_observations_ = {observation};
+  vio.routeLandmarkObservations();
+  require((state - before).norm() == 0.0 &&
+          (state.cov - before.cov).cwiseAbs().maxCoeff() == 0.0,
+          "L1 partial observation was implicitly accepted for fusion");
+  vio.aruco_partial_fusion_en = true;
+  vio.aruco_partial_min_markers = 3;
+  vio.routeLandmarkObservations();
+  require((state - before).norm() > 0.0,
+          "explicitly enabled three-marker fusion did not update state");
+
+  const StatesGroup before_observe_only = state;
+  observation.T_camera_landmark.translation().x() += 0.01;
+  vio.current_landmark_observations_ = {observation};
+  vio.landmark_observation_router_.setMode(
+      landmark::FusionMode::ObserveOnly);
+  vio.routeLandmarkObservations();
+  require((state - before_observe_only).norm() == 0.0 &&
+              (state.cov - before_observe_only.cov).cwiseAbs().maxCoeff() == 0.0,
+          "observe_only landmark routing modified the ESIKF state");
+
+  vio.landmark_observation_router_.setMode(
+      landmark::FusionMode::GlobalBackend);
+  observation.timestamp = 0.5;
+  vio.current_landmark_observations_ = {observation};
+  landmark::PersistentBackendConfig backend_config;
+  vio.persistent_landmark_backend_.reset(
+      new landmark::PersistentLandmarkBackend(backend_config, false));
+  vio.routeLandmarkObservations();
+  require(vio.persistent_landmark_backend_->queued() == 1,
+          "global_backend observation did not enter the queue");
+  require(vio.persistent_landmark_backend_->processOne(),
+          "global_backend observation was not processed");
+  landmark::PersistentLandmark registered;
+  require(vio.persistent_landmark_backend_->lookupLandmark(7, &registered) &&
+              registered.has_initial_guess && registered.has_optimized_estimate &&
+              registered.observation_count == 1,
+          "global_backend first observation was not optimized in the shadow graph");
+  landmark::GlobalCorrection correction;
+  require(!vio.persistent_landmark_backend_->latestCorrection(&correction) &&
+              !correction.valid,
+          "shadow graph emitted a production correction");
+  require((state - before_observe_only).norm() == 0.0 &&
+              (state.cov - before_observe_only.cov).cwiseAbs().maxCoeff() == 0.0,
+          "global_backend routing modified ESIKF");
+  std::cout << "landmark lifecycle: first observation initializes only; partial fusion is disabled by default and works only when explicitly enabled\n";
+  std::cout << "landmark routing: observe_only and queued global_backend leave ESIKF unchanged\n";
+}
 }
 
 int main(int argc, char **argv)
 {
   try
   {
+    ros::Time::init();
     // Keep the normal mathematical regressions independent of a ROS master.
     // Run this integration check separately with an isolated ROS_MASTER_URI.
     if (argc == 2 && std::string(argv[1]) == "--initialization-check")
@@ -732,6 +837,7 @@ int main(int argc, char **argv)
     check(false);
     check(true);
     checkVisualShadowProductionRestore();
+    checkLandmarkFirstObservationIsInitializationOnly();
     return 0;
   }
   catch (const std::exception &error)

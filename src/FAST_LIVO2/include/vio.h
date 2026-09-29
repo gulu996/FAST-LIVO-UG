@@ -15,6 +15,11 @@ which is included as part of this source code package.
 
 #include "voxel_map.h"
 #include "feature.h"
+#include "landmark_architecture.h"
+#include "landmark_persistent_backend.h"
+#include "landmark_frontend.h"
+#include "landmark_legacy_adapter.h"
+#include "landmark_measurement.h"
 #include <opencv2/imgproc/imgproc_c.h>
 #include <opencv2/aruco.hpp>
 #include <opencv2/aruco/dictionary.hpp>
@@ -22,7 +27,9 @@ which is included as part of this source code package.
 #include <pcl/filters/voxel_grid.h>
 #include <cstdint>
 #include <cmath>
+#include <fstream>
 #include <limits>
+#include <memory>
 #include <set>
 #include <unordered_set>
 #include <vikit/math_utils.h>
@@ -256,14 +263,10 @@ public:
   cv::Mat distCoeffs_;
   cv::Ptr<cv::aruco::DetectorParameters> parameters_;
   cv::Ptr<cv::aruco::Dictionary> dictionary_;
-  double marker_size;
   bool aruco_landmarks_en = false;
-  double aruco_min_quad_area_px = 300.0;
-  double aruco_pair_distance_rel_tol = 0.2;
-  double aruco_max_normal_diff_deg = 15.0;
-  double aruco_max_marker_depth_diff = 0.6;
   double aruco_min_marker_depth = 0.1;
   double aruco_max_marker_depth = 10.0;
+  double aruco_max_reprojection_rmse_px = 8.0;
   double aruco_max_position_residual = 0.6;
   double aruco_max_orientation_residual_deg = 25.0;
   double aruco_position_noise_base = 0.01;
@@ -273,44 +276,40 @@ public:
   double aruco_normal_gate_deg = 35.0;
   double aruco_update_max_rot_step_deg = 1.0;
   double aruco_update_max_trans_step_m = 0.08;
+  bool aruco_partial_fusion_en = false;
+  int aruco_partial_min_markers = 3;
+  int aruco_initialization_min_markers = 4;
+  double aruco_max_view_angle_deg = 70.0;
+  double aruco_min_visible_hull_area_px2 = 100.0;
+  double aruco_nis_confidence = 0.99;
+  double aruco_nis_max_condition = 1e10;
+  double aruco_initialized_rotation_variance_rad2 = 0.01;
+  double aruco_initialized_translation_variance_m2 = 0.04;
+  bool aruco_diagnostics_csv_en = false;
+  std::string aruco_diagnostics_csv_path = "landmark_diagnostics.csv";
+  int aruco_diagnostics_flush_rows = 20;
+  landmark::FusionMode landmark_fusion_mode_ =
+      landmark::FusionMode::ObserveOnly;
+  landmark::LandmarkObservationRouter landmark_observation_router_;
+  std::unique_ptr<landmark::PersistentLandmarkBackend> persistent_landmark_backend_;
+  bool landmark_backend_final_summary_written_ = false;
+  std::uint64_t next_landmark_observation_id_ = 1;
 
-  struct BoardObservation 
-  {
-    int board_id;                     // 地标板子ID
-    Eigen::Vector3d center_tvec;      // 地标中心点在相机坐标系下的位置
-    Eigen::Matrix3d center_R_cam_board; // 地标中心点到相机的旋转
-    int valid_count;                  // 有效的Aruco码数量（固定为4个）
-    bool geometry_valid = false;      // 同ID四码几何一致性是否通过
-    double center_spread_m = 0.0;     // 四码中心离散度（米）
-    double rotation_dispersion_deg = 0.0; // 四码姿态离散度（度）
-    //double timestamp;
-  };
-
-  struct ArucoObservation 
-  {
-    int id;
-    Eigen::Vector3d tvec;
-    Eigen::Matrix3d R_cam_marker;
-    //double timestamp;
-  };
-
+  // Legacy/session-only reference state. It supports observe-only NIS
+  // diagnostics and the legacy ESIKF experiment path; it is not persistent
+  // landmark ownership and none of these values are ground truth.
   std::map<int, bool> board_world_flag_;
   std::map<int, Eigen::Vector3d> board_world_positions_;  // 地标中心点的世界坐标
   std::map<int, Eigen::Matrix3d> board_world_orientations_; // 地标中心点的世界姿态
-  std::vector<BoardObservation> current_board_observations_;
-
-  struct BoardConfig 
-  {
-    double width;     // 宽度（X方向）
-    double height;    // 高度（Y方向）
-    double marker_size; // Aruco码尺寸 
-    double delta_width_qr_center;
-    double delta_height_qr_center;
-  };
-  BoardConfig board_config_;
-    
-  // 四个Aruco码在板子坐标系下的相对位置
-  std::map<int, Eigen::Vector3d> aruco_relative_positions_;
+  std::map<int, landmark::Matrix6d> board_world_covariances_;
+  landmark::LandmarkFrontend landmark_frontend_;
+  landmark::LegacySameIdBoardAdapter legacy_board_adapter_;
+  bool legacy_same_id_mode_ = false;
+  std::ofstream legacy_association_file_;
+  int legacy_association_pending_rows_ = 0;
+  std::vector<landmark::LandmarkObservation> current_landmark_observations_;
+  std::ofstream landmark_diagnostics_file_;
+  int landmark_diagnostics_pending_rows_ = 0;
 
   int patch_pyrimid_level, patch_size, patch_size_total, patch_size_half, border, warp_len;
   enum class WarpRejectReason
@@ -515,7 +514,7 @@ public:
   bool console_timing_print_en = true;
   int console_timing_print_stride = 1;
   
-  SubSparseMap *visual_submap;
+  SubSparseMap *visual_submap = nullptr;
   std::vector<std::vector<V3D>> rays_with_sample_points;
 
   double compute_jacobian_time, update_ekf_time;
@@ -585,6 +584,7 @@ public:
 
   VIOManager();
   ~VIOManager();
+  void shutdownPersistentLandmarkBackend();
   bool updateStateInverse(cv::Mat img, int level);
   bool updateState(cv::Mat img, int level);
   void processFrame(cv::Mat &img, vector<pointWithVar> &pg,
@@ -630,7 +630,12 @@ public:
   V3F getInterpolatedPixel(cv::Mat img, V2D pc);
   void detect_qr(cv::Mat img);
   void draw_qr(std::vector<int>& ids, std::vector<std::vector<cv::Point2f>>& corners, std::vector<std::vector<cv::Point2f>>& rejectedCandidates);
-  void updateStateWithBoardObservation();
+  void routeLandmarkObservations();
+  void updateStateWithBoardObservation(bool apply_esikf_update = true);
+  void logLandmarkDiagnostic(const landmark::LandmarkObservation &observation,
+                             const std::string &stage,
+                             const std::string &reason,
+                             double nis, int dof);
   Eigen::Matrix3d Exp(const Eigen::Vector3d& w);
   Eigen::Matrix3d skewSymmetric(const Eigen::Vector3d& v);
   void initializeTimingLogFileIfNeeded();

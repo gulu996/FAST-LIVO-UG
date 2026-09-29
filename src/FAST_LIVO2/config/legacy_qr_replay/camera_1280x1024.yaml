@@ -1,0 +1,14 @@
+# Source: the commented 1280x1024 block in config/camera_pinhole_mid360.yaml.
+# Dedicated to 20m.bag and 40m.bag; do not replace production camera settings.
+cam_model: Pinhole
+cam_width: 1280
+cam_height: 1024
+scale: 1.0
+cam_fx: 1273.525961550808
+cam_fy: 1277.522948544942
+cam_cx: 612.4210788294631
+cam_cy: 492.3065791444537
+cam_d0: -0.11113915388551408
+cam_d1: 0.1861858287554102
+cam_d2: -0.0007605139024049476
+cam_d3: -0.001935749448109755
