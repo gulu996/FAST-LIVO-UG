@@ -297,6 +297,7 @@ gnss_fusion:
   enable: true # MID360自采数据的GNSS固定时滞后端总开关
 
 publish:
+  visionpro_frame_en: true # 仅发布当前帧；无 Gateway 订阅时不转换点云
   dense_map_en: true
   pub_effect_point_en: true  # 已启用特征点可视化
   pub_plane_en: false

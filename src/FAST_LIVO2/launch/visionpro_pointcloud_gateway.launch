@@ -1,0 +1,5 @@
+<launch>
+  <node pkg="fast_livo" type="visionpro_pointcloud_gateway" name="visionpro_pointcloud_gateway" output="screen">
+    <rosparam command="load" file="$(find fast_livo)/config/visionpro_pointcloud_gateway.yaml" />
+  </node>
+</launch>

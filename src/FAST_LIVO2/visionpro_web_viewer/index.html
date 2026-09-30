@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VPPC Live Point Cloud</title>
+  <style>
+    :root { color-scheme: dark; font: 14px system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #0b1119; color: #e4ebf4; }
+    canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+    .panel { position: fixed; z-index: 1; top: 12px; width: min(350px, calc(100vw - 24px));
+             max-height: calc(100vh - 24px); overflow-y: auto; padding: 14px; background: #182331e8;
+             border: 1px solid #3d4d60; border-radius: 8px; }
+    #status-panel { left: 12px; }
+    #controls-panel { right: 12px; }
+    .panel[hidden] { display: none; }
+    #panel-visibility { position: fixed; z-index: 2; right: 12px; bottom: 12px; margin: 0;
+                        display: flex; gap: 8px; align-items: center; padding: 8px 12px;
+                        background: #182331e8; border: 1px solid #3d4d60; border-radius: 8px; }
+    h1, h2 { margin: 0 0 10px; font-size: 16px; }
+    h3 { margin: 18px 0 8px; border-top: 1px solid #3d4d60; padding-top: 12px; font-size: 14px; }
+    small { display: block; color: #a8b7c9; margin-top: 4px; }
+    output { color: #a8d9ff; font-variant-numeric: tabular-nums; }
+    .roi-axis { margin-top: 10px; }
+    .roi-axis label { display: flex; justify-content: space-between; gap: 8px; }
+    .range-pair { position: relative; height: 32px; --lo: 0%; --hi: 100%; touch-action: none; cursor: ew-resize; }
+    .range-pair::before, .range-pair::after { content: ""; position: absolute; top: 14px; height: 5px; border-radius: 4px; }
+    .range-pair::before { left: 0; right: 0; background: #46566a; }
+    .range-pair::after { left: var(--lo); width: calc(var(--hi) - var(--lo)); background: #83c9ff; }
+    .range-pair input { position: absolute; inset: 0; width: 100%; height: 32px; margin: 0;
+                        appearance: none; background: transparent; pointer-events: none; }
+    .range-pair input::-webkit-slider-runnable-track { background: transparent; }
+    .range-pair input::-moz-range-track { background: transparent; }
+    .range-pair input::-webkit-slider-thumb { appearance: none; width: 18px; height: 18px;
+                                              border: 2px solid #e4ebf4; border-radius: 50%;
+                                              background: #328ccb; pointer-events: auto; }
+    .range-pair input::-moz-range-thumb { width: 16px; height: 16px;
+                                           border: 2px solid #e4ebf4; border-radius: 50%;
+                                           background: #328ccb; pointer-events: auto; }
+    dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 5px 14px; margin: 0; }
+    dt { color: #a8b7c9; }
+    dd { margin: 0; overflow-wrap: anywhere; }
+    label { display: block; margin: 10px 0 4px; }
+    input[type=url], input[type=number], select { width: 100%; padding: 7px; border: 1px solid #62758b; border-radius: 4px;
+                               background: #0f1926; color: #e4ebf4; }
+    input[type=range] { width: 100%; }
+    .row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+    .row > button { flex: 1; }
+    input[type=number] { width: 100%; }
+    .check { display: flex; gap: 8px; align-items: center; }
+    button { min-height: 34px; padding: 6px 10px; border: 1px solid #6b7f95; border-radius: 4px;
+             background: #243950; color: inherit; cursor: pointer; }
+    button:hover { background: #34516c; }
+    button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid #8ac7ff; }
+    #error { min-height: 1.2em; color: #ff9b9b; overflow-wrap: anywhere; }
+    @media (max-width: 740px) {
+      .panel { position: static; width: auto; max-height: none; margin: 8px; }
+      canvas { height: 60vh; }
+    }
+    body.panels-hidden canvas { height: 100vh; }
+  </style>
+  <script type="importmap">{"imports":{"three":"./vendor/three.module.js"}}</script>
+  <script type="module" src="./src/main.js"></script>
+</head>
+<body>
+  <canvas id="viewport" aria-label="Interactive live point cloud"></canvas>
+  <section class="panel" id="status-panel" aria-label="Viewer status">
+    <h1>VPPC Live Point Cloud</h1>
+    <dl>
+      <dt>Connection</dt><dd id="connection">Disconnected</dd>
+      <dt>Server</dt><dd id="server">—</dd>
+      <dt>Protocol</dt><dd>VPPC v1 · XYZI</dd>
+      <dt>Sequence</dt><dd id="sequence">—</dd>
+      <dt>Frame ID</dt><dd id="frame-id">—</dd>
+      <dt>Timestamp ns</dt><dd id="timestamp">—</dd>
+      <dt>Current Points</dt><dd id="points">0</dd>
+      <dt>History Voxels</dt><dd id="history-voxels">0</dd>
+      <dt>History Points</dt><dd id="history-points">0</dd>
+      <dt>Voxel Size</dt><dd id="history-voxel-size">0.010 m</dd>
+      <dt>History Memory</dt><dd id="history-memory">0 MB</dd>
+      <dt>Accumulation</dt><dd id="accumulation-status">OFF</dd>
+      <dt>Map Size</dt><dd id="map-size">—</dd>
+      <dt>Selected Points</dt><dd id="selected-points">0</dd>
+      <dt>Intensity</dt><dd id="intensity-range">—</dd>
+      <dt>Receive</dt><dd id="receive-hz">0 Hz</dd>
+      <dt>Render</dt><dd id="render-fps">0 FPS</dd>
+      <dt>Frame Size</dt><dd id="frame-size">0 KiB</dd>
+      <dt>Bandwidth</dt><dd id="bandwidth">0 MB/s</dd>
+      <dt>Dropped Viewer Frames</dt><dd id="viewer-drops">0</dd>
+      <dt>Malformed Frames</dt><dd id="malformed">0</dd>
+      <dt>GPU Geometries</dt><dd id="geometry-count">0</dd>
+      <dt>GPU Buffer Estimate</dt><dd id="buffer-size">0 MB</dd>
+      <dt>History Skipped Frames</dt><dd id="history-skipped">0</dd>
+    </dl>
+    <p id="error" role="alert"></p>
+  </section>
+  <section class="panel" id="controls-panel" aria-label="Viewer controls">
+    <h2>Controls</h2>
+    <label for="ws-url">WebSocket URL</label>
+    <input id="ws-url" type="url" spellcheck="false" aria-label="WebSocket URL">
+    <div class="row"><button id="connect" type="button">Connect</button><button id="disconnect" type="button">Disconnect</button></div>
+    <div class="row"><button id="reset" type="button">Reset View</button><button id="pause" type="button">Pause Rendering</button></div>
+    <label for="point-size">Point Size <span id="point-size-value">2</span> px</label>
+    <input id="point-size" type="range" min="1" max="10" step="1" value="2">
+    <label for="color-mode">Color</label>
+    <select id="color-mode"><option value="intensity">Intensity grayscale</option><option value="white">White</option></select>
+    <label class="check"><input id="show-axis" type="checkbox" checked>Show Axis (ROS XYZ)</label>
+    <label class="check"><input id="show-grid" type="checkbox" checked>Show Grid (ROS XY)</label>
+    <h3>Mapping</h3>
+    <label class="check"><input id="show-current" type="checkbox" checked> Show Current Frame</label>
+    <label class="check"><input id="show-history" type="checkbox"> Show History</label>
+    <label class="check"><input id="accumulate" type="checkbox"> Accumulate</label>
+    <label for="voxel-size">Voxel Size (m)</label>
+    <input id="voxel-size" type="number" min="0.001" step="0.001" value="0.010">
+    <small>Changing voxel size clears accumulated history.</small>
+    <label for="history-stride">History Update Every N Frames</label>
+    <input id="history-stride" type="number" min="1" max="20" step="1" value="1">
+    <button id="clear-history" type="button">Clear History</button>
+    <p id="mapping-message" role="status"></p>
+    <h3>ROI (ROS coordinates)</h3>
+    <label class="check"><input id="enable-roi" type="checkbox"> Enable ROI</label>
+    <div id="roi-controls">
+      <div class="roi-axis"><label for="roi-x-min">X <output id="roi-x-value">— m</output></label>
+        <div class="range-pair" id="roi-x-pair"><input id="roi-x-min" type="range" min="-1" max="1" disabled aria-label="X minimum"><input id="roi-x-max" type="range" min="-1" max="1" disabled aria-label="X maximum"></div></div>
+      <div class="roi-axis"><label for="roi-y-min">Y <output id="roi-y-value">— m</output></label>
+        <div class="range-pair" id="roi-y-pair"><input id="roi-y-min" type="range" min="-1" max="1" disabled aria-label="Y minimum"><input id="roi-y-max" type="range" min="-1" max="1" disabled aria-label="Y maximum"></div></div>
+      <div class="roi-axis"><label for="roi-z-min">Z <output id="roi-z-value">— m</output></label>
+        <div class="range-pair" id="roi-z-pair"><input id="roi-z-min" type="range" min="-1" max="1" disabled aria-label="Z minimum"><input id="roi-z-max" type="range" min="-1" max="1" disabled aria-label="Z maximum"></div></div>
+    </div>
+    <div class="row"><button id="reset-roi" type="button">Reset ROI</button><button id="fit-roi" type="button">Fit ROI to Map</button></div>
+    <p>Drag: rotate · Wheel/pinch: zoom · Right drag: pan</p>
+  </section>
+  <label id="panel-visibility"><input id="show-panels" type="checkbox" checked> Show panels</label>
+</body>
+</html>

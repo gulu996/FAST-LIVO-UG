@@ -345,6 +345,8 @@ public:
   ros::Subscriber sub_imu;
   ros::Subscriber sub_img;
   ros::Publisher pubLaserCloudFullRes;
+  ros::Publisher pubVisionProFrame;
+  bool visionpro_frame_en_ = false;
   ros::Publisher pubNormal;
   ros::Publisher pubSubVisualMap;
   ros::Publisher pubLaserCloudEffect;

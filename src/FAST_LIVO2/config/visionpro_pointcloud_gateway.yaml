@@ -1,0 +1,9 @@
+# Loaded under the gateway node's private namespace by its launch file.
+input_topic: /cloud_registered_frame
+listen_address: 0.0.0.0
+port: 8765
+voxel_size_m: 0.0
+max_range_m: 0.0
+max_pending_frames: 1
+print_statistics: true
+statistics_interval_s: 5.0

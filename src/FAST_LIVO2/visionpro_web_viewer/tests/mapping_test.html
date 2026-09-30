@@ -1,0 +1,106 @@
+<!doctype html><html><head><meta charset="utf-8"><title>M2/M3 mapping check</title>
+<script type="importmap">{"imports":{"three":"../vendor/three.module.js"}}</script></head>
+<body><canvas id="c" style="width:400px;height:300px"></canvas><div id="roi-controls">
+<div id="roi-x-pair"><input id="roi-x-min" type="range" disabled><input id="roi-x-max" type="range" disabled></div><output id="roi-x-value"></output>
+<div id="roi-y-pair"><input id="roi-y-min" type="range" disabled><input id="roi-y-max" type="range" disabled></div><output id="roi-y-value"></output>
+<div id="roi-z-pair"><input id="roi-z-min" type="range" disabled><input id="roi-z-max" type="range" disabled></div><output id="roi-z-value"></output>
+</div><pre id="result">RUNNING</pre>
+<script type="module">
+import { HistoryAccumulator } from '../src/history_accumulator.js';
+import { ROIController } from '../src/roi_controller.js';
+import { PointCloudRenderer } from '../src/pointcloud_renderer.js';
+const assert = (ok, label) => { if (!ok) throw new Error(label); };
+const frame = (points) => ({ count: points.length,
+  positions: new Float32Array(points.flatMap(p => p.slice(0, 3))),
+  intensities: new Float32Array(points.map(p => p[3])),
+  bounds: { low: [0, 0, 0], high: [1, 1, 1] } });
+let viewer;
+try {
+  const history = new HistoryAccumulator(1, 5);
+  const cube = frame([[0,0,0,1], [1,0,0,2], [0,1,0,3], [0,0,1,4], [1,1,1,5]]);
+  const repeated = frame([[0.1,0.1,0.1,99], [0,0,0,100]]);
+  history.insertChunk(cube, 0, cube.count, Infinity);
+  for (let i = 0; i < 100; i++) history.insertChunk(repeated, 0, repeated.count, Infinity);
+  assert(history.count === 5 && history.intensities[0] === 1, 'first-point voxel dedup');
+  assert(history.bounds.high.every(x => x === 1), 'history bounds');
+  const invalid = frame([[NaN,0,0,1], [1e30,0,0,1], [3,3,3,1]]);
+  history.insertChunk(invalid, 0, invalid.count, Infinity);
+  assert(history.count === 5 && history.limitReached, 'finite/safe index and point cap');
+  const full = { low: [0,0,0], high: [1,1,1] };
+  assert(history.countSelected({ low: [0, -1, -1], high: [0.5, 2, 2] }) === 3, 'X ROI');
+  assert(history.countSelected({ low: [-1, 0, -1], high: [2, 0.5, 2] }) === 3, 'Y ROI');
+  assert(history.countSelected({ low: [-1, -1, 0], high: [2, 2, 0.5] }) === 3, 'Z ROI');
+  assert(history.countSelected({ low: [0,0,0], high: [0.5,0.5,0.5] }) === 1, 'combined ROI');
+  assert(history.countSelected(null) === 5, 'ROI off');
+  let changes = 0;
+  const roi = new ROIController(document.getElementById('roi-controls'), () => changes++);
+  roi.setDataBounds(full);
+  assert(roi.bounds.low.every(x => x < 0) && roi.bounds.high.every(x => x > 1), 'auto bounds and margin');
+  roi.change(0, 1, 0.5);
+  assert(roi.bounds.high[0] === 0.5 && roi.customized, 'X upper slider');
+  roi.change(0, 0, 0.8);
+  assert(roi.bounds.low[0] === 0.5, 'min cannot exceed max');
+  roi.change(1, 0, 0.2);
+  roi.change(1, 1, 0.6);
+  roi.change(2, 0, 0.3);
+  roi.change(2, 1, 0.7);
+  assert(roi.bounds.low[1] === 0.2 && roi.bounds.high[2] === 0.7 && changes >= 5, 'XYZ dual sliders');
+  roi.fit();
+  assert(!roi.customized && roi.bounds.low.every(x => x < 0), 'reset / fit ROI');
+  viewer = new PointCloudRenderer(document.getElementById('c'));
+  viewer.setAxesVisible(false);
+  viewer.setGridVisible(false);
+  viewer.setFrame(cube);
+  viewer.setHistory(history.snapshot());
+  viewer.setShowHistory(true);
+  viewer.setRoi(true, { low: [0,0,0], high: [0.5,0.5,0.5] });
+  viewer.draw();
+  assert(viewer.cloud.visible && viewer.historyCloud.visible && viewer.cloud.material === viewer.overlayMaterial, 'separate current/history styles');
+  assert(viewer.historyGeometry.drawRange.count === 5 && viewer.roiBox.visible, 'history and ROI box');
+  assert(viewer.roiBox.box.max.x === 0.5 && viewer.roiBox.parent === viewer.rosRoot, 'ROI box shares ROS transform');
+  const geometries = viewer.geometryCount;
+  for (let i = 0; i < 30; i++) { viewer.setRoi(true, { low: [0,0,0], high: [0.4 + i / 100, 1, 1] }); viewer.draw(); }
+  assert(viewer.geometryCount === geometries, 'ROI slider does not rebuild GPU geometry');
+  viewer.setRoi(false, full);
+  assert(!viewer.roiBox.visible && !viewer.roiUniforms.uRoiEnabled.value && history.count === 5, 'ROI off preserves history');
+  viewer.setShowHistory(false);
+  viewer.setMode('white');
+  viewer.setPointSize(10);
+  viewer.scene.background.set(0x000000);
+  viewer.setFrame({ count: 2, positions: new Float32Array([-1,0,0, 1,0,0]),
+                    intensities: new Float32Array([100,100]),
+                    bounds: { low: [-1,0,0], high: [1,0,0] } });
+  viewer.camera.position.set(0, 0, 5);
+  viewer.controls.target.set(0, 0, 0);
+  viewer.camera.lookAt(0, 0, 0);
+  viewer.camera.updateMatrixWorld(true);
+  const gl = viewer.renderer.getContext();
+  const pixels = new Uint8Array(gl.drawingBufferWidth * gl.drawingBufferHeight * 4);
+  const brightCount = () => {
+    viewer.draw();
+    gl.readPixels(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    let n = 0;
+    for (let i = 0; i < pixels.length; i += 4) if (pixels[i] > 100 && pixels[i + 1] > 100) n++;
+    return n;
+  };
+  const allPixels = brightCount();
+  viewer.setRoi(true, { low: [-2,-1,-1], high: [0,1,1] });
+  viewer.roiBox.visible = false; // Isolate points for this pixel check.
+  const clippedPixels = brightCount();
+  assert(allPixels > 50 && clippedPixels > 20 && clippedPixels < allPixels * 0.7, `GPU ROI clip ${clippedPixels}/${allPixels}`);
+  viewer.setRoi(false, full);
+  viewer.clearHistory();
+  history.clear();
+  viewer.draw();
+  assert(history.count === 0 && viewer.historyGeometry.drawRange.count === 0 && viewer.geometry.drawRange.count === 2, 'clear preserves current');
+  history.setVoxelSize(0.5);
+  assert(history.count === 0 && history.voxelSize === 0.5, 'voxel change clears history');
+  roi.clearBounds();
+  assert(!roi.bounds && document.getElementById('roi-x-min').disabled, 'empty ROI reset');
+  document.getElementById('result').textContent = 'PASS M2/M3 voxel, cap, ROI XYZ, box, GPU reuse, clear, current regression';
+  document.body.dataset.result = 'PASS';
+} catch (error) {
+  document.getElementById('result').textContent = `FAIL ${error.stack || error}`;
+  document.body.dataset.result = 'FAIL';
+} finally { if (viewer) viewer.dispose(); }
+</script></body></html>

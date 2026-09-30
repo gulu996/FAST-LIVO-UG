@@ -222,6 +222,9 @@ add_dependencies(laser_mapping ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPO
 
 # Add the main executable
 add_executable(fastlivo_mapping src/main.cpp)
+add_executable(visionpro_pointcloud_gateway src/visionpro_pointcloud_gateway.cpp)
+target_link_libraries(visionpro_pointcloud_gateway ${catkin_LIBRARIES} ${Boost_LIBRARIES})
+add_dependencies(visionpro_pointcloud_gateway ${catkin_EXPORTED_TARGETS})
 add_executable(gnss_manager_self_test src/gnss_manager_self_test.cpp)
 add_executable(uwb_manager_self_test src/uwb_manager_self_test.cpp)
 add_executable(gnss_adapter_node src/gnss_adapter_node.cpp)

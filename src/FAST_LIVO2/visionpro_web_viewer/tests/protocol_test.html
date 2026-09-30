@@ -1,0 +1,47 @@
+<!doctype html><html><head><meta charset="utf-8"><title>VPPC decoder check</title></head>
+<body><pre id="result">RUNNING</pre>
+<script type="module">
+import { decodeFrame, HEADER_BYTES, POINT_STRIDE } from '../src/protocol.js';
+const assert = (ok, label) => { if (!ok) throw new Error(label); };
+const rejects = (buffer, label) => {
+  let failed = false;
+  try { decodeFrame(buffer); } catch { failed = true; }
+  assert(failed, label);
+};
+try {
+  const name = new TextEncoder().encode('camera_init');
+  const bytes = new ArrayBuffer(HEADER_BYTES + name.length + 2 * POINT_STRIDE);
+  const view = new DataView(bytes);
+  for (const [i, value] of [86, 80, 80, 67].entries()) view.setUint8(i, value);
+  view.setUint16(4, 1, true);
+  view.setUint16(6, 1, true);
+  view.setBigUint64(8, 42n, true);
+  view.setBigUint64(16, 123456789n, true);
+  view.setUint32(24, 2, true);
+  view.setUint16(28, POINT_STRIDE, true);
+  view.setUint16(30, name.length, true);
+  view.setUint32(32, 2 * POINT_STRIDE, true);
+  new Uint8Array(bytes, HEADER_BYTES, name.length).set(name);
+  const at = HEADER_BYTES + name.length;
+  [1, 2, 3, 0, -4, 5, 6, 100].forEach((value, i) => view.setFloat32(at + i * 4, value, true));
+  const frame = decodeFrame(bytes);
+  assert(frame.sequence === 42n && frame.timestampNs === 123456789n, 'u64 fields');
+  assert(frame.frameId === 'camera_init' && frame.count === 2 && frame.frameBytes === bytes.byteLength, 'metadata and frame size');
+  assert(frame.positions[0] === 1 && frame.positions[3] === -4, 'XYZ');
+  assert(frame.intensities[0] === 0 && frame.intensities[1] === 100, 'intensity');
+  assert(frame.bounds.low[0] === -4 && frame.bounds.high[2] === 6, 'bounds');
+  rejects(bytes.slice(0, 20), 'short header');
+  let bad = bytes.slice(0); new DataView(bad).setUint8(0, 0); rejects(bad, 'magic');
+  bad = bytes.slice(0); new DataView(bad).setUint16(28, 12, true); rejects(bad, 'stride');
+  bad = bytes.slice(0); new DataView(bad).setUint32(24, 0xffffffff, true); rejects(bad, 'count overflow');
+  bad = bytes.slice(0); new DataView(bad).setUint32(32, 16, true); rejects(bad, 'payload mismatch');
+  bad = bytes.slice(0, -1); rejects(bad, 'truncated payload');
+  bad = bytes.slice(0); new DataView(bad).setFloat32(at, NaN, true); rejects(bad, 'nonfinite point');
+  bad = bytes.slice(0); new DataView(bad).setUint8(HEADER_BYTES, 0xff); rejects(bad, 'invalid UTF-8');
+  document.getElementById('result').textContent = 'PASS VPPC v1 decoder and malformed boundaries';
+  document.body.dataset.result = 'PASS';
+} catch (error) {
+  document.getElementById('result').textContent = `FAIL ${error.stack || error}`;
+  document.body.dataset.result = 'FAIL';
+}
+</script></body></html>

@@ -523,6 +523,7 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<bool>("publish/pub_effect_point_en", pub_effect_point_en, false);
   nh.param<bool>("publish/dense_map_en", dense_map_en, false);
   nh.param<bool>("publish/colorize_cloud_en", colorize_cloud_en_, true);
+  nh.param<bool>("publish/visionpro_frame_en", visionpro_frame_en_, false);
   nh.param<int>("publish/publish_img_stride", publish_img_stride_, 1);
 
   nh.param<int>("lio/map_update_stride", lio_map_update_stride_, 1);
@@ -1876,6 +1877,8 @@ void LIVMapper::initializeSubscribersAndPublishers(ros::NodeHandle &nh, image_tr
   if (img_en) sub_img = nh.subscribe(img_topic, sub_img_queue_size_, &LIVMapper::img_cbk, this);
   
   pubLaserCloudFullRes = nh.advertise<sensor_msgs::PointCloud2>("/cloud_registered", 100);
+  if (visionpro_frame_en_)
+    pubVisionProFrame = nh.advertise<sensor_msgs::PointCloud2>("/cloud_registered_frame", 1);
   pubNormal = nh.advertise<visualization_msgs::MarkerArray>("visualization_marker", 100);
   pubSubVisualMap = nh.advertise<sensor_msgs::PointCloud2>("/cloud_visual_sub_map_before", 100);
   pubLaserCloudEffect = nh.advertise<sensor_msgs::PointCloud2>("/cloud_effected", 100);
@@ -3114,6 +3117,14 @@ void LIVMapper::handleLIO()
     RGBpointBodyToWorld(&laserCloudFullRes->points[i], &laserCloudWorld->points[i]);
   }
   *pcl_w_wait_pub = *laserCloudWorld;
+  if (visionpro_frame_en_ && pubVisionProFrame.getNumSubscribers() > 0)
+  {
+    sensor_msgs::PointCloud2 frame;
+    pcl::toROSMsg(*laserCloudWorld, frame);
+    frame.header.stamp.fromSec(LidarMeasures.last_lio_update_time);
+    frame.header.frame_id = "camera_init";
+    pubVisionProFrame.publish(frame);
+  }
 
   if (!img_en) publish_frame_world(pubLaserCloudFullRes, pubLaserCloudMap, vio_manager);
   if (pub_effect_point_en) publish_effect_world(pubLaserCloudEffect, voxelmap_manager->ptpl_list_);
