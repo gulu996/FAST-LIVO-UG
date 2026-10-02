@@ -61,7 +61,7 @@
     body.panels-hidden canvas { height: 100vh; }
   </style>
   <script type="importmap">{"imports":{"three":"./vendor/three.module.js"}}</script>
-  <script type="module" src="./src/main.js"></script>
+  <script type="module" src="./src/main.js?v=rgb2"></script>
 </head>
 <body>
   <canvas id="viewport" aria-label="Interactive live point cloud"></canvas>
@@ -70,7 +70,7 @@
     <dl>
       <dt>Connection</dt><dd id="connection">Disconnected</dd>
       <dt>Server</dt><dd id="server">—</dd>
-      <dt>Protocol</dt><dd>VPPC v1 · XYZI</dd>
+      <dt>Protocol</dt><dd id="protocol">VPPC v1 · waiting</dd>
       <dt>Sequence</dt><dd id="sequence">—</dd>
       <dt>Frame ID</dt><dd id="frame-id">—</dd>
       <dt>Timestamp ns</dt><dd id="timestamp">—</dd>
@@ -104,7 +104,7 @@
     <label for="point-size">Point Size <span id="point-size-value">2</span> px</label>
     <input id="point-size" type="range" min="1" max="10" step="1" value="2">
     <label for="color-mode">Color</label>
-    <select id="color-mode"><option value="intensity">Intensity grayscale</option><option value="white">White</option></select>
+    <select id="color-mode"><option value="auto">RGB / intensity rainbow</option><option value="white">White</option></select>
     <label class="check"><input id="show-axis" type="checkbox" checked>Show Axis (ROS XYZ)</label>
     <label class="check"><input id="show-grid" type="checkbox" checked>Show Grid (ROS XY)</label>
     <h3>Mapping</h3>

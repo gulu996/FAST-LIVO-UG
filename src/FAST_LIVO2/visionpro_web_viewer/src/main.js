@@ -1,7 +1,7 @@
-import { decodeFrame } from './protocol.js';
+import { decodeFrame } from './protocol.js?v=rgb2';
 import { Metrics } from './metrics.js';
-import { PointCloudRenderer } from './pointcloud_renderer.js';
-import { HistoryAccumulator } from './history_accumulator.js';
+import { PointCloudRenderer } from './pointcloud_renderer.js?v=rgb2';
+import { HistoryAccumulator } from './history_accumulator.js?v=rgb2';
 import { ROIController } from './roi_controller.js';
 
 const byId = (id) => document.getElementById(id);
@@ -206,6 +206,7 @@ function refreshStatus() {
   byId('frame-id').textContent = current?.frameId || '—';
   byId('timestamp').textContent = current ? current.timestampNs.toString() : '—';
   byId('points').textContent = current ? current.count.toLocaleString() : '0';
+  byId('protocol').textContent = current ? `VPPC v1 · ${current.rgb ? 'RGB' : 'intensity'}` : 'VPPC v1 · waiting';
   byId('history-voxels').textContent = history.count.toLocaleString();
   byId('history-points').textContent = history.count.toLocaleString();
   byId('history-voxel-size').textContent = `${history.voxelSize.toFixed(3)} m`;

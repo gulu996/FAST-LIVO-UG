@@ -30,10 +30,14 @@ constexpr size_t kMaxPayload = 64 * 1024 * 1024;
 void put(std::vector<uint8_t> &out, uint64_t value, unsigned bytes) {
   for (unsigned i = 0; i < bytes; ++i) out.push_back(static_cast<uint8_t>(value >> (8 * i)));
 }
-float readFloat(const uint8_t *p, bool big_endian) {
+uint32_t readWord(const uint8_t *p, bool big_endian) {
   uint32_t bits = 0;
   for (unsigned i = 0; i < 4; ++i)
     bits |= uint32_t(p[big_endian ? 3 - i : i]) << (8 * i);
+  return bits;
+}
+float readFloat(const uint8_t *p, bool big_endian) {
+  const uint32_t bits = readWord(p, big_endian);
   float value;
   std::memcpy(&value, &bits, sizeof(value));
   return value;
@@ -76,7 +80,7 @@ class Gateway {
  public:
   Gateway(ros::NodeHandle &nh, ros::NodeHandle &private_nh)
       : io_(), acceptor_(io_), work_(asio::make_work_guard(io_)) {
-    private_nh.param<std::string>("input_topic", topic_, "/cloud_registered_frame");
+    private_nh.param<std::string>("input_topic", topic_, "/cloud_registered");
     private_nh.param<std::string>("listen_address", address_, "0.0.0.0");
     private_nh.param<int>("port", port_, 8765);
     private_nh.param<double>("voxel_size_m", voxel_, 0.0);
@@ -152,22 +156,39 @@ class Gateway {
       ROS_WARN_THROTTLE(5, "VisionPro invalid PointCloud2 dimensions");
       ++dropped_; return;
     }
-    std::array<unsigned, 4> offset{};
-    const char *names[] = {"x", "y", "z", "intensity"};
-    for (size_t i = 0; i < 4; ++i) {
+    std::array<unsigned, 3> offset{};
+    const char *names[] = {"x", "y", "z"};
+    for (size_t i = 0; i < 3; ++i) {
       bool found = false;
       for (const auto &field : msg->fields)
         if (field.name == names[i] && field.datatype == sensor_msgs::PointField::FLOAT32 &&
             field.count == 1 && field.offset <= msg->point_step - 4) {
           offset[i] = field.offset; found = true; break;
         }
-      if (!found) { ROS_WARN_THROTTLE(5, "VisionPro requires FLOAT32 x/y/z/intensity"); ++dropped_; return; }
+      if (!found) { ROS_WARN_THROTTLE(5, "VisionPro requires FLOAT32 x/y/z"); ++dropped_; return; }
+    }
+    bool has_rgb = false, has_intensity = false;
+    unsigned color_offset = 0, intensity_offset = 0;
+    for (const auto &field : msg->fields) {
+      if ((field.name == "rgb" || field.name == "rgba") &&
+          (field.datatype == sensor_msgs::PointField::FLOAT32 || field.datatype == sensor_msgs::PointField::UINT32) &&
+          field.count == 1 && field.offset <= msg->point_step - 4) {
+        has_rgb = true; color_offset = field.offset;
+      }
+      if (field.name == "intensity" && field.datatype == sensor_msgs::PointField::FLOAT32 &&
+          field.count == 1 && field.offset <= msg->point_step - 4) {
+        has_intensity = true; intensity_offset = field.offset;
+      }
+    }
+    if (!has_rgb && !has_intensity) {
+      ROS_WARN_THROTTLE(5, "VisionPro requires rgb/rgba or FLOAT32 intensity");
+      ++dropped_; return;
     }
     input_points_ += n;
     auto out = std::make_shared<std::vector<uint8_t>>();
     out->reserve(kHeaderSize + msg->header.frame_id.size() + size_t(n) * kStride);
     out->insert(out->end(), {'V','P','P','C'});
-    put(*out, 1, 2); put(*out, 1, 2); put(*out, ++sequence_, 8);
+    put(*out, 1, 2); put(*out, has_rgb ? 2 : 1, 2); put(*out, ++sequence_, 8);
     put(*out, msg->header.stamp.toNSec(), 8);
     const size_t count_at = out->size();
     put(*out, 0, 4); put(*out, kStride, 2);
@@ -179,9 +200,10 @@ class Gateway {
     for (uint32_t row = 0; row < msg->height; ++row) {
       for (uint32_t col = 0; col < msg->width; ++col) {
         const uint8_t *p = msg->data.data() + size_t(row) * msg->row_step + size_t(col) * msg->point_step;
-        float v[4];
-        for (size_t i = 0; i < 4; ++i) v[i] = readFloat(p + offset[i], msg->is_bigendian);
-        if (!std::isfinite(v[0]) || !std::isfinite(v[1]) || !std::isfinite(v[2]) || !std::isfinite(v[3])) continue;
+        float v[3];
+        for (size_t i = 0; i < 3; ++i) v[i] = readFloat(p + offset[i], msg->is_bigendian);
+        if (!std::isfinite(v[0]) || !std::isfinite(v[1]) || !std::isfinite(v[2]) ||
+            (!has_rgb && !std::isfinite(readFloat(p + intensity_offset, msg->is_bigendian)))) continue;
         const double distance2 = double(v[0])*v[0] + double(v[1])*v[1] + double(v[2])*v[2];
         if (range_ > 0 && distance2 > range_*range_) continue;
         if (voxel_ > 0) {
@@ -195,6 +217,13 @@ class Gateway {
           if (!valid || !cells.insert(cell).second) continue;
         }
         for (float value : v) putFloat(*out, value);
+        if (has_rgb) {
+          const uint32_t rgb = readWord(p + color_offset, msg->is_bigendian);
+          out->push_back(uint8_t(rgb >> 16));
+          out->push_back(uint8_t(rgb >> 8));
+          out->push_back(uint8_t(rgb));
+          out->push_back(255);
+        } else putFloat(*out, readFloat(p + intensity_offset, msg->is_bigendian));
         ++count;
       }
     }

@@ -29,6 +29,14 @@ try {
   assert(frame.frameId === 'camera_init' && frame.count === 2 && frame.frameBytes === bytes.byteLength, 'metadata and frame size');
   assert(frame.positions[0] === 1 && frame.positions[3] === -4, 'XYZ');
   assert(frame.intensities[0] === 0 && frame.intensities[1] === 100, 'intensity');
+  assert(frame.rgb === null, 'intensity format');
+  const colorBytes = bytes.slice(0);
+  const colorView = new DataView(colorBytes);
+  colorView.setUint16(6, 2, true);
+  new Uint8Array(colorBytes, at + 12, 4).set([255, 128, 0, 255]);
+  new Uint8Array(colorBytes, at + 28, 4).set([0, 64, 255, 255]);
+  const rgb = decodeFrame(colorBytes);
+  assert(rgb.intensities === null && rgb.rgb.join(',') === '255,128,0,0,64,255', 'RGB format');
   assert(frame.bounds.low[0] === -4 && frame.bounds.high[2] === 6, 'bounds');
   rejects(bytes.slice(0, 20), 'short header');
   let bad = bytes.slice(0); new DataView(bad).setUint8(0, 0); rejects(bad, 'magic');
@@ -38,7 +46,8 @@ try {
   bad = bytes.slice(0, -1); rejects(bad, 'truncated payload');
   bad = bytes.slice(0); new DataView(bad).setFloat32(at, NaN, true); rejects(bad, 'nonfinite point');
   bad = bytes.slice(0); new DataView(bad).setUint8(HEADER_BYTES, 0xff); rejects(bad, 'invalid UTF-8');
-  document.getElementById('result').textContent = 'PASS VPPC v1 decoder and malformed boundaries';
+  bad = bytes.slice(0); new DataView(bad).setUint16(6, 3, true); rejects(bad, 'unsupported format');
+  document.getElementById('result').textContent = 'PASS VPPC v1 intensity/RGB decoder and malformed boundaries';
   document.body.dataset.result = 'PASS';
 } catch (error) {
   document.getElementById('result').textContent = `FAIL ${error.stack || error}`;

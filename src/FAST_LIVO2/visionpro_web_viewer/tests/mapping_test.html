@@ -55,8 +55,16 @@ try {
   viewer.setShowHistory(true);
   viewer.setRoi(true, { low: [0,0,0], high: [0.5,0.5,0.5] });
   viewer.draw();
-  assert(viewer.cloud.visible && viewer.historyCloud.visible && viewer.cloud.material === viewer.overlayMaterial, 'separate current/history styles');
+  assert(viewer.cloud.visible && viewer.historyCloud.visible && viewer.cloud.material === viewer.colorMaterial, 'current/history preserve point colors');
   assert(viewer.historyGeometry.drawRange.count === 5 && viewer.roiBox.visible, 'history and ROI box');
+  const mixed = new HistoryAccumulator(1, 2);
+  mixed.insertChunk(frame([[0,0,0,10]]), 0, 1, Infinity);
+  mixed.insertChunk({ count: 1, positions: new Float32Array([2,2,2]), intensities: null,
+    rgb: new Uint8Array([255,0,0]) }, 0, 1, Infinity);
+  viewer.setHistory(mixed.snapshot());
+  const mixedColors = viewer.historyGeometry.getAttribute('color').array;
+  assert(mixedColors[3] === 1 && mixedColors[4] === 0 && mixedColors[5] === 0, 'mixed RGB history');
+  viewer.setHistory(history.snapshot());
   assert(viewer.roiBox.box.max.x === 0.5 && viewer.roiBox.parent === viewer.rosRoot, 'ROI box shares ROS transform');
   const geometries = viewer.geometryCount;
   for (let i = 0; i < 30; i++) { viewer.setRoi(true, { low: [0,0,0], high: [0.4 + i / 100, 1, 1] }); viewer.draw(); }

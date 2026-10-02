@@ -15,7 +15,7 @@ export function decodeFrame(buffer) {
   }
   const version = view.getUint16(4, true);
   const type = view.getUint16(6, true);
-  if (version !== 1 || type !== 1) throw new Error(`Unsupported VPPC version/type ${version}/${type}`);
+  if (version !== 1 || (type !== 1 && type !== 2)) throw new Error(`Unsupported VPPC version/type ${version}/${type}`);
   const sequence = view.getBigUint64(8, true);
   const timestampNs = view.getBigUint64(16, true);
   const count = view.getUint32(24, true);
@@ -32,7 +32,8 @@ export function decodeFrame(buffer) {
   }
   const frameId = utf8.decode(new Uint8Array(buffer, HEADER_BYTES, frameIdBytes));
   const positions = new Float32Array(count * 3);
-  const intensities = new Float32Array(count);
+  const intensities = type === 1 ? new Float32Array(count) : null;
+  const rgb = type === 2 ? new Uint8Array(count * 3) : null;
   const low = [Infinity, Infinity, Infinity];
   const high = [-Infinity, -Infinity, -Infinity];
   for (let i = 0; i < count; i++) {
@@ -44,10 +45,16 @@ export function decodeFrame(buffer) {
       low[axis] = Math.min(low[axis], value);
       high[axis] = Math.max(high[axis], value);
     }
-    const intensity = view.getFloat32(offset + 12, true);
-    if (!Number.isFinite(intensity)) throw new Error(`Nonfinite intensity at point ${i}`);
-    intensities[i] = intensity;
+    if (type === 1) {
+      const intensity = view.getFloat32(offset + 12, true);
+      if (!Number.isFinite(intensity)) throw new Error(`Nonfinite intensity at point ${i}`);
+      intensities[i] = intensity;
+    } else {
+      rgb[i * 3] = view.getUint8(offset + 12);
+      rgb[i * 3 + 1] = view.getUint8(offset + 13);
+      rgb[i * 3 + 2] = view.getUint8(offset + 14);
+    }
   }
   return { sequence, timestampNs, frameId, count, payloadBytes, frameBytes: buffer.byteLength,
-           positions, intensities, bounds: count ? { low, high } : null };
+           positions, intensities, rgb, bounds: count ? { low, high } : null };
 }

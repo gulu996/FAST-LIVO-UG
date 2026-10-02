@@ -2,7 +2,7 @@ common:
   img_topic: "/left_camera/image"
   lid_topic: "/livox/lidar"
   imu_topic: "/livox/imu"
-  img_en: 1
+  img_en: 0
   lidar_en: 1
   ros_driver_bug_fix: false
   sub_lidar_queue_size: 1000

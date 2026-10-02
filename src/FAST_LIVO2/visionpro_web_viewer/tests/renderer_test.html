@@ -16,7 +16,10 @@ try {
   assert(viewer.cloud === cloud && viewer.rosRoot.children.filter(x => x.isPoints).length === 2 && !viewer.historyCloud.visible, 'current layer plus hidden history layer');
   assert(viewer.geometry.drawRange.count === 2 && viewer.geometry.getAttribute('position').array[0] === 1, 'XYZ');
   const color = viewer.geometry.getAttribute('color').array;
-  assert(color[0] === 0 && color[3] === 1 && intensity.p5 === 5 && intensity.p95 === 95, 'intensity grayscale');
+  assert(color[2] === 1 && color[3] === 1 && color[4] === 0 && intensity.p5 === 5 && intensity.p95 === 95, 'intensity rainbow');
+  viewer.setFrame({ ...frame, rgb: new Uint8Array([255, 0, 0, 0, 128, 255]), intensities: null });
+  assert(viewer.geometry.getAttribute('color').array[0] === 1 && viewer.geometry.getAttribute('color').array[1] === 0, 'RGB red');
+  assert(viewer.geometry.getAttribute('color').array[4] > 0.2 && viewer.geometry.getAttribute('color').array[4] < 0.23, 'sRGB green');
   assert(Math.abs(viewer.rosRoot.rotation.x + Math.PI / 2) < 1e-9, 'root coordinate transform');
   const count = viewer.geometryCount;
   for (let i = 0; i < 100; i++) { viewer.setFrame(frame); viewer.draw(); }
@@ -29,7 +32,7 @@ try {
   viewer.setMode('white');
   viewer.setPointSize(5);
   assert(viewer.cloud.material === viewer.whiteMaterial && viewer.whiteMaterial.size === 5, 'controls');
-  document.getElementById('result').textContent = 'PASS XYZ, intensity, transform, replacement, GPU reuse';
+  document.getElementById('result').textContent = 'PASS XYZ, RGB, intensity rainbow, transform, replacement, GPU reuse';
   document.body.dataset.result = 'PASS';
 } catch (error) {
   document.getElementById('result').textContent = `FAIL ${error.stack || error}`;

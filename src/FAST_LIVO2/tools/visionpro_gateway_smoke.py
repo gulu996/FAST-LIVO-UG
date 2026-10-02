@@ -9,7 +9,7 @@ import time
 import rospy
 from sensor_msgs.msg import PointCloud2, PointField
 from std_msgs.msg import Header
-from visionpro_pointcloud_receiver import connect, read_binary, parse_frame, POINT
+from visionpro_pointcloud_receiver import connect, read_binary, parse_frame, HEADER, POINT, RGB_POINT
 
 FIELDS = [PointField(name=name, offset=i * 4, datatype=PointField.FLOAT32, count=1)
           for i, name in enumerate(('x', 'y', 'z', 'intensity'))]
@@ -20,6 +20,14 @@ def cloud(stamp, points):
                        height=1, width=len(points), fields=FIELDS,
                        is_bigendian=False, point_step=16, row_step=16 * len(points),
                        data=b''.join(POINT.pack(*point) for point in points), is_dense=False)
+
+
+def cloud_rgb(stamp):
+    fields = FIELDS[:3] + [PointField(name='rgb', offset=12, datatype=PointField.FLOAT32, count=1)]
+    return PointCloud2(header=Header(stamp=stamp, frame_id='camera_init'),
+                       height=1, width=1, fields=fields, is_bigendian=False,
+                       point_step=16, row_step=16,
+                       data=RGB_POINT.pack(1., 2., 3., 0, 128, 255, 0), is_dense=True)
 
 
 def receive(pub, stamp, points, url):
@@ -41,7 +49,7 @@ def receive(pub, stamp, points, url):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--url', default='ws://127.0.0.1:8765/')
-    parser.add_argument('--topic', default='/cloud_registered_frame')
+    parser.add_argument('--topic', default='/cloud_registered')
     parser.add_argument('--slow-test', action='store_true')
     args = parser.parse_args()
     rospy.init_node('visionpro_gateway_smoke', anonymous=True)
@@ -56,6 +64,17 @@ def main():
     second = receive(pub, rospy.Time(124, 789), points, args.url)
     assert second > first, (first, second)
     print(f'PASS binary protocol, finite filter, metadata, disconnect/reconnect: sequence {first} -> {second}')
+    with connect(args.url) as sock:
+        sock.settimeout(3)
+        message = cloud_rgb(rospy.Time(125, 0))
+        for _ in range(6):
+            pub.publish(message)
+            time.sleep(0.05)
+        data = read_binary(sock)
+        _, _, _, count, payload = parse_frame(data)
+        assert HEADER.unpack_from(data)[2] == 2 and count == 1
+        assert RGB_POINT.unpack(payload)[:6] == (1., 2., 3., 255, 128, 0)
+    print('PASS RGB packed-color frame')
     with connect(args.url) as sock:
         sock.settimeout(3)
         large_points = [(1., 2., 3., 4.)] * 4096  # 64 KiB forces Beast fragmentation.

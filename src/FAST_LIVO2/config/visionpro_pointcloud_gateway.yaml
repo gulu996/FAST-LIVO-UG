@@ -1,5 +1,5 @@
 # Loaded under the gateway node's private namespace by its launch file.
-input_topic: /cloud_registered_frame
+input_topic: /cloud_registered
 listen_address: 0.0.0.0
 port: 8765
 voxel_size_m: 0.0

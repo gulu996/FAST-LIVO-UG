@@ -1,5 +1,5 @@
 export class HistoryAccumulator {
-  constructor(voxelSize = 0.01, maxPoints = 500000) {
+  constructor(voxelSize = 0.01, maxPoints = 1000000) {
     if (!Number.isSafeInteger(maxPoints) || maxPoints < 1) throw new Error('Invalid history limit');
     this.maxPoints = maxPoints;
     this.setVoxelSize(voxelSize);
@@ -16,6 +16,8 @@ export class HistoryAccumulator {
     this.voxels = new Map();
     this.positions = new Float32Array(0);
     this.intensities = new Float32Array(0);
+    this.rgb = new Uint8Array(0);
+    this.hasRgb = new Uint8Array(0);
     this.count = this.capacity = this.keyChars = 0;
     this.bounds = null;
     this.limitReached = false;
@@ -26,10 +28,16 @@ export class HistoryAccumulator {
     const capacity = Math.min(this.maxPoints, Math.max(count, this.capacity * 2, 4096));
     const positions = new Float32Array(capacity * 3);
     const intensities = new Float32Array(capacity);
+    const rgb = new Uint8Array(capacity * 3);
+    const hasRgb = new Uint8Array(capacity);
     positions.set(this.positions);
     intensities.set(this.intensities);
+    rgb.set(this.rgb);
+    hasRgb.set(this.hasRgb);
     this.positions = positions;
     this.intensities = intensities;
+    this.rgb = rgb;
+    this.hasRgb = hasRgb;
     this.capacity = capacity;
   }
 
@@ -42,7 +50,7 @@ export class HistoryAccumulator {
       if (i > start && (i - start) % 128 === 0 && performance.now() - begun >= maxMs) break;
       const p = i * 3;
       const x = frame.positions[p], y = frame.positions[p + 1], z = frame.positions[p + 2];
-      const intensity = frame.intensities[i];
+      const intensity = frame.intensities ? frame.intensities[i] : 0;
       if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z) || !Number.isFinite(intensity)) continue;
       const ix = Math.floor(x / this.voxelSize);
       const iy = Math.floor(y / this.voxelSize);
@@ -59,6 +67,10 @@ export class HistoryAccumulator {
       this.positions[target + 1] = y;
       this.positions[target + 2] = z;
       this.intensities[this.count] = intensity;
+      if (frame.rgb) {
+        this.rgb.set(frame.rgb.subarray(p, p + 3), target);
+        this.hasRgb[this.count] = 1;
+      }
       if (!this.bounds) this.bounds = { low: [x, y, z], high: [x, y, z] };
       else for (let axis = 0; axis < 3; axis++) {
         const value = frame.positions[p + axis];
@@ -75,6 +87,8 @@ export class HistoryAccumulator {
     return { count: this.count,
              positions: this.positions.subarray(0, this.count * 3),
              intensities: this.intensities.subarray(0, this.count),
+             rgb: this.rgb.subarray(0, this.count * 3),
+             hasRgb: this.hasRgb.subarray(0, this.count),
              bounds: this.bounds };
   }
 
@@ -92,6 +106,7 @@ export class HistoryAccumulator {
 
   get memoryEstimateBytes() {
     // Approximate JS storage: allocated float arrays plus 64 B per Map entry and UTF-16 key bytes; excludes engine and GPU overhead.
-    return this.positions.byteLength + this.intensities.byteLength + this.count * 64 + this.keyChars * 2;
+    return this.positions.byteLength + this.intensities.byteLength + this.rgb.byteLength +
+      this.hasRgb.byteLength + this.count * 64 + this.keyChars * 2;
   }
 }

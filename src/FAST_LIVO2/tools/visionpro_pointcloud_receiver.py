@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 HEADER = struct.Struct('<4sHHQQIHHI')
 POINT = struct.Struct('<ffff')
+RGB_POINT = struct.Struct('<fffBBBB')
 
 
 def exact(sock, n):
@@ -99,7 +100,7 @@ def parse_frame(data):
     if len(data) < HEADER.size:
         raise ValueError('short VPPC header')
     magic, version, kind, sequence, timestamp, count, stride, name_len, payload_len = HEADER.unpack_from(data)
-    if (magic, version, kind, stride) != (b'VPPC', 1, 1, POINT.size):
+    if magic != b'VPPC' or version != 1 or kind not in (1, 2) or stride != POINT.size:
         raise ValueError('unsupported VPPC frame')
     if count > (2**32 - 1) // stride or payload_len != count * stride:
         raise ValueError('point count and payload length disagree')
@@ -118,13 +119,16 @@ def main():
         start = time.monotonic()
         frames = total = 0
         while True:
-            sequence, stamp, frame_id, count, points = parse_frame(read_binary(sock))
+            data = read_binary(sock)
+            sequence, stamp, frame_id, count, points = parse_frame(data)
+            kind = HEADER.unpack_from(data)[2]
             frames += 1
             total += len(points)
             duration = max(time.monotonic() - start, 1e-6)
-            examples = [POINT.unpack_from(points, i * POINT.size) for i in range(min(count, 3))]
+            point = RGB_POINT if kind == 2 else POINT
+            examples = [point.unpack_from(points, i * point.size) for i in range(min(count, 3))]
             print(f'sequence={sequence} timestamp_ns={stamp} frame_id={frame_id!r} '
-                  f'point_count={count} payload_bytes={len(points)} '
+                  f'format={"RGB" if kind == 2 else "intensity"} point_count={count} payload_bytes={len(points)} '
                   f'receive_hz={frames/duration:.2f} MB/s={total/duration/1e6:.2f} '
                   f'first_points={examples}', flush=True)
 

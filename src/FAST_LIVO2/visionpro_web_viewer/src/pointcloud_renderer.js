@@ -9,13 +9,22 @@ function geometryWithCapacity(capacity) {
   return geometry;
 }
 
-function fillIntensityColors(intensities, count, colors) {
-  const sorted = intensities.slice(0, count).sort();
-  const min = count ? sorted[0] : 0;
-  const max = count ? sorted[count - 1] : 0;
+const srgbToLinear = (v) => v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+const rainbow = Array.from({ length: 256 }, (_, i) => {
+  // RViz-style rainbow: low intensity blue, then cyan/green/yellow, high red.
+  const h = (1 - i / 255) * 4;
+  const channels = [Math.max(0, Math.min(1, 2 - h)), Math.max(0, Math.min(1, 2 - Math.abs(h - 2))), Math.max(0, Math.min(1, h - 2))];
+  return channels.map(srgbToLinear);
+});
+
+function fillIntensityColors(intensities, count, colors, rgb = null, hasRgb = null) {
+  const sorted = hasRgb ? intensities.slice(0, count).filter((_, i) => !hasRgb[i]).sort() : intensities.slice(0, count).sort();
+  const n = sorted.length;
+  const min = n ? sorted[0] : 0;
+  const max = n ? sorted[n - 1] : 0;
   const quantile = (q) => {
-    if (!count) return 0;
-    const at = (count - 1) * q;
+    if (!n) return 0;
+    const at = (n - 1) * q;
     const low = Math.floor(at), high = Math.ceil(at);
     return sorted[low] + (sorted[high] - sorted[low]) * (at - low);
   };
@@ -23,8 +32,12 @@ function fillIntensityColors(intensities, count, colors) {
   const span = p95 - p5;
   const constant = span <= Math.max(1e-6, Math.abs(p95) * 1e-6);
   for (let i = 0; i < count; i++) {
-    const gray = constant ? 0.8 : Math.min(1, Math.max(0, (intensities[i] - p5) / span));
-    colors[i * 3] = colors[i * 3 + 1] = colors[i * 3 + 2] = gray;
+    const level = constant ? 0.5 : Math.min(1, Math.max(0, (intensities[i] - p5) / span));
+    const color = rainbow[Math.round(level * 255)];
+    for (let channel = 0; channel < 3; channel++) {
+      colors[i * 3 + channel] = rgb && (!hasRgb || hasRgb[i])
+        ? srgbToLinear(rgb[i * 3 + channel] / 255) : color[channel];
+    }
   }
   return { min, max, p5, p95 };
 }
@@ -68,12 +81,11 @@ export class PointCloudRenderer {
       };
       return material;
     };
-    this.grayMaterial = withRoi(new THREE.PointsMaterial({ size: 2, sizeAttenuation: false, vertexColors: true }));
+    this.colorMaterial = withRoi(new THREE.PointsMaterial({ size: 2, sizeAttenuation: false, vertexColors: true }));
     this.whiteMaterial = withRoi(new THREE.PointsMaterial({ size: 2, sizeAttenuation: false, color: 0xffffff }));
-    this.overlayMaterial = withRoi(new THREE.PointsMaterial({ size: 3, sizeAttenuation: false, color: 0xffd477 }));
     this.historyMaterial = withRoi(new THREE.PointsMaterial({ size: 2, sizeAttenuation: false, vertexColors: true }));
     this.geometry = geometryWithCapacity(0);
-    this.cloud = new THREE.Points(this.geometry, this.grayMaterial);
+    this.cloud = new THREE.Points(this.geometry, this.colorMaterial);
     this.cloud.frustumCulled = false;
     this.rosRoot.add(this.cloud);
     this.historyGeometry = geometryWithCapacity(0);
@@ -85,7 +97,7 @@ export class PointCloudRenderer {
     this.roiBox.visible = false;
     this.rosRoot.add(this.roiBox);
     this.capacity = this.historyCapacity = this.historyCount = 0;
-    this.mode = 'intensity';
+    this.mode = 'auto';
     this.showCurrent = true;
     this.showHistory = false;
     this.lastBounds = null;
@@ -104,15 +116,13 @@ export class PointCloudRenderer {
 
   setPointSize(value) {
     const size = Math.min(10, Math.max(1, Number(value) || 2));
-    this.grayMaterial.size = this.whiteMaterial.size = this.historyMaterial.size = size;
-    this.overlayMaterial.size = Math.min(11, size + 1);
+    this.colorMaterial.size = this.whiteMaterial.size = this.historyMaterial.size = size;
   }
 
   updateCurrentMaterial() {
-    this.cloud.material = this.showHistory ? this.overlayMaterial :
-      (this.mode === 'white' ? this.whiteMaterial : this.grayMaterial);
+    this.cloud.material = this.mode === 'white' ? this.whiteMaterial : this.colorMaterial;
   }
-  setMode(mode) { this.mode = mode === 'white' ? 'white' : 'intensity'; this.updateCurrentMaterial(); }
+  setMode(mode) { this.mode = mode === 'white' ? 'white' : 'auto'; this.updateCurrentMaterial(); }
   setShowCurrent(visible) { this.showCurrent = visible; this.cloud.visible = visible; }
   setShowHistory(visible) {
     this.showHistory = visible;
@@ -150,7 +160,8 @@ export class PointCloudRenderer {
     const colors = this.geometry.getAttribute('color');
     positions.array.set(frame.positions);
     positions.needsUpdate = true;
-    const intensity = fillIntensityColors(frame.intensities, frame.count, colors.array);
+    const intensity = frame.rgb ? null : fillIntensityColors(frame.intensities, frame.count, colors.array);
+    if (frame.rgb) for (let i = 0; i < frame.rgb.length; i++) colors.array[i] = srgbToLinear(frame.rgb[i] / 255);
     colors.needsUpdate = true;
     this.geometry.setDrawRange(0, frame.count);
     this.lastBounds = frame.bounds;
@@ -177,7 +188,7 @@ export class PointCloudRenderer {
     const colors = this.historyGeometry.getAttribute('color');
     positions.array.set(history.positions);
     positions.needsUpdate = true;
-    fillIntensityColors(history.intensities, history.count, colors.array);
+    fillIntensityColors(history.intensities, history.count, colors.array, history.rgb, history.hasRgb);
     colors.needsUpdate = true;
     this.historyGeometry.setDrawRange(0, history.count);
     this.historyCount = history.count;
@@ -225,9 +236,8 @@ export class PointCloudRenderer {
     this.controls.dispose();
     this.geometry.dispose();
     this.historyGeometry.dispose();
-    this.grayMaterial.dispose();
+    this.colorMaterial.dispose();
     this.whiteMaterial.dispose();
-    this.overlayMaterial.dispose();
     this.historyMaterial.dispose();
     this.roiBox.geometry.dispose();
     this.roiBox.material.dispose();
