@@ -6,6 +6,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <iosfwd>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -23,6 +24,7 @@ struct PersistentBackendConfig
   std::size_t queue_capacity = 128;
   SparseKeyPosePolicy keypose_policy;
   ConservativeMotionUncertaintyConfig motion_uncertainty;
+  bool counterfactual_snapshot_enable = false;
 };
 
 struct PersistentBackendCounters
@@ -79,6 +81,8 @@ public:
   PersistentBackendTelemetry telemetry() const;
   ShadowGraphTelemetry graphTelemetry() const;
   std::string graphSummary() const;
+  void writeReobservationDiagnosticsCsv(std::ostream &out) const;
+  void writeCounterfactualSnapshots(const std::string &directory) const;
   std::size_t queued() const;
   std::size_t keyposeCount() const;
   std::vector<SparseMotionSummary> motionSummaries() const;

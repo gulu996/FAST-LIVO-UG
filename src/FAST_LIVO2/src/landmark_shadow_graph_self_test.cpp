@@ -5,9 +5,11 @@
 
 #include <Eigen/Geometry>
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 
 namespace
@@ -120,32 +122,132 @@ void chainAndRandomLandmark()
 
 void loopAndDedup()
 {
-  landmark::SparseLandmarkShadowGraph graph;
+  landmark::SparseLandmarkShadowGraph graph(true);
   const auto landmark_world = pose(5);
   for (int i = 0; i < 4; ++i)
   {
-    const auto raw = pose(1.1 * i);
-    const auto k = keypose(i + 1, i, raw);
+    const auto raw = pose(1.1 * i, 0.01 * i);
+    const double timestamp = i == 3 ? 30.0 : i;
+    const auto k = keypose(i + 1, timestamp, raw);
     const auto visual = pose(i).inverse() * landmark_world;
-    const auto in = input(i + 1, i, raw, visual, i == 0 || i == 3);
-    const auto m = motion(i, i + 1, pose(1.1));
-    require(graph.update(k, i ? &m : nullptr, in, 1,
+    const auto in = input(i + 1, timestamp, raw, visual, i == 0 || i == 3);
+    const auto m = motion(i, i + 1,
+        pose(1.1 * (i - 1), 0.01 * (i - 1)).inverse() * raw);
+    require(graph.update(k, i ? &m : nullptr, in, i == 3 ? 2 : 1,
                          i == 0 || i == 3), "loop chain update failed");
   }
   Eigen::Isometry3d optimized;
   require(graph.estimateKeyPose(4, &optimized) &&
               std::abs(optimized.translation().x() - 3.0) < 0.25,
           "visual closure did not reduce raw drift");
-  const auto k = keypose(4, 3, pose(3.3));
-  const auto in = input(4, 3, pose(3.3), pose(2));
+  require(graph.reobservationDiagnostics().size() == 1,
+          "continuous or first observations recorded as episode transition");
+  const auto &d = graph.reobservationDiagnostics().front();
+  require(d.pre_valid && d.post_valid && d.factor_accepted &&
+              !d.pre_keypose_in_isam && d.episode_id == 2 &&
+              d.previous_episode_id == 1 && d.episode_gap_s == 28.0 &&
+              d.observation_id == 4 && d.landmark_id == 7 &&
+              d.pre.translation_m > 0.2 &&
+              d.pre.rotation_deg > 1.0 &&
+              d.post.translation_m < d.pre.translation_m &&
+              d.post.rotation_deg < d.pre.rotation_deg &&
+              d.post.factor_error < d.pre.factor_error &&
+              d.post_full_graph_error < d.pre_augmented_graph_error &&
+              std::abs(d.pre.factor_error - 0.5 * d.pre.whitened_squared_norm) < 1e-9 &&
+              d.pre.logmap_factor_difference < 1e-9 &&
+              d.post.logmap_factor_difference < 1e-9 &&
+              d.keypose_delta_translation_m > 0.1 &&
+              d.landmark_delta_translation_m > 1e-4,
+          "reobservation residual/weight/chart or random-landmark diagnostics failed");
+  std::cout << "SYNTHETIC_REOBSERVATION pre_translation_m=" << d.pre.translation_m
+            << " post_translation_m=" << d.post.translation_m
+            << " pre_rotation_deg=" << d.pre.rotation_deg
+            << " post_rotation_deg=" << d.post.rotation_deg
+            << " keypose_delta_m=" << d.keypose_delta_translation_m
+            << " landmark_delta_m=" << d.landmark_delta_translation_m << '\n';
+  std::ostringstream csv;
+  require(graph.counterfactualSnapshots().size() == 1 &&
+              graph.telemetry().counterfactual_snapshot_failure_count == 0,
+          "read-only counterfactual capture failed");
+  const auto snapshot = graph.counterfactualSnapshots().front();
+  std::ostringstream serialized;
+  landmark::writeCounterfactualSnapshot(serialized, snapshot);
+  std::istringstream input_stream(serialized.str());
+  const auto restored = landmark::readCounterfactualSnapshot(input_stream);
+  gtsam::Values seed = restored.existing_values;
+  seed.insert(restored.new_values);
+  require(restored.existing.size() == snapshot.existing.size() &&
+              restored.motion.size() == 1 && restored.visual.size() == 1 &&
+              std::abs(restored.existing.error(seed) - snapshot.existing.error(seed)) < 1e-9 &&
+              std::abs(restored.visual.error(restored.runtime_post) - d.post.factor_error) < 1e-9,
+          "snapshot round-trip changed graph semantics");
+  auto rounded = snapshot;
+  const auto lk = landmark::SparseLandmarkShadowGraph::landmarkKey(7);
+  const auto lp = rounded.existing_values.at<gtsam::Pose3>(lk);
+  rounded.existing_values.update(lk, gtsam::Pose3(
+      gtsam::Rot3(lp.rotation().matrix() * (1 + 1e-6)), lp.translation()));
+  std::ostringstream rounded_text;
+  landmark::writeCounterfactualSnapshot(rounded_text, rounded);
+  std::istringstream rounded_input(rounded_text.str());
+  const auto rounded_copy = landmark::readCounterfactualSnapshot(rounded_input);
+  require((rounded_copy.existing_values.at<gtsam::Pose3>(lk).matrix() -
+           rounded.existing_values.at<gtsam::Pose3>(lk).matrix()).norm() < 1e-12,
+          "snapshot reader normalized real rounded calibration");
+  const auto cf = landmark::optimizeCounterfactual(restored);
+  Eigen::Isometry3d live_after_offline;
+  require(graph.estimateKeyPose(4, &live_after_offline) &&
+              live_after_offline.matrix().isApprox(optimized.matrix(), 1e-12) &&
+              graph.telemetry().isam_update_count == 4,
+          "offline optimizer changed live ISAM estimate or update count");
+  const auto x = landmark::SparseLandmarkShadowGraph::keyposeKey(4);
+  require((cf.motion_only.at<gtsam::Pose3>(x).translation() - pose(3.3, 0.03).translation()).norm() < 1e-6 &&
+              (cf.motion_visual.at<gtsam::Pose3>(x).translation() -
+               cf.motion_only.at<gtsam::Pose3>(x).translation()).norm() > 0.1 &&
+              restored.visual.error(cf.motion_visual) < restored.visual.error(cf.motion_only) &&
+              cf.motion_final_cost <= cf.motion_initial_cost && cf.visual_final_cost < cf.visual_initial_cost,
+          "offline B/C isolation or visual marginal contribution failed");
+  const auto scaled = landmark::scaledCounterfactualFactors(restored.existing, 2, 1);
+  require(scaled[0] == restored.existing[0] &&
+              (graph.counterfactualSnapshots().front().runtime_post.at<gtsam::Pose3>(x).matrix() -
+               restored.runtime_post.at<gtsam::Pose3>(x).matrix()).norm() < 1e-12 &&
+              graph.telemetry().cross_episode_reobservation_count == 1,
+          "offline optimization changed gauge or live graph");
+  bool rejected = false;
+  try { std::istringstream bad("LANDMARK_COUNTERFACTUAL_V1 nan"); landmark::readCounterfactualSnapshot(bad); }
+  catch (const std::exception &) { rejected = true; }
+  require(rejected, "invalid offline input was not rejected");
+  std::cout << "LANDMARK_COUNTERFACTUAL_ISOLATION_SELF_TEST=PASS\n";
+  graph.writeReobservationDiagnosticsCsv(csv);
+  const auto text = csv.str();
+  require(std::count(text.begin(), text.end(), '\n') == 2 &&
+              text.find("NEW_RAW_VALUES_SEED") != std::string::npos,
+          "CSV must contain one header and one accepted episode event");
+  const auto k = keypose(4, 30, pose(3.3, 0.03));
+  const auto in = input(4, 30, pose(3.3, 0.03), pose(2));
   for (int i = 0; i < 30; ++i)
-    require(graph.update(k, nullptr, in, 1), "duplicate update failed");
+    require(graph.update(k, nullptr, in, 2), "duplicate update failed");
   const auto h = graph.telemetry();
   require(h.visual_factor_count == 2 && h.motion_factor_count == 3 &&
               h.suppressed_visual_observation_count >= 30 &&
               h.duplicate_factor_count >= 30,
           "30 Hz visual factor dedup failed");
+  require(h.cross_episode_reobservation_count == 1 &&
+              h.reobservation_diagnostic_failure_count == 0 &&
+              graph.reobservationDiagnostics().size() == 1,
+          "suppressed observations flooded reobservation records");
+  const auto m = motion(4, 5, pose(3.3, 0.03).inverse() * pose(4.4, 0.04));
+  const auto continuous = input(5, 31, pose(4.4, 0.04), pose(1));
+  require(graph.update(keypose(5, 31, pose(4.4, 0.04)), &m, continuous, 2) &&
+              graph.reobservationDiagnostics().size() == 1,
+          "new keypose in the same episode became long reobservation");
+  require(graph.update(keypose(5, 60, pose(4.4, 0.04)), nullptr,
+                       input(6, 60, pose(4.4, 0.04), pose(1)), 3) &&
+              graph.reobservationDiagnostics().size() == 2 &&
+              graph.reobservationDiagnostics().back().pre_keypose_in_isam,
+          "existing-keypose current-estimate diagnostic path failed");
   std::cout << "SYNTHETIC_LOOP_CONSISTENCY_TEST=PASS\n"
+            << "LANDMARK_REOBSERVATION_DIAGNOSTICS_SELF_TEST=PASS\n"
+            << "LANDMARK_REOBSERVATION_RANDOM_VARIABLE_BEHAVIOR=PASS\n"
             << "FACTOR_DEDUP_TEST=PASS\n";
 }
 

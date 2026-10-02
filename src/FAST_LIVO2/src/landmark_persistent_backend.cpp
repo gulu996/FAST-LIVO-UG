@@ -39,7 +39,7 @@ bool validInput(const GlobalLandmarkInput &input)
 PersistentLandmarkBackend::PersistentLandmarkBackend(
     const PersistentBackendConfig &config, bool start_worker) : config_(config)
 {
-  shadow_graph_.reset(new SparseLandmarkShadowGraph());
+  shadow_graph_.reset(new SparseLandmarkShadowGraph(config_.counterfactual_snapshot_enable));
   const auto &p = config_.keypose_policy;
   if (config_.queue_capacity == 0 ||
       !std::isfinite(p.translation_threshold_m) || p.translation_threshold_m <= 0 ||
@@ -344,6 +344,9 @@ std::string PersistentLandmarkBackend::graphSummary() const
           << " motion_factor_reject_count=" << g.motion_factor_reject_count
           << " visual_factor_reject_count=" << g.visual_factor_reject_count
           << " isam_exception_count=" << g.isam_exception_count
+          << " cross_episode_reobservation_count=" << g.cross_episode_reobservation_count
+          << " reobservation_diagnostic_failure_count=" << g.reobservation_diagnostic_failure_count
+          << " counterfactual_snapshot_failure_count=" << g.counterfactual_snapshot_failure_count
           << " motion_covariance_source=" << g.motion_covariance_source
           << " last_update_time=" << (g.graph_initialized ?
               std::to_string(g.last_update_time) : "NONE")
@@ -351,6 +354,18 @@ std::string PersistentLandmarkBackend::graphSummary() const
           << " max_update_latency_ms=" << g.max_update_latency_ms
           << " latest_graph_error=" << g.latest_graph_error;
   return summary.str();
+}
+
+void PersistentLandmarkBackend::writeReobservationDiagnosticsCsv(std::ostream &out) const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  shadow_graph_->writeReobservationDiagnosticsCsv(out);
+}
+
+void PersistentLandmarkBackend::writeCounterfactualSnapshots(const std::string &directory) const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  shadow_graph_->writeCounterfactualSnapshots(directory);
 }
 
 bool PersistentLandmarkBackend::latestCorrection(GlobalCorrection *correction) const

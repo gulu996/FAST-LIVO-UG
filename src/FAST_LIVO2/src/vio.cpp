@@ -261,6 +261,14 @@ void VIOManager::shutdownPersistentLandmarkBackend()
     std::ofstream out(path + "landmark_backend_final.txt", std::ios::out);
     if (out) { out << line << '\n'; out.flush(); }
     else std::cerr << "LANDMARK_BACKEND_FINAL_FILE_ERROR path=" << path << std::endl;
+    std::ofstream diagnostics(path + "landmark_reobservation_diagnostics.csv");
+    persistent_landmark_backend_->writeReobservationDiagnosticsCsv(diagnostics);
+    diagnostics.flush();
+    if (!diagnostics)
+      std::cerr << "LANDMARK_REOBSERVATION_CSV_FILE_ERROR path=" << path << std::endl;
+    try { persistent_landmark_backend_->writeCounterfactualSnapshots(path); }
+    catch (const std::exception &e)
+    { std::cerr << "LANDMARK_COUNTERFACTUAL_SNAPSHOT_FILE_ERROR " << e.what() << std::endl; }
   }
   landmark_backend_final_summary_written_ = true;
 }
@@ -338,6 +346,8 @@ void VIOManager::initializeVIO(ros::NodeHandle &nh)
     if (landmark_fusion_mode_ == landmark::FusionMode::GlobalBackend)
     {
       landmark::PersistentBackendConfig backend_config;
+      nh.param<bool>("/aruco_landmarks/global_backend/counterfactual_snapshot_enable",
+                     backend_config.counterfactual_snapshot_enable, false);
       int queue_capacity = 128;
       nh.param<int>("/aruco_landmarks/global_backend/queue_capacity",
                     queue_capacity, queue_capacity);

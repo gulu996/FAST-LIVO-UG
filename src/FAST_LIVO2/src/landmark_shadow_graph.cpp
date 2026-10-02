@@ -13,6 +13,9 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <iomanip>
+#include <fstream>
+#include <ostream>
 #include <stdexcept>
 
 namespace landmark
@@ -51,6 +54,29 @@ const char *sourceName(MotionCovarianceSource source)
     case MotionCovarianceSource::Conservative: return "CONSERVATIVE";
     default: return "UNAVAILABLE";
   }
+}
+
+ReobservationResidual residual(
+    const gtsam::BetweenFactor<gtsam::Pose3> &factor,
+    const gtsam::Values &values)
+{
+  ReobservationResidual result;
+  const auto predicted = values.at<gtsam::Pose3>(factor.key1()).between(
+      values.at<gtsam::Pose3>(factor.key2()));
+  result.logmap = gtsam::Pose3::Logmap(factor.measured().between(predicted));
+  result.unwhitened = factor.unwhitenedError(values);
+  result.whitened = factor.whitenedError(values);
+  result.rotation_deg = result.logmap.head<3>().norm() * 180.0 / M_PI;
+  result.translation_m = result.logmap.tail<3>().norm();
+  result.whitened_squared_norm = result.whitened.squaredNorm();
+  result.factor_error = factor.error(values);
+  result.logmap_factor_difference =
+      (result.logmap - result.unwhitened).norm();
+  if (!result.logmap.allFinite() || !result.unwhitened.allFinite() ||
+      !result.whitened.allFinite() || !std::isfinite(result.factor_error) ||
+      result.logmap_factor_difference > 1e-8)
+    throw std::runtime_error("REOBSERVATION_NONFINITE_OR_FACTOR_CHART_MISMATCH");
+  return result;
 }
 } // namespace
 
@@ -110,6 +136,11 @@ bool SparseLandmarkShadowGraph::update(
     if (duplicate_visual) ++telemetry_.duplicate_factor_count;
   }
   const bool add_visual = visual_eligible && !duplicate_visual;
+  const int landmark_id = input.observation.landmark_id;
+  const auto history = landmark_factor_episodes_.find(landmark_id);
+  const bool reobservation = add_visual &&
+      history != landmark_factor_episodes_.end() &&
+      history->second.first != episode_id;
   if (new_keypose && !keypose_ids_.empty())
   {
     if (!motion || motion->to_keypose_id != keypose.keypose_id ||
@@ -135,13 +166,23 @@ bool SparseLandmarkShadowGraph::update(
     telemetry_.latest_graph_error = "VISUAL_FACTOR_INVALID";
     return false;
   }
-  if (!new_keypose && !add_visual) return true;
+  if (!new_keypose && !add_visual)
+  {
+    if (history != landmark_factor_episodes_.end() &&
+        history->second.first == episode_id)
+      history->second.second = input.observation.timestamp;
+    return true;
+  }
 
   const auto start = std::chrono::steady_clock::now();
   try
   {
     gtsam::NonlinearFactorGraph factors;
     gtsam::Values values;
+    ReobservationDiagnostic diagnostic;
+    CounterfactualSnapshot snapshot;
+    bool have_snapshot = false;
+    gtsam::BetweenFactor<gtsam::Pose3>::shared_ptr visual_factor;
     const gtsam::Key x = keyposeKey(keypose.keypose_id);
     const gtsam::Key l = landmarkKey(input.observation.landmark_id);
     if (new_keypose)
@@ -182,13 +223,117 @@ bool SparseLandmarkShadowGraph::update(
         // Initial value only. Never create a prior on a self-mapped board.
         values.insert(l, pose3(input.landmark_initial_guess));
       }
-      factors.add(gtsam::BetweenFactor<gtsam::Pose3>(
+      visual_factor.reset(new gtsam::BetweenFactor<gtsam::Pose3>(
           x, l, pose3(measurement),
           gtsam::noiseModel::Gaussian::Covariance(
               visualCovarianceRight(input.observation))));
+      if (reobservation)
+      {
+        diagnostic.timestamp = input.observation.timestamp;
+        diagnostic.landmark_id = landmark_id;
+        diagnostic.episode_id = episode_id;
+        diagnostic.previous_episode_id = history->second.first;
+        diagnostic.episode_gap_s = input.observation.timestamp - history->second.second;
+        diagnostic.keypose_id = keypose.keypose_id;
+        diagnostic.observation_id = input.observation_id;
+        diagnostic.pre_keypose_in_isam = !new_keypose;
+        diagnostic.measurement = measurement;
+        diagnostic.visual_covariance_right = visualCovarianceRight(input.observation);
+        diagnostic.motion_covariance_source = motion ?
+            sourceName(motion->covariance_source) : telemetry_.motion_covariance_source;
+        // New K_i has no current ISAM estimate: use the unchanged raw Values
+        // seed, and explicitly identify it in CSV. No extra ISAM update.
+        try
+        {
+          gtsam::Values before = estimate_;
+          before.insert(values);
+          diagnostic.keypose_before = eigenPose(before.at<gtsam::Pose3>(x));
+          diagnostic.landmark_before = eigenPose(before.at<gtsam::Pose3>(l));
+          diagnostic.pre = residual(*visual_factor, before);
+          diagnostic.pre_existing_graph_error = isam_.getFactorsUnsafe().error(before);
+          diagnostic.pre_pending_nonvisual_error = factors.error(before);
+          diagnostic.pre_existing_plus_candidate_error =
+              diagnostic.pre_existing_graph_error + diagnostic.pre.factor_error;
+          diagnostic.pre_augmented_graph_error =
+              diagnostic.pre_existing_plus_candidate_error +
+              diagnostic.pre_pending_nonvisual_error;
+          diagnostic.pre_valid = std::isfinite(diagnostic.pre_augmented_graph_error);
+          if (!diagnostic.pre_valid) throw std::runtime_error("NONFINITE_PRE_GRAPH_ERROR");
+        }
+        catch (const std::exception &e) { diagnostic.diagnostic_error = e.what(); }
+        if (capture_counterfactual_)
+        {
+          try
+          {
+            snapshot.timestamp = input.observation.timestamp;
+            snapshot.observation_id = input.observation_id;
+            snapshot.keypose_id = keypose.keypose_id;
+            snapshot.landmark_id = landmark_id;
+            snapshot.existing = isam_.getFactorsUnsafe();
+            snapshot.motion = factors; // candidate visual is not yet added
+            snapshot.visual.add(visual_factor);
+            snapshot.existing_values = estimate_;
+            snapshot.new_values = values;
+            have_snapshot = true;
+          }
+          catch (const std::exception &) { ++telemetry_.counterfactual_snapshot_failure_count; }
+        }
+      }
+      factors.add(visual_factor);
     }
+    const auto isam_start = std::chrono::steady_clock::now();
     isam_.update(factors, values);
+    const double isam_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - isam_start).count();
     estimate_ = isam_.calculateEstimate();
+    if (reobservation)
+    {
+      diagnostic.factor_accepted = true;
+      diagnostic.isam_update_latency_ms = isam_ms;
+      try
+      {
+        diagnostic.keypose_after = eigenPose(estimate_.at<gtsam::Pose3>(x));
+        diagnostic.landmark_after = eigenPose(estimate_.at<gtsam::Pose3>(l));
+        diagnostic.post = residual(*visual_factor, estimate_);
+        diagnostic.post_full_graph_error = isam_.getFactorsUnsafe().error(estimate_);
+        if (diagnostic.pre_valid)
+        {
+          diagnostic.keypose_delta_translation_m =
+              (diagnostic.keypose_after.translation() -
+               diagnostic.keypose_before.translation()).norm();
+          diagnostic.landmark_delta_translation_m =
+              (diagnostic.landmark_after.translation() -
+               diagnostic.landmark_before.translation()).norm();
+          diagnostic.keypose_delta_rotation_deg = Eigen::AngleAxisd(
+              diagnostic.keypose_before.linear().transpose() *
+              diagnostic.keypose_after.linear()).angle() * 180.0 / M_PI;
+          diagnostic.landmark_delta_rotation_deg = Eigen::AngleAxisd(
+              diagnostic.landmark_before.linear().transpose() *
+              diagnostic.landmark_after.linear()).angle() * 180.0 / M_PI;
+          diagnostic.large_correction =
+              std::max(diagnostic.keypose_delta_translation_m,
+                       diagnostic.landmark_delta_translation_m) >= 2.0 ||
+              std::max(diagnostic.keypose_delta_rotation_deg,
+                       diagnostic.landmark_delta_rotation_deg) >= 30.0;
+        }
+        diagnostic.post_valid = std::isfinite(diagnostic.post_full_graph_error);
+        if (!diagnostic.post_valid) throw std::runtime_error("NONFINITE_POST_GRAPH_ERROR");
+      }
+      catch (const std::exception &e) { diagnostic.diagnostic_error += e.what(); }
+      if (!diagnostic.pre_valid || !diagnostic.post_valid)
+        ++telemetry_.reobservation_diagnostic_failure_count;
+      reobservation_diagnostics_.push_back(diagnostic);
+      ++telemetry_.cross_episode_reobservation_count;
+      if (have_snapshot)
+      {
+        try
+        {
+          snapshot.runtime_post = estimate_;
+          counterfactual_snapshots_.push_back(std::move(snapshot));
+        }
+        catch (const std::exception &) { ++telemetry_.counterfactual_snapshot_failure_count; }
+      }
+    }
     keypose_ids_.insert(keypose.keypose_id);
     if (new_keypose)
     {
@@ -206,7 +351,11 @@ bool SparseLandmarkShadowGraph::update(
       landmark_ids_.insert(input.observation.landmark_id);
       visual_edges_.insert(visual_id);
       ++telemetry_.visual_factor_count;
+      landmark_factor_episodes_[landmark_id] = {episode_id, input.observation.timestamp};
     }
+    else if (history != landmark_factor_episodes_.end() &&
+             history->second.first == episode_id)
+      history->second.second = input.observation.timestamp;
     telemetry_.graph_initialized = true;
     telemetry_.keypose_variable_count = keypose_ids_.size();
     telemetry_.landmark_variable_count = landmark_ids_.size();
@@ -243,6 +392,86 @@ bool SparseLandmarkShadowGraph::estimateLandmark(
   if (!pose || !landmark_ids_.count(id)) return false;
   *pose = eigenPose(estimate_.at<gtsam::Pose3>(landmarkKey(id)));
   return true;
+}
+
+void SparseLandmarkShadowGraph::writeReobservationDiagnosticsCsv(std::ostream &out) const
+{
+  out << "timestamp,landmark_id,episode_id,previous_episode_id,keypose_id,observation_id,"
+         "episode_gap_s,pre_keypose_source,pre_valid,post_valid,factor_accepted,"
+         "motion_covariance_source,isam_update_latency_ms,diagnostic_error";
+  for (const auto *stage : {"pre", "post"})
+  {
+    for (const auto *kind : {"logmap", "unwhitened", "whitened"})
+      for (const auto *axis : {"rx", "ry", "rz", "tx", "ty", "tz"})
+        out << ',' << stage << '_' << kind << '_' << axis;
+    for (const auto *metric : {"rotation_residual_deg", "translation_residual_m",
+         "whitened_error", "whitened_squared_norm", "factor_error", "logmap_factor_difference"})
+      out << ',' << stage << '_' << metric;
+  }
+  out << ",keypose_delta_translation_m,keypose_delta_rotation_deg,"
+         "landmark_delta_translation_m,landmark_delta_rotation_deg,"
+         "pre_existing_graph_error,pre_pending_nonvisual_error,"
+         "pre_existing_plus_candidate_error,pre_augmented_graph_error,"
+         "post_full_graph_error,SHADOW_REOBSERVATION_LARGE_CORRECTION";
+  for (const auto *name : {"measurement", "keypose_before", "keypose_after",
+                          "landmark_before", "landmark_after"})
+    for (const auto *component : {"x", "y", "z", "qx", "qy", "qz", "qw"})
+      out << ',' << name << '_' << component;
+  for (int row = 0; row < 6; ++row)
+    for (int col = 0; col < 6; ++col)
+      out << ",visual_covariance_right_" << row << col;
+  out << '\n' << std::setprecision(17);
+  for (const auto &d : reobservation_diagnostics_)
+  {
+    std::string error = d.diagnostic_error;
+    for (auto &c : error) if (c == ',' || c == '\r' || c == '\n') c = '|';
+    out << d.timestamp << ',' << d.landmark_id << ',' << d.episode_id << ','
+        << d.previous_episode_id << ',' << d.keypose_id << ',' << d.observation_id
+        << ',' << d.episode_gap_s << ','
+        << (d.pre_keypose_in_isam ? "CURRENT_ISAM_ESTIMATE" : "NEW_RAW_VALUES_SEED")
+        << ',' << d.pre_valid << ',' << d.post_valid << ',' << d.factor_accepted
+        << ',' << d.motion_covariance_source << ',' << d.isam_update_latency_ms
+        << ',' << error;
+    for (const auto *r : {&d.pre, &d.post})
+    {
+      for (const auto *v : {&r->logmap, &r->unwhitened, &r->whitened})
+        for (int i = 0; i < 6; ++i) out << ',' << (*v)(i);
+      out << ',' << r->rotation_deg << ',' << r->translation_m << ','
+          << std::sqrt(r->whitened_squared_norm) << ',' << r->whitened_squared_norm
+          << ',' << r->factor_error << ',' << r->logmap_factor_difference;
+    }
+    out << ',' << d.keypose_delta_translation_m << ',' << d.keypose_delta_rotation_deg
+        << ',' << d.landmark_delta_translation_m << ',' << d.landmark_delta_rotation_deg
+        << ',' << d.pre_existing_graph_error << ',' << d.pre_pending_nonvisual_error
+        << ',' << d.pre_existing_plus_candidate_error << ',' << d.pre_augmented_graph_error
+        << ',' << d.post_full_graph_error << ',' << d.large_correction;
+    for (const auto *p : {&d.measurement, &d.keypose_before, &d.keypose_after,
+                         &d.landmark_before, &d.landmark_after})
+    {
+      const Eigen::Quaterniond q(p->linear());
+      out << ',' << p->translation().x() << ',' << p->translation().y()
+          << ',' << p->translation().z() << ',' << q.x() << ',' << q.y()
+          << ',' << q.z() << ',' << q.w();
+    }
+    for (int row = 0; row < 6; ++row)
+      for (int col = 0; col < 6; ++col) out << ',' << d.visual_covariance_right(row, col);
+    out << '\n';
+  }
+}
+
+void SparseLandmarkShadowGraph::writeCounterfactualSnapshots(const std::string &directory) const
+{
+  for (const auto &snapshot : counterfactual_snapshots_)
+  {
+    const auto path = directory + "/landmark_counterfactual_obs" +
+                      std::to_string(snapshot.observation_id) + ".snapshot";
+    std::ifstream existing(path);
+    if (existing.good()) throw std::runtime_error("snapshot already exists: " + path);
+    std::ofstream out(path);
+    writeCounterfactualSnapshot(out, snapshot);
+    out.close();
+    if (!out) throw std::runtime_error("snapshot close failed: " + path);
+  }
 }
 
 } // namespace landmark

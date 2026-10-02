@@ -1,4 +1,7 @@
 # Isolated replay overlay on config/mid360.yaml, not a production profile.
+common:
+  img_en: 1 # legacy visual replay must not inherit a production LIO-only switch
+
 extrin_calib:
   # Candidate A: first commented old 1280x1024 calibration in mid360.yaml.
   extrinsic_T: [-0.011, -0.02329, 0.04412]
