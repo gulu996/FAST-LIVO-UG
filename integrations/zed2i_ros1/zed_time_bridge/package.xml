@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>zed_time_bridge</name>
+  <version>0.1.0</version>
+  <description>Shadow-only ZED clock mapping and reproducible timestamp diagnostics.</description>
+  <maintainer email="gulu@example.invalid">gulu</maintainer>
+  <license>BSD-3-Clause</license>
+  <buildtool_depend>catkin</buildtool_depend>
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>sensor_time_bridge</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+</package>

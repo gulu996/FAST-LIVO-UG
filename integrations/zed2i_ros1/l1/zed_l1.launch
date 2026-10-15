@@ -1,0 +1,6 @@
+<launch>
+  <arg name="serial_number" default="0"/>
+  <include file="$(find zed_wrapper)/launch/zed2i.launch"/>
+  <rosparam command="load" ns="/zed2i/zed_node" file="$(dirname)/zed_l1.yaml"/>
+  <param name="/zed2i/zed_node/general/serial_number" value="$(arg serial_number)" type="int"/>
+</launch>

@@ -1,0 +1,8 @@
+<launch>
+  <!-- No image or CameraInfo subscription and no camera lifecycle operation. -->
+  <arg name="outdir"/>
+  <arg name="duration" default="30"/>
+  <arg name="anchor" default="$(env HOME)/timeshare_imu"/>
+  <node pkg="zed_time_bridge" type="zed_time_audit.py" name="zed_time_shadow_clock"
+        output="screen" args="record --outdir $(arg outdir) --duration $(arg duration) --anchor $(arg anchor)"/>
+</launch>

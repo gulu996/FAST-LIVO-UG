@@ -1,0 +1,15 @@
+build*/
+devel*/
+install*/
+evidence*/
+log/
+logs/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.so
+*.bag
+*.bag.active
+*.svo
+*.svo2
+*.pcd
