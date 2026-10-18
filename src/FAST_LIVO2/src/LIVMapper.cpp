@@ -3329,7 +3329,8 @@ void LIVMapper::run()
     return oss.str();
   };
 
-  ros::Rate rate(5000);
+  // Keep idle callback polling alive when rosbag stops publishing /clock.
+  ros::WallRate rate(5000);
   int i = 0;
   double sum = 0, t = 0;
   while (ros::ok()) 
