@@ -474,3 +474,7 @@ endif()
 
 # Link libusb-1.0 (required by PCL IO)
 target_link_libraries(fastlivo_mapping usb-1.0)
+
+# Standalone initialized-IMU transaction contract check (no ROS master or bag).
+add_executable(imu_transaction_self_test src/imu_transaction_self_test.cpp)
+target_link_libraries(imu_transaction_self_test imu_proc ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenMP_CXX_FLAGS})

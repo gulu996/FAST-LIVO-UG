@@ -101,7 +101,19 @@ public:
   {
     return p4_fixed_velocity_cloud_;
   }
+  double coverageStateTime() const { return last_prop_end_time; }
+  double coverageCarryTime() const { return last_imu->header.stamp.toSec(); }
+  bool coverageNeedsRight(double request, size_t count, double last_selected) const {
+    return !imu_need_init && request > last_prop_end_time && count <= 1 &&
+        last_selected < request && (count == 0 || coverageCarryTime() < last_prop_end_time);
+  }
+  bool coveragePredictionComplete(double request) const {
+    return coverage_complete_ && last_prop_end_time == request;
+  }
+  bool coverage_complete_ = false; // observer/commit gate, not part of F/Q
   Snapshot captureSnapshot() const;
+  Snapshot causalCaptureSnapshot() const;
+  void causalRestoreSnapshot(const Snapshot &snapshot);
   void restoreSnapshot(const Snapshot &snapshot);
 
   ofstream fout_imu;

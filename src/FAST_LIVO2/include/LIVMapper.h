@@ -14,6 +14,7 @@ which is included as part of this source code package.
 #define LIV_MAPPER_H
 
 #include "IMU_Processing.h"
+#include "imu_transaction_interface.h"
 #include "gnss_manager.h"
 #include "vio.h"
 #include "preprocess.h"
@@ -333,6 +334,9 @@ public:
 
   PreprocessPtr p_pre;
   ImuProcessPtr p_imu;
+  // ponytail: one estimator thread per mapper; callbacks only append under mtx_buffer.
+  imu_transaction::WorkingCheckpoint imu_working_;
+  uint64_t imu_vio_accepted_before_ = 0;
   VoxelMapManagerPtr voxelmap_manager;
   VIOManagerPtr vio_manager;
   UwbManagerPtr uwb_manager;

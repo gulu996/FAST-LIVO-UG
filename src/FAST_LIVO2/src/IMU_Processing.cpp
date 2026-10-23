@@ -121,6 +121,93 @@ void ImuProcess::restoreSnapshot(const Snapshot &snapshot)
   p4_fixed_velocity_cloud_->clear();
 }
 
+ImuProcess::Snapshot ImuProcess::causalCaptureSnapshot() const
+{
+  if (!imu_en || imu_need_init || b_first_frame) throw std::logic_error("causal trace requires initialized IMU");
+  Snapshot result;
+  result.pcl_wait_proc = pcl_wait_proc;
+  result.has_last_imu = static_cast<bool>(last_imu);
+  if (last_imu) result.last_imu = *last_imu;
+  if (cur_pcl_un_) result.cur_pcl_un = *cur_pcl_un_;
+  result.imu_pose = IMUpose;
+  result.lidar_rotation_to_imu = Lid_rot_to_IMU;
+  result.lidar_offset_to_imu = Lid_offset_to_IMU;
+  result.mean_acc = mean_acc;
+  result.mean_gyr = mean_gyr;
+  result.angular_velocity_last = angvel_last;
+  result.specific_acceleration_last = acc_s_last;
+  result.last_propagation_end_time = last_prop_end_time;
+  // ponytail: initialized IMU valid mask: time_last_scan is inactive (no-IMU path only).
+  result.initialization_iteration = init_iter_num;
+  result.maximum_initialization_count = MAX_INI_COUNT;
+  result.first_frame = b_first_frame;
+  result.imu_enabled = imu_en;
+  result.gravity_estimation_enabled = gravity_est_en;
+  result.bias_estimation_enabled = ba_bg_est_en;
+  result.exposure_estimation_enabled = exposure_estimate_en;
+  if (!b_first_frame) result.imu_mean_acc_norm = IMU_mean_acc_norm;
+  // unbiased_gyr is never assigned/read by the active Process2 path.
+  result.covariance_acc = cov_acc;
+  result.covariance_gyr = cov_gyr;
+  result.covariance_bias_gyr = cov_bias_gyr;
+  result.covariance_bias_acc = cov_bias_acc;
+  result.covariance_inverse_exposure = cov_inv_expo;
+  result.first_lidar_time = first_lidar_time;
+  result.imu_time_initialized = imu_time_init;
+  result.imu_needs_initialization = imu_need_init;
+  result.scan_history_active = scan_history_active_;
+  result.scan_history_origin_time = scan_history_origin_time_;
+  // lidar_type is only read in Forward_without_imu (excluded by gate).
+  result.identity3 = Eye3d;
+  result.zero3 = Zero3d;
+  return result;
+}
+
+void ImuProcess::causalRestoreSnapshot(const Snapshot &snapshot)
+{
+  pcl_wait_proc = snapshot.pcl_wait_proc;
+  if (snapshot.has_last_imu)
+    last_imu.reset(new sensor_msgs::Imu(snapshot.last_imu));
+  else
+    last_imu.reset();
+  cur_pcl_un_.reset(new PointCloudXYZI(snapshot.cur_pcl_un));
+  IMUpose = snapshot.imu_pose;
+  Lid_rot_to_IMU = snapshot.lidar_rotation_to_imu;
+  Lid_offset_to_IMU = snapshot.lidar_offset_to_imu;
+  mean_acc = snapshot.mean_acc;
+  mean_gyr = snapshot.mean_gyr;
+  angvel_last = snapshot.angular_velocity_last;
+  acc_s_last = snapshot.specific_acceleration_last;
+  last_prop_end_time = snapshot.last_propagation_end_time;
+
+  init_iter_num = snapshot.initialization_iteration;
+  MAX_INI_COUNT = snapshot.maximum_initialization_count;
+  b_first_frame = snapshot.first_frame;
+  imu_en = snapshot.imu_enabled;
+  gravity_est_en = snapshot.gravity_estimation_enabled;
+  ba_bg_est_en = snapshot.bias_estimation_enabled;
+  exposure_estimate_en = snapshot.exposure_estimation_enabled;
+  if (!snapshot.first_frame) IMU_mean_acc_norm = snapshot.imu_mean_acc_norm;
+
+  cov_acc = snapshot.covariance_acc;
+  cov_gyr = snapshot.covariance_gyr;
+  cov_bias_gyr = snapshot.covariance_bias_gyr;
+  cov_bias_acc = snapshot.covariance_bias_acc;
+  cov_inv_expo = snapshot.covariance_inverse_exposure;
+  first_lidar_time = snapshot.first_lidar_time;
+  imu_time_init = snapshot.imu_time_initialized;
+  imu_need_init = snapshot.imu_needs_initialization;
+  scan_history_active_ = snapshot.scan_history_active;
+  scan_history_origin_time_ = snapshot.scan_history_origin_time;
+
+  Eye3d = snapshot.identity3;
+  Zero3d = snapshot.zero3;
+  p4_deskew_diagnostics_ = fast_livo::p4::DeskewDiagnostics();
+  p4_raw_cloud_->clear();
+  p4_fixed_velocity_cloud_->clear();
+}
+
+
 void ImuProcess::Reset()
 {
   ROS_WARN("Reset ImuProcess");
@@ -389,6 +476,35 @@ void ImuProcess::Forward_without_imu(LidarMeasureGroup &meas, StatesGroup &state
 
 void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_inout, PointCloudXYZI &pcl_out)
 {
+  // Real lookahead is support, never consumption.
+  // ponytail: only deficient 0/1-new-sample intervals use this path; the normal
+  // pair-mean and F/Q path is frozen. No interpolation model is introduced.
+  const auto &coverage_measure = lidar_meas.measures.back();
+  const double coverage_request = lidar_meas.lio_vio_flg == LIO
+      ? coverage_measure.lio_time : coverage_measure.vio_time;
+  const bool coverage_has_right = !coverage_measure.imu.empty() &&
+      coverage_measure.imu.back()->header.stamp.toSec() > coverage_request;
+  const size_t coverage_new_count = coverage_measure.imu.size() - size_t(coverage_has_right);
+  const double coverage_last_selected = coverage_new_count
+      ? coverage_measure.imu[coverage_new_count-1]->header.stamp.toSec()
+      : last_imu->header.stamp.toSec();
+  const bool coverage_deficient = coverage_request > last_prop_end_time &&
+      coverage_new_count <= 1 && coverage_last_selected < coverage_request &&
+      (coverage_new_count == 0 || last_imu->header.stamp.toSec() < last_prop_end_time);
+  if (coverage_deficient && !coverage_has_right)
+    throw std::runtime_error("SHORT_IMU_NOT_READY: received right support required before consumption");
+  if (coverage_has_right && !coverage_deficient)
+    throw std::runtime_error("SHORT_IMU_INVALID: unexpected lookahead on normal path");
+  if (coverage_deficient) {
+    double prior = last_imu->header.stamp.toSec();
+    if (prior > last_prop_end_time) throw std::runtime_error("SHORT_IMU_INVALID: carry newer than state");
+    for (const auto &u : coverage_measure.imu) {
+      const double t = u->header.stamp.toSec();
+      if (!std::isfinite(t) || t <= prior)
+        throw std::runtime_error("SHORT_IMU_INVALID: unordered support");
+      prior = t;
+    }
+  }
   double t0 = omp_get_wtime();
   pcl_out.clear();
   /*** add the imu of the last frame-tail to the of current frame-head ***/
@@ -507,6 +623,8 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
   M3D R_imu(state_inout.rot_end);
   MD(DIM_STATE, DIM_STATE) F_x, cov_w;
   double dt, dt_all = 0.0;
+  double coverage_end = prop_beg_time;
+  bool coverage_contiguous = true;
   double offs_t;
   // double imu_time;
   double tau;
@@ -537,7 +655,9 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
       auto head = v_imu[i];
       auto tail = v_imu[i + 1];
 
-      if (tail->header.stamp.toSec() < prop_beg_time) continue;
+      if (tail->header.stamp.toSec() < prop_beg_time) {
+        continue;
+      }
 
       angvel_avr << 0.5 * (head->angular_velocity.x + tail->angular_velocity.x), 0.5 * (head->angular_velocity.y + tail->angular_velocity.y),
           0.5 * (head->angular_velocity.z + tail->angular_velocity.z);
@@ -560,7 +680,16 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
       angvel_avr -= state_inout.bias_g;
       acc_avr = acc_avr * G_m_s2 / mean_acc.norm() - state_inout.bias_a;
 
-      if (head->header.stamp.toSec() < prop_beg_time)
+      double interval_start = last_prop_end_time, interval_end = tail->header.stamp.toSec();
+      if (coverage_deficient)
+      {
+        interval_start = std::max(head->header.stamp.toSec(), prop_beg_time);
+        interval_end = std::min(tail->header.stamp.toSec(), prop_end_time);
+        dt = interval_end - interval_start;
+        if (!(dt > 0.0)) throw std::runtime_error("SHORT_IMU_INVALID: nonpositive covered interval");
+        offs_t = interval_end - pose_time_origin;
+      }
+      else if (head->header.stamp.toSec() < prop_beg_time)
       {
         // printf("00 \n");
         dt = tail->header.stamp.toSec() - last_prop_end_time;
@@ -568,17 +697,21 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
       }
       else if (i != v_imu.size() - 2)
       {
+        interval_start = head->header.stamp.toSec();
         // printf("11 \n");
         dt = tail->header.stamp.toSec() - head->header.stamp.toSec();
         offs_t = tail->header.stamp.toSec() - pose_time_origin;
       }
       else
       {
+        interval_start = head->header.stamp.toSec(); interval_end = prop_end_time;
         // printf("22 \n");
         dt = prop_end_time - head->header.stamp.toSec();
         offs_t = prop_end_time - pose_time_origin;
       }
 
+      coverage_contiguous = coverage_contiguous && dt > 0.0 && interval_start == coverage_end;
+      coverage_end = interval_end;
       dt_all += dt;
       // printf("[ LIO Propagation ] dt: %lf \n", dt);
 
@@ -676,8 +809,12 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
   // cout<<"[ Propagation ] output state: "<<state_inout.vel_end.transpose() <<
   // state_inout.pos_end.transpose()<<endl;
 
-  last_imu = v_imu.back();
+  if (coverage_deficient && std::fabs(dt_all - (prop_end_time-prop_beg_time)) > 1e-12)
+    throw std::runtime_error("SHORT_IMU_INVALID: incomplete interval union");
+  last_imu = coverage_has_right ? v_imu[v_imu.size()-2] : v_imu.back();
   last_prop_end_time = prop_end_time;
+  coverage_complete_ = coverage_contiguous && coverage_end == prop_end_time &&
+      std::fabs(dt_all - (prop_end_time-prop_beg_time)) <= 1e-12;
 
   double t1 = omp_get_wtime();
 
@@ -711,10 +848,17 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
     V3D exrR_extT(Lid_rot_to_IMU.transpose() * Lid_offset_to_IMU);
     const V3D p4_fixed_end_position =
         p4_seed_position + p4_seed_velocity * (prop_end_time - prop_beg_time);
-    for (auto it_kp = IMUpose.end() - 1; it_kp != IMUpose.begin(); it_kp--)
+    // ponytail: only the first point can be revisited; local completion avoids per-point storage.
+    bool point_zero_written = false;
+    bool uncovered_points_exhausted = false;
+    const double raw_to_history = lidar_meas.lidar_frame_beg_time - pose_time_origin;
+    const auto point_history_offset = [raw_to_history](const PointType &point) {
+      return raw_to_history + point.curvature / double(1000);
+    };
+    // ponytail: monotone point traversal needs no per-point ownership container.
+    // Include the last node; exact timestamps use the last saved node at that time.
+    for (auto head = IMUpose.rbegin(); head != IMUpose.rend() && !uncovered_points_exhausted && !point_zero_written; ++head)
     {
-      auto head = it_kp - 1;
-      auto tail = it_kp;
       R_imu << MAT_FROM_ARRAY(head->rot);
       acc_imu << VEC_FROM_ARRAY(head->acc);
       // cout<<"head imu acc: "<<acc_imu.transpose()<<endl;
@@ -726,9 +870,18 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
       // printf("it_pcl->curvature: %lf pt dt: %lf \n", it_pcl->curvature,
       // it_pcl->curvature / double(1000) - head->offset_time);
 
-      for (; it_pcl->curvature / double(1000) > head->offset_time; it_pcl--)
+      for (; point_history_offset(*it_pcl) >= head->offset_time; it_pcl--)
       {
-        dt = it_pcl->curvature / double(1000) - head->offset_time;
+        // Do not extrapolate points beyond the actual saved history.
+        if (point_history_offset(*it_pcl) > IMUpose.back().offset_time) {
+          if (it_pcl == pcl_wait_proc.points.begin()) {
+            uncovered_points_exhausted = true;
+            break;
+          }
+          if (p4_diagnostics_enabled_) --it_p4;
+          continue;
+        }
+        dt = point_history_offset(*it_pcl) - head->offset_time;
 
         /* Transform to the 'end' frame */
         M3D R_i(R_imu * Exp(angvel_avr, dt));
@@ -761,7 +914,9 @@ void ImuProcess::UndistortPcl(LidarMeasureGroup &lidar_meas, StatesGroup &state_
         it_pcl->y = P_compensate(1);
         it_pcl->z = P_compensate(2);
 
-        if (it_pcl == pcl_wait_proc.points.begin()) break;
+        if (it_pcl == pcl_wait_proc.points.begin()) {
+          point_zero_written = true; break;
+        }
         if (p4_diagnostics_enabled_) --it_p4;
       }
     }
@@ -872,6 +1027,20 @@ void ImuProcess::Process2(LidarMeasureGroup &lidar_meas, StatesGroup &stat, Poin
     if (init_iter_num > MAX_INI_COUNT)
     {
       // cov_acc *= pow(G_m_s2 / mean_acc.norm(), 2);
+      // Initialization statistics create a prior at their last real IMU sample.
+      // They are not a propagated trajectory over the statistics window.
+      const double anchor_time = last_imu->header.stamp.toSec();
+      if (!std::isfinite(anchor_time) || anchor_time <= 0.0 || anchor_time > pcl_end_time)
+        throw std::runtime_error("INIT_TIME_INVALID: last initialization sample");
+      last_prop_end_time = anchor_time;
+      IMUpose.clear(); // Discard pre-initialization seeds in a different reference.
+      scan_history_active_ = false;
+      scan_history_origin_time_ = 0.0;
+      angvel_last = V3D(last_imu->angular_velocity.x, last_imu->angular_velocity.y,
+                       last_imu->angular_velocity.z) - stat.bias_g;
+      acc_s_last = stat.rot_end * (V3D(last_imu->linear_acceleration.x,
+          last_imu->linear_acceleration.y, last_imu->linear_acceleration.z) *
+          G_m_s2 / mean_acc.norm() - stat.bias_a) + stat.gravity;
       imu_need_init = false;
       ROS_INFO("IMU Initials: Gravity: %.4f %.4f %.4f %.4f; acc covarience: "
                "%.8f %.8f %.8f; gry covarience: %.8f %.8f %.8f \n",

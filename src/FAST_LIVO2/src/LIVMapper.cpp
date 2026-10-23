@@ -2066,7 +2066,25 @@ void LIVMapper::processImu()
   if (event_time < LidarMeasures.last_lio_update_time - 1e-6)
     throw std::logic_error("sensor event would move the estimator timestamp backwards");
 
-  p_imu->Process2(LidarMeasures, _state, feats_undistort);
+  if (slam_mode_ == LIVO && !p_imu->imu_need_init)
+  {
+    imu_working_.begin(_state, *p_imu);
+    imu_vio_accepted_before_ = runtime_events_.vio_accepted;
+  }
+  const auto &coverage_group = LidarMeasures.measures.back();
+  const bool coverage_working = !p_imu->imu_need_init && !coverage_group.imu.empty() &&
+      coverage_group.imu.back()->header.stamp.toSec() > event_time;
+  if (coverage_working)
+  {
+    StatesGroup working = _state;
+    p_imu->Process2(LidarMeasures, working, feats_undistort);
+    if (!p_imu->coveragePredictionComplete(event_time) || !working.cov.allFinite() ||
+        !working.rot_end.allFinite() || !working.pos_end.allFinite() || !working.vel_end.allFinite())
+      throw std::runtime_error("SHORT_IMU_INVALID: no shared prediction commit");
+    _state = working;
+  }
+  else
+    p_imu->Process2(LidarMeasures, _state, feats_undistort);
   // IMU initialization returns before UndistortPcl updates this boundary.
   // The scheduler still owns the event and has consumed IMU through it.
   LidarMeasures.last_lio_update_time = event_time;
@@ -2112,7 +2130,11 @@ void LIVMapper::stateEstimationAndMapping()
         std::cout << "[ Flow ] Dispatch VIO frame #" << vio_dispatch_count
                   << " (LIO dispatched=" << lio_dispatch_count << ")" << std::endl;
       }
-      handleVIO();
+      {
+        imu_transaction::StateBinding binding(vio_manager->state, vio_manager->state_propagat,
+                                              _state, state_propagat);
+        handleVIO();
+      }
       if (slam_mode_ == LIVO)
         p_imu->updateLidarScanPose(LidarMeasures.last_lio_update_time, _state);
       break;
@@ -2129,6 +2151,19 @@ void LIVMapper::stateEstimationAndMapping()
       break;
   }
   snapStateForDeterminism(_state);
+  if (slam_mode_ == LIVO && imu_working_.active())
+  {
+    const bool scan = LidarMeasures.lio_vio_flg == LIO;
+    const bool accepted = scan ? voxelmap_manager->getLastLioDiagnostics().commit
+        : runtime_events_.vio_accepted > imu_vio_accepted_before_;
+    imu_working_.finish(_state, *p_imu, accepted, scan);
+    if (accepted || scan)
+    {
+      std::lock_guard<std::mutex> lock(mtx_buffer);
+      imu_transaction::release(imu_buffer, p_imu->coverageStateTime());
+    }
+    state_propagat = _state;
+  }
   voxelmap_manager->state_ = _state;
   if (state_update_flg) latest_ekf_state = _state;
 }
@@ -2437,6 +2472,8 @@ void LIVMapper::handleVIO()
     return;
   }
     
+  if (!p_imu->coveragePredictionComplete(LidarMeasures.last_lio_update_time))
+    throw std::runtime_error("VIO_TEMPORAL_COMMIT_BLOCKED: incomplete prediction");
   std::cout << "[ VIO ] Raw feature num: "
             << (has_fresh_lidar_features ? pcl_w_wait_pub->points.size() : 0)
             << std::endl;
@@ -4023,6 +4060,18 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
                   return a->header.stamp.toSec() < b->header.stamp.toSec();
                 });
     }
+    if (!p_imu->imu_need_init)
+    {
+      const auto selected = imu_transaction::view(imu_buffer, *p_imu, event_time);
+      if (!selected.ready)
+      {
+        mtx_buffer.unlock();
+        return false;
+      }
+      m.imu = selected.samples;
+    }
+    else
+    {
     while (!imu_buffer.empty())
     {
       const double imu_time = imu_buffer.front()->header.stamp.toSec();
@@ -4030,6 +4079,8 @@ bool LIVMapper::sync_packages(LidarMeasureGroup &meas)
       if (imu_time > meas.last_lio_update_time + kTimeEpsilon)
         m.imu.push_back(imu_buffer.front());
       imu_buffer.pop_front();
+    }
+
     }
 
     meas.measures.clear();
