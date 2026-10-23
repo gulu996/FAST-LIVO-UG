@@ -13,13 +13,6 @@ extrin_calib:
 
 gnss_fusion:
   enable: false
-gps:
-  enable: false
-  update_en: false
-uwb:
-  enable: false
-  update_en: false
-
 aruco_landmarks:
   aruco_landmarks_en: true
   fusion_mode: global_backend

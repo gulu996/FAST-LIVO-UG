@@ -208,7 +208,6 @@ add_library(imu_proc src/IMU_Processing.cpp)
 add_library(p4_fork_snapshot src/p4_fork_snapshot.cpp)
 add_library(p4_fork_harness src/p4_fork_harness.cpp)
 add_library(uwb src/uwb_manager.cpp)
-add_library(gnss src/gnss_manager.cpp)
 add_library(gnss_adapter src/gnss_adapter.cpp)
 add_library(gnss_fault_injector src/gnss_fault_injector.cpp)
 add_library(rtk_fixed_lag_backend src/rtk_fixed_lag_backend.cpp)
@@ -216,7 +215,6 @@ add_library(fullstate_shadow_backend src/fullstate_shadow_backend.cpp)
 add_library(camera_aligned_neu_logger src/camera_aligned_neu_logger.cpp)
 add_library(laser_mapping src/LIVMapper.cpp)
 
-add_dependencies(gnss ${catkin_EXPORTED_TARGETS})
 add_dependencies(uwb ${catkin_EXPORTED_TARGETS})
 add_dependencies(laser_mapping ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
@@ -225,7 +223,6 @@ add_executable(fastlivo_mapping src/main.cpp)
 add_executable(visionpro_pointcloud_gateway src/visionpro_pointcloud_gateway.cpp)
 target_link_libraries(visionpro_pointcloud_gateway ${catkin_LIBRARIES} ${Boost_LIBRARIES})
 add_dependencies(visionpro_pointcloud_gateway ${catkin_EXPORTED_TARGETS})
-add_executable(gnss_manager_self_test src/gnss_manager_self_test.cpp)
 add_executable(uwb_manager_self_test src/uwb_manager_self_test.cpp)
 add_executable(gnss_adapter_node src/gnss_adapter_node.cpp)
 add_executable(gnss_adapter_self_test src/gnss_adapter_self_test.cpp)
@@ -289,7 +286,6 @@ add_executable(landmark_counterfactual_probe src/landmark_counterfactual_probe.c
 target_link_libraries(landmark_counterfactual_probe landmark_shadow_graph gtsam)
 
 add_dependencies(fastlivo_mapping ${catkin_EXPORTED_TARGETS})
-add_dependencies(gnss_manager_self_test ${catkin_EXPORTED_TARGETS})
 add_dependencies(uwb_manager_self_test ${catkin_EXPORTED_TARGETS})
 add_dependencies(preprocess_xyzirt_self_test ${catkin_EXPORTED_TARGETS})
 add_dependencies(p4_fork_snapshot_self_test ${catkin_EXPORTED_TARGETS})
@@ -317,7 +313,6 @@ target_link_libraries(gnss_fault_injector ${catkin_LIBRARIES})
 # Link libraries to the executable
 target_link_libraries(fastlivo_mapping
   laser_mapping
-  gnss
   uwb
   vio
   lio
@@ -355,14 +350,6 @@ target_link_libraries(p4_fork_snapshot_self_test
   ${Boost_LIBRARIES}
 )
 
-target_link_libraries(gnss_manager_self_test
-  gnss
-  ${catkin_LIBRARIES}
-  ${PCL_LIBRARIES}
-  ${OpenCV_LIBRARIES}
-  ${Sophus_LIBRARIES}
-  ${Boost_LIBRARIES}
-)
 
 target_link_libraries(uwb_manager_self_test
   uwb
@@ -459,10 +446,10 @@ target_link_libraries(preprocess_xyzirt_self_test
 )
 
 if(OpenMP_CXX_FOUND)
+  # IMU uses OpenMP directly; do not rely on the removed GNSS library to link it.
+  target_link_libraries(imu_proc ${OpenMP_CXX_FLAGS})
   target_link_libraries(vio_update_transaction_self_test ${OpenMP_CXX_FLAGS})
   target_link_libraries(lio_motion_consistency_self_test ${OpenMP_CXX_FLAGS})
-  target_link_libraries(gnss ${OpenMP_CXX_FLAGS})
-  target_link_libraries(gnss_manager_self_test ${OpenMP_CXX_FLAGS})
   target_link_libraries(uwb_manager_self_test ${OpenMP_CXX_FLAGS})
   target_link_libraries(rtk_fixed_lag_backend ${OpenMP_CXX_FLAGS})
 endif()
@@ -478,3 +465,14 @@ target_link_libraries(fastlivo_mapping usb-1.0)
 # Standalone initialized-IMU transaction contract check (no ROS master or bag).
 add_executable(imu_transaction_self_test src/imu_transaction_self_test.cpp)
 target_link_libraries(imu_transaction_self_test imu_proc ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenMP_CXX_FLAGS})
+
+# Self-tests must execute their assertions in Release builds as well.
+target_compile_options(uwb_manager_self_test PRIVATE -UNDEBUG)
+target_compile_options(gnss_fusion_policy_self_test PRIVATE -UNDEBUG)
+
+# Scoped software fixtures; require an isolated ROS master and explicit input/output paths.
+add_executable(backend_odometry_commit_self_test src/backend_odometry_commit_self_test.cpp)
+get_target_property(LIVO_TEST_LINK_LIBRARIES fastlivo_mapping LINK_LIBRARIES)
+target_link_libraries(backend_odometry_commit_self_test ${LIVO_TEST_LINK_LIBRARIES} rtk_fixed_lag_backend)
+add_executable(backend_real_input_self_test src/backend_real_input_self_test.cpp)
+target_link_libraries(backend_real_input_self_test rtk_fixed_lag_backend gnss_adapter uwb ${catkin_LIBRARIES})

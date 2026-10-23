@@ -166,14 +166,6 @@ uav:
   imu_rate_odom: false
   gravity_align_en: false
 
-uwb:
-  enable: false
-  update_en: false
-
-gps:
-  enable: false
-  update_en: false
-
 gnss_fusion:
   enable: true
 

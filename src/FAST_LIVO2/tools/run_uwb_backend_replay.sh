@@ -59,17 +59,11 @@ fi
 rosparam set /gnss_fusion/enable false
 rosparam set /local_map/half_map_size "$half_map"
 rosparam set /uwb/replay_file "$uwb_txt"
-rosparam set /uwb/update_en false
 rosparam set /uwb/anchor_frame_align_en false
 rosparam set /rtk_backend/enable true
 rosparam set /rtk_backend/uwb_factor_backend_en "$uwb_backend"
 rosparam set /rtk_backend/uwb_anchor_allowlist "$allowlist"
 rosparam set /pcd_save/pcd_save_en "$save_map"
-if [[ "$uwb_backend" == true ]]; then
-  rosparam set /uwb/enable true
-else
-  rosparam set /uwb/enable false
-fi
 
 rosrun fast_livo fastlivo_mapping __name:=laserMapping \
   _save_path:="" _use_gnss_fusion_enable:=true \

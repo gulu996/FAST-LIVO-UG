@@ -96,13 +96,6 @@ LIVMapper::LIVMapper(ros::NodeHandle &nh)
   GnssFusionPolicy fusion_policy;
   if (!loadGnssFusionPolicy(nh, fusion_policy))
     throw std::runtime_error("missing GNSS fusion unified enable parameter");
-  gnss_fusion_fixed_lag_mode_ = fusion_policy.managed && fusion_policy.enabled;
-  if (gnss_fusion_fixed_lag_mode_)
-  {
-    ROS_WARN("[GNSS_FUSION] RTK fixed-lag mode active: legacy GPS input and "
-             "front-end GPS/UWB absolute state updates are suppressed; "
-             "/backend/livo_odom_raw remains pure LIVO.");
-  }
   VoxelMapConfig voxel_config;
   loadVoxelConfig(nh, voxel_config);
   if (deterministic_debug_en_) voxel_config.deterministic_lio_update_en = true;
@@ -119,11 +112,9 @@ LIVMapper::LIVMapper(ros::NodeHandle &nh)
   p_imu->enable_p4_diagnostics(voxel_config.p4_frontend_diagnostics_enable);
   vio_manager.reset(new VIOManager());
   uwb_manager.reset(new UwbManager());
-  gnss_manager.reset(new GnssManager());
   root_dir = ROOT_DIR;
   initializeFiles();
   uwb_manager->initialize(nh, save_path);
-  gnss_manager->initialize(nh, save_path);
   initializeComponents(nh);
   fast_livo::p4b::HarnessConfig p4b_config;
   p4b_config.enabled = voxel_config.p4b_snapshot_enable;
@@ -176,7 +167,6 @@ LIVMapper::~LIVMapper()
   if (fout_runtime_events.is_open()) fout_runtime_events.flush();
   if (fout_visual_image_flow.is_open()) fout_visual_image_flow.flush();
   if (fout_livo_scan_contract.is_open()) fout_livo_scan_contract.flush();
-  if (gnss_manager) gnss_manager->shutdown();
   if (uwb_manager) uwb_manager->shutdown();
   if (udp_socket_fd_ >= 0)
   {
@@ -416,24 +406,6 @@ void LIVMapper::readParameters(ros::NodeHandle &nh)
   nh.param<double>("time_offset/lidar_time_offset", lidar_time_offset, 0.0);
   nh.param<bool>("uav/imu_rate_odom", imu_prop_enable, false);
   nh.param<bool>("uav/gravity_align_en", gravity_align_en, false);
-  nh.param<bool>("uwb/output_correction_en", uwb_output_correction_en_, false);
-  nh.param<bool>("uwb/output_smooth_en", uwb_output_smooth_en_, true);
-  nh.param<double>("uwb/output_smooth_alpha", uwb_output_smooth_alpha_, 0.15);
-  nh.param<double>("uwb/output_smooth_max_step_m", uwb_output_smooth_max_step_m_, 0.05);
-  nh.param<int>("uwb/pause_map_update_frames", external_update_pause_map_frames_after_correction_, 3);
-  nh.param<int>("uwb/pause_map_update_frames_default",
-                external_update_pause_map_frames_after_correction_, external_update_pause_map_frames_after_correction_);
-  nh.param<double>("uwb/pause_map_update_min_correction_m", external_update_pause_map_min_correction_m_, 0.05);
-  nh.param<double>("uwb/pause_map_update_threshold",
-                   external_update_pause_map_min_correction_m_, external_update_pause_map_min_correction_m_);
-  uwb_output_smooth_alpha_ = std::max(0.0, std::min(1.0, uwb_output_smooth_alpha_));
-  uwb_output_smooth_max_step_m_ = std::max(0.0, uwb_output_smooth_max_step_m_);
-  external_update_pause_map_frames_after_correction_ = std::max(0, external_update_pause_map_frames_after_correction_);
-  external_update_pause_map_min_correction_m_ = std::max(0.0, external_update_pause_map_min_correction_m_);
-  if (uwb_output_correction_en_)
-  {
-    ROS_WARN("[UWB] uwb/output_correction_en is debug-only. Default UWB fusion updates the internal EKF state xy instead of output_offset.");
-  }
   nh.param<bool>("pos_output/enable_timestamp", pos_output_enable_timestamp_, true);
   nh.param<string>("pos_output/format", pos_output_format_, "timestamp_xyz_quat");
   std::string pos_output_format_lower = pos_output_format_;
@@ -1936,6 +1908,26 @@ bool LIVMapper::publishRawBackendOdometry()
   odometry.pose.pose.orientation.y = quaternion.y();
   odometry.pose.pose.orientation.z = quaternion.z();
 
+  // ponytail: one estimator thread; retain the raw pre-external-update pose,
+  // but never expose a working query to the independent fixed-lag backend.
+  if (imu_working_.active())
+  {
+    pending_raw_backend_odom_.reset(new nav_msgs::Odometry(odometry));
+    return false;
+  }
+  return publishRawBackendOdometryMessage(odometry);
+}
+
+void LIVMapper::finishRawBackendOdometry(bool committed)
+{
+  if (imu_working_.active())
+    throw std::logic_error("backend odometry precedes frontend transaction finish");
+  auto pending = std::move(pending_raw_backend_odom_);
+  if (committed && pending) publishRawBackendOdometryMessage(*pending);
+}
+
+bool LIVMapper::publishRawBackendOdometryMessage(const nav_msgs::Odometry &odometry)
+{
   ++raw_backend_odom_attempted_;
   const std::int64_t stamp_ns =
       static_cast<std::int64_t>(odometry.header.stamp.toNSec());
@@ -2118,6 +2110,7 @@ void LIVMapper::processImu()
 
 void LIVMapper::stateEstimationAndMapping() 
 {
+  if (uwb_manager) uwb_manager->forwardMeasurementsAt(LidarMeasures.last_lio_update_time, _first_lidar_time);
   static int vio_dispatch_count = 0;
   static int lio_dispatch_count = 0;
 
@@ -2163,264 +2156,13 @@ void LIVMapper::stateEstimationAndMapping()
       imu_transaction::release(imu_buffer, p_imu->coverageStateTime());
     }
     state_propagat = _state;
+    finishRawBackendOdometry(accepted || scan);
   }
   voxelmap_manager->state_ = _state;
   if (state_update_flg) latest_ekf_state = _state;
 }
 
-void LIVMapper::applyUwbUpdate(const char *stage)
-{
-  if (!uwb_manager || !uwb_manager->updateEnabled()) return;
-
-  V3D output_delta = V3D::Zero();
-  UwbUpdateResult result;
-  const double current_lidar_stamp = LidarMeasures.last_lio_update_time;
-  const double lidar_start_stamp = _first_lidar_time > 0.0 ? _first_lidar_time : current_lidar_stamp;
-  const bool lidar_degenerated = voxelmap_manager && voxelmap_manager->isLidarDegenerated();
-  uwb_manager->setDegenerateMode(lidar_degenerated || runtime_degraded_mode_);
-  if (uwb_output_correction_en_)
-  {
-    StatesGroup corrected_state = _state;
-    corrected_state.pos_end += uwb_output_target_offset_;
-    const V3D pos_before = corrected_state.pos_end;
-    result = uwb_manager->applyRangeUpdateAt(corrected_state, current_lidar_stamp, lidar_start_stamp);
-    if (!result.state_updated && !result.request_relocalization) return;
-    if (!result.state_updated && result.request_relocalization)
-    {
-      // Leave output offset unchanged; the candidate is reported through the common log below.
-    }
-    else
-    {
-      output_delta = corrected_state.pos_end - pos_before;
-      uwb_output_target_offset_ += output_delta;
-      if (!uwb_output_smooth_en_)
-      {
-        uwb_output_pos_offset_ = uwb_output_target_offset_;
-      }
-    }
-  }
-  else
-  {
-    const V3D pos_before = _state.pos_end;
-    result = uwb_manager->applyRangeUpdateAt(_state, current_lidar_stamp, lidar_start_stamp);
-    if (result.used_count <= 0 && !result.request_relocalization) return;
-    if (!result.state_updated && !result.covariance_updated && !result.request_relocalization) return;
-    output_delta = _state.pos_end - pos_before;
-
-    if (result.state_updated || result.covariance_updated)
-    {
-      snapStateForDeterminism(_state);
-      voxelmap_manager->state_ = _state;
-      if (vio_manager) vio_manager->updateFrameState(_state);
-
-      if (imu_prop_enable)
-      {
-        ekf_finish_once = true;
-        latest_ekf_state = _state;
-        latest_ekf_time = LidarMeasures.last_lio_update_time;
-        state_update_flg = true;
-      }
-    }
-  }
-
-  if (result.relocalization_confirmed && result.request_relocalization)
-  {
-    handleUwbRelocalizationConfirmed(result, stage);
-  }
-
-  if (result.state_updated && result.xy_correction_applied > external_update_pause_map_min_correction_m_)
-  {
-    external_update_pause_map_frames_ = std::max(external_update_pause_map_frames_,
-                                                 external_update_pause_map_frames_after_correction_);
-    ROS_INFO_THROTTLE(1.0,
-                      "[UWB_DEBUG_INJECTION] attempt=%lu action=pause_map_insert correction_norm=%.3f xy_correction_applied=%.3f external_pause_map_update_frames=%d",
-                      static_cast<unsigned long>(result.attempt_id),
-                      result.correction_norm, result.xy_correction_applied, external_update_pause_map_frames_);
-  }
-
-  if (vio_manager)
-  {
-    std::vector<std::string> lines;
-    std::ostringstream oss;
-    oss << "[UWB_DEBUG_INJECTION] attempt=" << result.attempt_id
-        << " action=" << result.action
-        << " used=" << result.used_count
-        << " state_updated=" << static_cast<int>(result.state_updated)
-        << " covariance_updated=" << static_cast<int>(result.covariance_updated)
-        << " residual_rms=" << result.residual_rms
-        << " max_abs_residual=" << result.max_abs_residual
-        << " xy_raw=" << result.xy_correction_raw
-        << " xy_applied=" << result.xy_correction_applied
-        << " time_diff=" << result.time_diff
-        << " correction_norm=" << result.correction_norm
-        << " external_pause_map_update_frames=" << external_update_pause_map_frames_
-        << " relocalization_request=" << static_cast<int>(result.request_relocalization)
-        << " relocalization_confirmed=" << static_cast<int>(result.relocalization_confirmed)
-        << " local_map_reset=" << static_cast<int>(result.local_map_reset)
-        << " visual_cache_reset=" << static_cast<int>(result.visual_cache_reset)
-        << " covariance_inflated=" << static_cast<int>(result.covariance_inflated)
-        << " after " << (stage ? stage : "state") << " update.";
-    lines.push_back(oss.str());
-    if (uwb_output_correction_en_)
-    {
-      std::ostringstream offset_oss;
-      offset_oss << "[UWB_DEBUG_INJECTION] attempt=" << result.attempt_id
-                 << " output_delta=" << output_delta.transpose()
-                 << " output_offset=" << uwb_output_pos_offset_.transpose()
-                 << " output_target=" << uwb_output_target_offset_.transpose();
-      lines.push_back(offset_oss.str());
-    }
-    vio_manager->appendTimingLogLines(lines);
-  }
-}
-
-void LIVMapper::applyGnssUpdate(const char *stage)
-{
-  if (!gnss_manager || !gnss_manager->updateEnabled()) return;
-
-  const V3D pos_before = _state.pos_end;
-  const double current_lidar_stamp = LidarMeasures.last_lio_update_time;
-  const double lidar_start_stamp = _first_lidar_time > 0.0 ? _first_lidar_time : current_lidar_stamp;
-  GnssUpdateResult result = gnss_manager->applyPositionUpdateAt(_state, current_lidar_stamp, lidar_start_stamp);
-  if (result.action == "no_measurements" || result.action == "disabled") return;
-
-  const V3D output_delta = _state.pos_end - pos_before;
-  if (result.state_updated)
-  {
-    snapStateForDeterminism(_state);
-    voxelmap_manager->state_ = _state;
-    if (vio_manager) vio_manager->updateFrameState(_state);
-
-    if (imu_prop_enable)
-    {
-      ekf_finish_once = true;
-      latest_ekf_state = _state;
-      latest_ekf_time = LidarMeasures.last_lio_update_time;
-      state_update_flg = true;
-    }
-  }
-
-  if (result.request_pause_map_insert)
-  {
-    external_update_pause_map_frames_ = std::max(external_update_pause_map_frames_,
-                                                 result.pause_map_update_frames);
-    ROS_INFO_THROTTLE(1.0,
-                      "[GNSS] action=pause_map_insert_after_gnss_correction correction_norm=%.3f external_pause_map_update_frames=%d",
-                      result.correction_norm, external_update_pause_map_frames_);
-  }
-
-  ROS_INFO_THROTTLE(1.0,
-                    "[GNSS] action=%s seq=%d state_updated=%d state=%d convergence=%s residual=%.3f maha=%.3f raw=%.3f applied=%.3f time_diff=%.3f delta=[%.4f %.4f %.4f] after %s update.",
-                    result.action.c_str(), result.seq, static_cast<int>(result.state_updated),
-                    result.device_state, result.convergence_state.c_str(),
-                    result.residual_norm, result.mahalanobis_distance,
-                    result.correction_raw_norm, result.correction_applied_norm,
-                    result.time_diff_s, output_delta.x(), output_delta.y(), output_delta.z(),
-                    stage ? stage : "state");
-
-  if (vio_manager)
-  {
-    std::vector<std::string> lines;
-    std::ostringstream oss;
-    oss << "[ GNSS ] action=" << result.action
-        << " seq=" << result.seq
-        << " state_updated=" << static_cast<int>(result.state_updated)
-        << " device_state=" << result.device_state
-        << " convergence=" << result.convergence_state
-        << " residual=" << result.residual_norm
-        << " mahalanobis=" << result.mahalanobis_distance
-        << " raw=" << result.correction_raw_norm
-        << " applied=" << result.correction_applied_norm
-        << " time_diff=" << result.time_diff_s
-        << " external_pause_map_update_frames=" << external_update_pause_map_frames_
-        << " after " << (stage ? stage : "state") << " update.";
-    lines.push_back(oss.str());
-    vio_manager->appendTimingLogLines(lines);
-  }
-}
-
-void LIVMapper::handleUwbRelocalizationConfirmed(UwbUpdateResult &result, const char *stage)
-{
-  const V3D pos_before = _state.pos_end;
-  _state.pos_end.x() = result.filtered_uwb_position.x();
-  _state.pos_end.y() = result.filtered_uwb_position.y();
-  result.xy_correction_applied = std::hypot(_state.pos_end.x() - pos_before.x(),
-                                            _state.pos_end.y() - pos_before.y());
-  result.correction_norm = (_state.pos_end - pos_before).norm();
-  result.state_updated = true;
-  result.request_pause_map_insert = true;
-
-  _state.cov(3, 3) = std::max(_state.cov(3, 3), 1.0);
-  _state.cov(4, 4) = std::max(_state.cov(4, 4), 1.0);
-  _state.cov(2, 2) = std::max(_state.cov(2, 2), 0.25);
-  result.covariance_inflated = true;
-
-  snapStateForDeterminism(_state);
-  if (voxelmap_manager)
-  {
-    voxelmap_manager->state_ = _state;
-    voxelmap_manager->clearLocalMap();
-    result.local_map_reset = true;
-  }
-  voxel_map.clear();
-  lidar_map_inited = false;
-  _pv_list.clear();
-
-  if (vio_manager)
-  {
-    vio_manager->updateFrameState(_state);
-    vio_manager->clearVisualMap();
-    result.visual_cache_reset = true;
-  }
-  if (visual_sub_map) visual_sub_map->clear();
-
-  external_update_pause_map_frames_ = std::max(external_update_pause_map_frames_,
-                                               std::max(1, external_update_pause_map_frames_after_correction_));
-
-  if (imu_prop_enable)
-  {
-    ekf_finish_once = true;
-    latest_ekf_state = _state;
-    latest_ekf_time = LidarMeasures.last_lio_update_time;
-    state_update_flg = true;
-  }
-
-  ROS_WARN("[UWB] relocalization_confirmed after %s: pos_before=[%.3f %.3f %.3f] pos_after=[%.3f %.3f %.3f] local_map_reset=%d visual_cache_reset=%d covariance_inflated=%d external_pause_map_update_frames=%d",
-           stage ? stage : "state",
-           pos_before.x(), pos_before.y(), pos_before.z(),
-           _state.pos_end.x(), _state.pos_end.y(), _state.pos_end.z(),
-           static_cast<int>(result.local_map_reset),
-           static_cast<int>(result.visual_cache_reset),
-           static_cast<int>(result.covariance_inflated),
-           external_update_pause_map_frames_);
-}
-
-void LIVMapper::advanceUwbOutputCorrection()
-{
-  if (!uwb_output_correction_en_) return;
-  if (!uwb_output_smooth_en_)
-  {
-    uwb_output_pos_offset_ = uwb_output_target_offset_;
-    return;
-  }
-
-  const V3D residual = uwb_output_target_offset_ - uwb_output_pos_offset_;
-  if (residual.norm() < 1e-6) return;
-
-  V3D step = residual * uwb_output_smooth_alpha_;
-  const double step_norm = step.norm();
-  if (uwb_output_smooth_max_step_m_ > 0.0 && step_norm > uwb_output_smooth_max_step_m_)
-  {
-    step *= uwb_output_smooth_max_step_m_ / std::max(step_norm, 1e-9);
-  }
-  uwb_output_pos_offset_ += step;
-}
-
-V3D LIVMapper::outputPosition() const
-{
-  if (!uwb_output_correction_en_) return _state.pos_end;
-  return _state.pos_end + uwb_output_pos_offset_;
-}
+V3D LIVMapper::outputPosition() const { return _state.pos_end; }
 
 void LIVMapper::handleVIO() 
 {
@@ -2531,9 +2273,6 @@ void LIVMapper::handleVIO()
     }
 
     publishRawBackendOdometry();
-    applyUwbUpdate("VIO-skip");
-    applyGnssUpdate("VIO-skip");
-    advanceUwbOutputCorrection();
 
     publish_frame_world(pubLaserCloudFullRes, pubLaserCloudMap, vio_manager);
 
@@ -2607,9 +2346,6 @@ void LIVMapper::handleVIO()
   if (!visual_shadow_no_commit_en_)
     updateVisualObservationHints();
   publishRawBackendOdometry();
-  applyUwbUpdate("VIO");
-  applyGnssUpdate("VIO");
-  advanceUwbOutputCorrection();
 
   if (imu_prop_enable) 
   {
@@ -2879,9 +2615,6 @@ void LIVMapper::handleLIO()
   snapStateForDeterminism(_state);
   voxelmap_manager->state_ = _state;
   publishRawBackendOdometry();
-  applyUwbUpdate("LIO");
-  applyGnssUpdate("LIO");
-  advanceUwbOutputCorrection();
 
   double t2 = omp_get_wtime();
 
@@ -2983,7 +2716,6 @@ void LIVMapper::handleLIO()
     }
   }
 
-  const bool external_map_guard = external_update_pause_map_frames_ > 0;
   const bool p4_map_mutation_allowed = voxelmap_manager->p4MapMutationAllowed(
       LidarMeasures.last_lio_update_time);
   bool lio_map_guard_enforced = false;
@@ -3005,7 +2737,7 @@ void LIVMapper::handleLIO()
     }
   }
   const bool lio_measurement_rejected = !lio_diagnostics.commit;
-  const bool map_guarded = external_map_guard || lio_map_guard_enforced ||
+  const bool map_guarded = lio_map_guard_enforced ||
                            !p4_map_mutation_allowed;
   const bool insert_lio_map = fast_livo::shouldInsertLioMap(
       lio_diagnostics.commit, do_map_update, map_guarded);
@@ -3015,25 +2747,17 @@ void LIVMapper::handleLIO()
     map_insert_skip_reason = "lio_" + lio_diagnostics.convergence_status;
   else if (!do_map_update)
     map_insert_skip_reason = "map_update_stride";
-  else if (external_map_guard && lio_map_guard_enforced)
-    map_insert_skip_reason = "external_update+" + map_guard_reason;
-  else if (external_map_guard)
-    map_insert_skip_reason = "external_update";
   else if (lio_map_guard_enforced)
     map_insert_skip_reason = map_guard_reason;
   else if (!p4_map_mutation_allowed)
     map_insert_skip_reason = "p4_frozen_map_counterfactual";
-  const int pause_map_update_frames_before = external_update_pause_map_frames_;
   double t4 = t3;
 
   if (skip_map_insert)
   {
-    if (external_map_guard)
-      external_update_pause_map_frames_ = std::max(0, external_update_pause_map_frames_ - 1);
     ROS_INFO_THROTTLE(1.0,
-                      "[LIO_MAP_GUARD] skip_map_insert=1 reason=%s external_pause=%d->%d freeze_frames=%d recovery_frames=%d",
-                      map_insert_skip_reason.c_str(), pause_map_update_frames_before,
-                      external_update_pause_map_frames_, lio_map_guard_freeze_frames_,
+                      "[LIO_MAP_GUARD] skip_map_insert=1 reason=%s freeze_frames=%d recovery_frames=%d",
+                      map_insert_skip_reason.c_str(), lio_map_guard_freeze_frames_,
                       lio_map_guard_recovery_frames_);
   }
   else if (insert_lio_map)
@@ -3126,7 +2850,7 @@ void LIVMapper::handleLIO()
       snapshot.lifecycle.lidar_map_guard_freeze_frames =
           lio_map_guard_freeze_frames_;
       snapshot.lifecycle.external_update_pause_map_frames =
-          external_update_pause_map_frames_;
+          0;
       snapshot.lifecycle.lidar_frame_begin_time =
           LidarMeasures.lidar_frame_beg_time;
       snapshot.lifecycle.lidar_frame_end_time =
@@ -3198,7 +2922,6 @@ void LIVMapper::handleLIO()
     printf("\033[1;36m| %-29s | %-27f |\033[0m\n", "ICP", t2 - t1);
     printf("\033[1;36m| %-29s | %-27f |\033[0m\n", "updateVoxelMap", t4 - t3);
     printf("\033[1;36m| %-29s | %-27d |\033[0m\n", "skip_map_insert", static_cast<int>(skip_map_insert));
-    printf("\033[1;36m| %-29s | %-27d |\033[0m\n", "pause_map_update_frames", external_update_pause_map_frames_);
     printf("\033[1;36m| %-29s | %-27f |\033[0m\n", "postProcess+Publish", t5 - t4);
     printf("\033[1;34m+-------------------------------------------------------------+\033[0m\n");
     printf("\033[1;36m| %-29s | %-27f |\033[0m\n", "Current Total Time", t5 - t0);
@@ -3234,7 +2957,6 @@ void LIVMapper::handleLIO()
     lines.push_back(makeTableRow("ICP", formatDouble6(t2 - t1)));
     lines.push_back(makeTableRow("updateVoxelMap", formatDouble6(t4 - t3)));
     lines.push_back(makeTableRow("skip_map_insert", std::to_string(static_cast<int>(skip_map_insert))));
-    lines.push_back(makeTableRow("pause_map_update_frames", std::to_string(external_update_pause_map_frames_)));
     lines.push_back(makeTableRow("postProcess+Publish", formatDouble6(t5 - t4)));
     lines.push_back("+-------------------------------------------------------------+");
     lines.push_back(makeTableRow("Current Total Time", formatDouble6(lio_total_time)));

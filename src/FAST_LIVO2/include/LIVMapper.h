@@ -15,7 +15,6 @@ which is included as part of this source code package.
 
 #include "IMU_Processing.h"
 #include "imu_transaction_interface.h"
-#include "gnss_manager.h"
 #include "vio.h"
 #include "preprocess.h"
 #include "p4_fork_harness.h"
@@ -46,11 +45,9 @@ public:
   void stateEstimationAndMapping();
   void handleVIO();
   void handleLIO();
-  void applyUwbUpdate(const char *stage);
-  void applyGnssUpdate(const char *stage);
   bool publishRawBackendOdometry();
-  void handleUwbRelocalizationConfirmed(UwbUpdateResult &result, const char *stage);
-  void advanceUwbOutputCorrection();
+  bool publishRawBackendOdometryMessage(const nav_msgs::Odometry &odometry);
+  void finishRawBackendOdometry(bool committed);
   V3D outputPosition() const;
   void savePCD();
   void print_landmarks();
@@ -124,15 +121,6 @@ public:
 
   bool lidar_map_inited = false, pcd_save_en = false, pub_effect_point_en = false, pose_output_en = false, ros_driver_fix_en = false, hilti_en = false;
   bool save_log_en = true;
-  bool uwb_output_correction_en_ = false;
-  bool uwb_output_smooth_en_ = true;
-  double uwb_output_smooth_alpha_ = 0.15;
-  double uwb_output_smooth_max_step_m_ = 0.05;
-  int external_update_pause_map_frames_ = 0;
-  int external_update_pause_map_frames_after_correction_ = 3;
-  double external_update_pause_map_min_correction_m_ = 0.05;
-  V3D uwb_output_pos_offset_ = V3D::Zero();
-  V3D uwb_output_target_offset_ = V3D::Zero();
   bool pos_output_enable_timestamp_ = true;
   std::string pos_output_format_ = "timestamp_xyz_quat";
   int pcd_save_interval = -1, pcd_index = 0;
@@ -336,12 +324,11 @@ public:
   ImuProcessPtr p_imu;
   // ponytail: one estimator thread per mapper; callbacks only append under mtx_buffer.
   imu_transaction::WorkingCheckpoint imu_working_;
+  std::unique_ptr<nav_msgs::Odometry> pending_raw_backend_odom_;
   uint64_t imu_vio_accepted_before_ = 0;
   VoxelMapManagerPtr voxelmap_manager;
   VIOManagerPtr vio_manager;
   UwbManagerPtr uwb_manager;
-  GnssManagerPtr gnss_manager;
-  bool gnss_fusion_fixed_lag_mode_ = false;
 
   ros::Publisher plane_pub;
   ros::Publisher voxel_pub;

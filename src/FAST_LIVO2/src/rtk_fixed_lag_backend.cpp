@@ -215,20 +215,6 @@ RtkFixedLagBackend::RtkFixedLagBackend(ros::NodeHandle &nh) {
       << config_.antenna_lever_arm_body_m.y() << ","
       << config_.antenna_lever_arm_body_m.z() << "]");
 
-  bool legacy_gnss_update_enabled = false;
-  bool uwb_update_enabled = false;
-  nh.param("gps/update_en", legacy_gnss_update_enabled, false);
-  nh.param("uwb/update_en", uwb_update_enabled, false);
-  if (gnss_factor_enabled_ && legacy_gnss_update_enabled) {
-    throw std::invalid_argument(
-        "GNSS fixed-lag factors require gps/update_en=false so raw LIVO "
-        "odometry stays independent");
-  }
-  if (config_.uwb_factor_backend_en && uwb_update_enabled) {
-    ROS_WARN("[UWB_FACTOR_BACKEND] uwb/update_en is configured true; the "
-             "UwbManager bridge forcibly suppresses the legacy update.");
-  }
-
   if (!gnss_factor_enabled_) {
     alignment_.valid = true;
     initial_map_to_odom_ = gtsam::Pose3();

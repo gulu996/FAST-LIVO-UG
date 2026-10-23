@@ -2,7 +2,7 @@ rtk_backend:
   enable: true
 
   # Raw UWB ranges share this backend's Pose3 states when enabled.
-  # The legacy uwb/update_en path is then forcibly disabled.
+  # Only the independent fixed-lag graph consumes these ranges.
   uwb_factor_backend_en: false
   uwb_range_topic: "/uwb/backend_ranges"
   uwb_association_max_dt_s: 0.05

@@ -139,29 +139,13 @@ uav:
 gnss_fusion:
   enable: true
 
-gps:
-  en: false
-  enable: false
-  update_en: false
-  update_enable: false
-  use_gps_position: false
-  input_mode: "disabled"
-
 gnss:
   input_mode: "disabled"
 
 uwb:
-  en: false
-  enable: false
-  update_en: false
-  update_enable: false
   input_mode: "disabled"
-  summary_log_en: false
   debug_log_en: false
-  range_debug_log_en: false
-  summary_to_console: false
   debug_to_console: false
-  summary_to_file: false
   debug_to_file: false
 
 publish:

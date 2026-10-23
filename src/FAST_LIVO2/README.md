@@ -102,3 +102,31 @@ rosbag play YOUR_DOWNLOADED.bag
 ## 5. License
 
 The source code of this package is released under the [**GPLv2**](http://www.gnu.org/licenses/) license. For commercial use, please contact me at <zhengcr@connect.hku.hk> and Prof. Fu Zhang at <fuzhang@hku.hk> to discuss an alternative license.
+
+## Fixed-lag GNSS/UWB ownership
+
+GNSS and UWB do not update frontend ESIKF state/P. `rtk_fixed_lag_backend_node`
+uses LIVO BetweenFactors, GNSS lever-arm position factors and raw UWB range
+factors in one IncrementalFixedLagSmoother. Optimized odometry and map-to-odom
+remain separate outputs; they never feed back into LIVO.
+
+With `use_gnss_fusion_enable=true`, `gnss_fusion/enable` enables GNSS and
+`rtk_backend/uwb_factor_backend_en` enables UWB independently. Keep
+`rtk_backend/enable=true` when either is required. Both off means LIVO only.
+GNSS serial parsing remains in `gnss_serial_driver`; `gnss_adapter_node`
+retains RTK quality, first_fixed/average_fixed origin, ENU and measurement time.
+UWB `input_mode: internal` uses the configured serial/text source;
+`external_topic` uses stamped range messages. Anchors must already be in the
+backend map frame. MID360's stored anchors and `anchor_frame_align_en` are not
+recalibrated by this change; enabling an incompatible UWB configuration fails.
+
+Explicit true legacy `gps/en`, `gps/enable`, `gps/update_en`, `uwb/update_en`
+and update aliases, or `uwb/mode`, fail startup. Remove the obsolete frontend
+fusion selection and configure the backend explicitly. Receiver formats are
+not fusion modes.
+
+Raw backend odometry is emitted after frontend transaction completion.
+Rejected VIO queries cannot create backend motion factors. A completed LIO
+scan may publish the legal measurement-pred state on measurement rejection.
+Repeated committed timestamps are suppressed. No state/P is copied back from
+the backend, and no tuning or sensor calibration is changed.

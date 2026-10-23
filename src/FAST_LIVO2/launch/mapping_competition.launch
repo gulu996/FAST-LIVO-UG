@@ -19,10 +19,6 @@
 
   <!-- First validate the competition frontend without external backends. -->
   <param name="/gnss_fusion/enable" value="false" />
-  <param name="/uwb/enable" value="false" />
-  <param name="/uwb/update_en" value="false" />
-  <param name="/gps/enable" value="false" />
-  <param name="/gps/update_en" value="false" />
   <param name="/uav/gravity_align_en" value="false" />
   <param name="/camera_aligned_neu/enable" value="false" />
   <param name="/p4_frontend/enable" value="false" />
