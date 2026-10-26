@@ -2391,13 +2391,8 @@ void VoxelMapManager::BuildVoxelMap(double timestamp)
   for (uint i = 0; i < plsize; i++)
   {
     const pointWithVar p_v = input_points[i];
-    float loc_xyz[3];
-    for (int j = 0; j < 3; j++)
-    {
-      loc_xyz[j] = p_v.point_w[j] / voxel_size;
-      if (loc_xyz[j] < 0) { loc_xyz[j] -= 1.0; }
-    }
-    VOXEL_LOCATION position((int64_t)loc_xyz[0], (int64_t)loc_xyz[1], (int64_t)loc_xyz[2]);
+    VOXEL_LOCATION position;
+    if (!storedLidarVoxelLocation(p_v.point_w, config_setting_.max_voxel_size_, position)) continue;
     auto iter = voxel_map_.find(position);
     if (iter != voxel_map_.end())
     {
@@ -2455,13 +2450,8 @@ void VoxelMapManager::UpdateVoxelMap(const std::vector<pointWithVar> &input_poin
   for (uint i = 0; i < plsize; i++)
   {
     const pointWithVar p_v = input_points[i];
-    float loc_xyz[3];
-    for (int j = 0; j < 3; j++)
-    {
-      loc_xyz[j] = p_v.point_w[j] / voxel_size;
-      if (loc_xyz[j] < 0) { loc_xyz[j] -= 1.0; }
-    }
-    VOXEL_LOCATION position((int64_t)loc_xyz[0], (int64_t)loc_xyz[1], (int64_t)loc_xyz[2]);
+    VOXEL_LOCATION position;
+    if (!storedLidarVoxelLocation(p_v.point_w, config_setting_.max_voxel_size_, position)) continue;
     if (config_setting_.p4_frontend_diagnostics_enable ||
         config_setting_.p4b_snapshot_enable)
       p4_voxel_last_update_frame_[position] = current_frame_id_;

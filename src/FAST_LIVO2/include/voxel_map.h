@@ -456,6 +456,26 @@ public:
   bool operator==(const VOXEL_LOCATION &other) const { return (x == other.x && y == other.y && z == other.z); }
 };
 
+// ponytail: preserve existing map keys, including legacy negative boundaries.
+// A floor-based remapping of the stored map needs its own regression.
+inline bool storedLidarVoxelLocation(const Eigen::Vector3d &point,
+                                     double configured_size, VOXEL_LOCATION &location)
+{
+  const float voxel_size = static_cast<float>(configured_size);
+  if (!point.allFinite() || !std::isfinite(voxel_size) || voxel_size <= 0) return false;
+  int64_t index[3];
+  const double lower = static_cast<double>(std::numeric_limits<int64_t>::min());
+  for (int j = 0; j < 3; ++j)
+  {
+    float value = point[j] / voxel_size;
+    if (value < 0) value -= 1.0;
+    if (!std::isfinite(value) || value < lower || value >= -lower) return false;
+    index[j] = static_cast<int64_t>(value);
+  }
+  location = VOXEL_LOCATION(index[0], index[1], index[2]);
+  return true;
+}
+
 // Hash value
 namespace std
 {

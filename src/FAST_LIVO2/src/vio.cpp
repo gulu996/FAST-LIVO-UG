@@ -2382,6 +2382,37 @@ void VIOManager::pruneVisualMap()
   }
 }
 
+bool VIOManager::planeWarpFootprintVisible(const vk::AbstractCamera &camera, const V2D &pixel,
+    const V3D &point, const V3D &normal, const SE3 &transform, const Matrix2d &affine,
+    int search_level, int pyramid_levels, int half_patch)
+{
+  if (!pixel.allFinite() || !point.allFinite() || !normal.allFinite() || point.z() <= 0 ||
+      !(transform * point).allFinite() || (transform * point).z() <= 0 ||
+      !affine.allFinite() || !std::isfinite(affine.determinant()) || affine.determinant() == 0 ||
+      search_level < 0 || pyramid_levels < 1 || half_patch < 1 || search_level + pyramid_levels >= 30)
+    return false;
+  const Matrix2d inverse = affine.inverse();
+  if (!inverse.allFinite()) return false;
+  const double distance = normal.dot(point);
+  // A finite homography can still project intersections behind either camera.
+  // Check the actual warped footprint, including its center, before reading pixels.
+  for (int level = 0; level < pyramid_levels; ++level)
+    for (int y : {-half_patch, 0, half_patch - 1})
+      for (int x : {-half_patch, 0, half_patch - 1})
+      {
+        const V2D reference_pixel = pixel + inverse * V2D(x, y) * (1 << (search_level + level));
+        if (!reference_pixel.allFinite()) return false;
+        const V3D ray = camera.cam2world(reference_pixel);
+        const double denominator = normal.dot(ray);
+        if (!ray.allFinite() || !std::isfinite(denominator) || denominator == 0) return false;
+        const V3D intersection = ray * (distance / denominator);
+        const V3D current = transform * intersection;
+        if (!intersection.allFinite() || !current.allFinite() || intersection.z() <= 0 || current.z() <= 0)
+          return false;
+      }
+  return true;
+}
+
 void VIOManager::getWarpMatrixAffineHomography(const vk::AbstractCamera &cam, const V2D &px_ref, const V3D &xyz_ref, const V3D &normal_ref,
                                                   const SE3 &T_cur_ref, const int level_ref, Matrix2d &A_cur_ref)
 {
@@ -2786,12 +2817,6 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
         V3D sample_point_w = new_frame_->f2w(it);
         // sample_points_temp.push_back(sample_point_w);
 
-        for (int j = 0; j < 3; j++)
-        {
-          loc_xyz[j] = floor(sample_point_w[j] / voxel_size);
-          if (loc_xyz[j] < 0) { loc_xyz[j] -= 1.0; }
-        }
-
         VOXEL_LOCATION sample_pos;
         if (!getVisualVoxelLocation(sample_point_w, sample_pos)) continue;
 
@@ -2855,8 +2880,9 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
         }
         else
         {
-          VOXEL_LOCATION sample_pos(loc_xyz[0], loc_xyz[1], loc_xyz[2]);
-          auto iter = plane_map.find(sample_pos);
+          VOXEL_LOCATION plane_position;
+          if (!storedLidarVoxelLocation(sample_point_w, lidar_map_voxel_size, plane_position)) continue;
+          auto iter = plane_map.find(plane_position);
           if (iter != plane_map.end())
           {
             VoxelOctoTree *current_octo;
@@ -3135,6 +3161,15 @@ void VIOManager::retrieveFromVisualSparseMap(cv::Mat img, vector<pointWithVar> &
       // t_4 += omp_get_wtime() - t_1;
 
       // t_1 = omp_get_wtime();
+
+      if (normal_en && !planeWarpFootprintVisible(*cam, ref_ftr->px_,
+          ref_ftr->T_f_w_ * pt->pos_, ref_ftr->T_f_w_.rotation_matrix() * pt->normal_,
+          new_frame_->T_f_w_ * ref_ftr->T_f_w_.inverse(), A_cur_ref_zero,
+          search_level, patch_pyrimid_level, patch_size_half))
+      {
+        ++last_visual_warp_invalid_candidates;
+        continue;
+      }
 
       bool warp_sampling_valid = true;
       for (int pyramid_level = 0; pyramid_level <= patch_pyrimid_level - 1; pyramid_level++)
@@ -3652,13 +3687,8 @@ void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelO
     if (update_flag[i] == 0) continue;
 
     const V3D &p_w = pt->pos_;
-    float loc_xyz[3];
-    for (int j = 0; j < 3; j++)
-    {
-      loc_xyz[j] = p_w[j] / 0.5;
-      if (loc_xyz[j] < 0) { loc_xyz[j] -= 1.0; }
-    }
-    VOXEL_LOCATION position((int64_t)loc_xyz[0], (int64_t)loc_xyz[1], (int64_t)loc_xyz[2]);
+    VOXEL_LOCATION position;
+    if (!storedLidarVoxelLocation(p_w, lidar_map_voxel_size, position)) continue;
     auto iter = plane_map.find(position);
     if (iter != plane_map.end())
     {

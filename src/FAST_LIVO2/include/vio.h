@@ -606,6 +606,9 @@ public:
   void getWarpMatrixAffine(const vk::AbstractCamera &cam, const Vector2d &px_ref, const Vector3d &f_ref, const double depth_ref, const SE3 &T_cur_ref,
                            const int level_ref, 
                            const int pyramid_level, const int halfpatch_size, Matrix2d &A_cur_ref);
+  static bool planeWarpFootprintVisible(const vk::AbstractCamera &camera, const V2D &pixel,
+      const V3D &point, const V3D &normal, const SE3 &transform, const Matrix2d &affine,
+      int search_level, int pyramid_levels, int half_patch);
   void getWarpMatrixAffineHomography(const vk::AbstractCamera &cam, const V2D &px_ref,
                                      const V3D &xyz_ref, const V3D &normal_ref, const SE3 &T_cur_ref, const int level_ref, Matrix2d &A_cur_ref);
   bool warpAffine(const Matrix2d &A_cur_ref, const cv::Mat &img_ref, const Vector2d &px_ref, const int level_ref, const int search_level,
@@ -683,6 +686,7 @@ public:
 
   // PointCloudXYZI::Ptr pg_down;
   // pcl::VoxelGrid<PointType> downSizeFilter;
+  double lidar_map_voxel_size = std::numeric_limits<double>::quiet_NaN();
 };
 typedef std::shared_ptr<VIOManager> VIOManagerPtr;
 

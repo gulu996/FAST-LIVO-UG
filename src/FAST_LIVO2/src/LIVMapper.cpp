@@ -111,6 +111,7 @@ LIVMapper::LIVMapper(ros::NodeHandle &nh)
   voxelmap_manager.reset(new VoxelMapManager(voxel_config, voxel_map));
   p_imu->enable_p4_diagnostics(voxel_config.p4_frontend_diagnostics_enable);
   vio_manager.reset(new VIOManager());
+  vio_manager->lidar_map_voxel_size = voxel_config.max_voxel_size_;
   uwb_manager.reset(new UwbManager());
   root_dir = ROOT_DIR;
   initializeFiles();
