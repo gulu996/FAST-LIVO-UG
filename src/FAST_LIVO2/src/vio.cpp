@@ -3667,12 +3667,11 @@ void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelO
       if (current_octo->plane_ptr_->is_plane_)
       {
         VoxelPlane &plane = *current_octo->plane_ptr_;
-        float dis_to_plane = plane.normal_(0) * p_w(0) + plane.normal_(1) * p_w(1) + plane.normal_(2) * p_w(2) + plane.d_;
-        float dis_to_plane_abs = fabs(dis_to_plane);
-        float dis_to_center = (plane.center_(0) - p_w(0)) * (plane.center_(0) - p_w(0)) +
-                              (plane.center_(1) - p_w(1)) * (plane.center_(1) - p_w(1)) + (plane.center_(2) - p_w(2)) * (plane.center_(2) - p_w(2));
-        float range_dis = sqrt(dis_to_center - dis_to_plane * dis_to_plane);
-        if (range_dis <= 3 * plane.radius_)
+        const double dis_to_plane = plane.normal_.dot(p_w) + plane.d_;
+        const double dis_to_plane_abs = std::abs(dis_to_plane);
+        const double radius = 3 * plane.radius_;
+        const double tangent2 = planeTangentialDistanceSquared(p_w - plane.center_, plane.normal_);
+        if (std::isfinite(radius) && radius >= 0 && std::isfinite(tangent2) && tangent2 <= radius * radius)
         {
           Eigen::Matrix<double, 1, 6> J_nq;
           J_nq.block<1, 3>(0, 0) = p_w - plane.center_;

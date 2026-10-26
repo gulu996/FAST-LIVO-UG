@@ -435,6 +435,17 @@ struct VoxelOctoTreeSnapshot
   VoxelOctoTreeSnapshot &operator=(const VoxelOctoTreeSnapshot &other);
 };
 
+// Returns infinity for invalid plane geometry, so existing radius gates reject it.
+inline double planeTangentialDistanceSquared(const Eigen::Vector3d &delta,
+                                             const Eigen::Vector3d &normal)
+{
+  const double norm2 = normal.squaredNorm();
+  if (!delta.allFinite() || !normal.allFinite() ||
+      std::abs(norm2 - 1.0) > 64 * std::numeric_limits<double>::epsilon())
+    return std::numeric_limits<double>::infinity();
+  return (delta - normal * (normal.dot(delta) / norm2)).squaredNorm();
+}
+
 class VOXEL_LOCATION
 {
 public:

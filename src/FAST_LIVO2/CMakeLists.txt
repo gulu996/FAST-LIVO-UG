@@ -476,3 +476,7 @@ get_target_property(LIVO_TEST_LINK_LIBRARIES fastlivo_mapping LINK_LIBRARIES)
 target_link_libraries(backend_odometry_commit_self_test ${LIVO_TEST_LINK_LIBRARIES} rtk_fixed_lag_backend)
 add_executable(backend_real_input_self_test src/backend_real_input_self_test.cpp)
 target_link_libraries(backend_real_input_self_test rtk_fixed_lag_backend gnss_adapter uwb ${catkin_LIBRARIES})
+
+add_executable(lio_plane_map_self_test src/lio_plane_map_self_test.cpp)
+target_link_libraries(lio_plane_map_self_test ${LIVO_TEST_LINK_LIBRARIES})
+target_compile_options(lio_plane_map_self_test PRIVATE -UNDEBUG)

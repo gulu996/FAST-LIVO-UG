@@ -506,6 +506,8 @@ void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPla
   const Eigen::Vector3d previous_center = plane->center_;
   const Eigen::Vector3d previous_normal = plane->normal_;
   const bool had_plane = plane->is_plane_;
+  plane->is_plane_ = false;
+  plane->is_update_ = true;
   plane->plane_var_ = Eigen::Matrix<double, 6, 6>::Zero();
   plane->covariance_ = Eigen::Matrix3d::Zero();
   plane->center_ = Eigen::Vector3d::Zero();
@@ -519,8 +521,10 @@ void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPla
   plane->p4_source_timestamps_s_.reserve(points.size());
   plane->p4_source_origins_w_.reserve(points.size());
   plane->p4b_support_points_.clear();
-  for (auto pv : points)
+  if (points.size() < 3) return;
+  for (const auto &pv : points)
   {
+    if (!pv.point_w.allFinite() || !pv.var.allFinite()) return;
     plane->covariance_ += pv.point_w * pv.point_w.transpose();
     plane->center_ += pv.point_w;
     if (pv.source_frame_id >= 0)
@@ -532,7 +536,9 @@ void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPla
   }
   plane->center_ = plane->center_ / plane->points_size_;
   plane->covariance_ = plane->covariance_ / plane->points_size_ - plane->center_ * plane->center_.transpose();
+  if (!plane->covariance_.allFinite()) return;
   Eigen::EigenSolver<Eigen::Matrix3d> es(plane->covariance_);
+  if (es.info() != Eigen::Success) return;
   Eigen::Matrix3cd evecs = es.eigenvectors();
   Eigen::Vector3cd evals = es.eigenvalues();
   Eigen::Vector3d evalsReal;
@@ -540,7 +546,13 @@ void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPla
   Eigen::Matrix3f::Index evalsMin, evalsMax;
   evalsReal.rowwise().sum().minCoeff(&evalsMin);
   evalsReal.rowwise().sum().maxCoeff(&evalsMax);
-  int evalsMid = 3 - evalsMin - evalsMax;
+  if (!evalsReal.allFinite() || !evecs.real().allFinite() || evalsMin == evalsMax) return;
+  const int evalsMid = 3 - evalsMin - evalsMax;
+  // Numerical eigenvalue separation, not an additional geometric planarity threshold.
+  const double gap_tolerance = 64 * std::numeric_limits<double>::epsilon() *
+      (evalsReal.cwiseAbs().maxCoeff() + plane->center_.squaredNorm());
+  if (evalsReal(evalsMin) < -gap_tolerance || evalsReal(evalsMax) <= 0 ||
+      evalsReal(evalsMid) - evalsReal(evalsMin) <= gap_tolerance) return;
   Eigen::Vector3d evecMin = evecs.real().col(evalsMin);
   Eigen::Vector3d evecMid = evecs.real().col(evalsMid);
   Eigen::Vector3d evecMax = evecs.real().col(evalsMax);
@@ -575,6 +587,7 @@ void VoxelOctoTree::init_plane(const std::vector<pointWithVar> &points, VoxelPla
       plane->plane_var_ += J * points[i].var * J.transpose();
     }
 
+    if (!plane->plane_var_.allFinite()) return;
     plane->normal_ << evecs.real()(0, evalsMin), evecs.real()(1, evalsMin), evecs.real()(2, evalsMin);
     plane->y_normal_ << evecs.real()(0, evalsMid), evecs.real()(1, evalsMid), evecs.real()(2, evalsMid);
     plane->x_normal_ << evecs.real()(0, evalsMax), evecs.real()(1, evalsMax), evecs.real()(2, evalsMax);
@@ -2786,12 +2799,11 @@ void VoxelMapManager::build_single_residual(pointWithVar &pv, const VoxelOctoTre
   {
     const VoxelPlane &plane = *query_plane;
     Eigen::Vector3d p_world_to_center = p_w - plane.center_;
-    float dis_to_plane = fabs(plane.normal_(0) * p_w(0) + plane.normal_(1) * p_w(1) + plane.normal_(2) * p_w(2) + plane.d_);
-    float dis_to_center = (plane.center_(0) - p_w(0)) * (plane.center_(0) - p_w(0)) + (plane.center_(1) - p_w(1)) * (plane.center_(1) - p_w(1)) +
-                          (plane.center_(2) - p_w(2)) * (plane.center_(2) - p_w(2));
-    float range_dis = sqrt(dis_to_center - dis_to_plane * dis_to_plane);
+    const double dis_to_plane = std::abs(plane.normal_.dot(p_w) + plane.d_);
+    const double radius = radius_k * plane.radius_;
+    const double tangent2 = planeTangentialDistanceSquared(p_world_to_center, plane.normal_);
 
-    if (range_dis <= radius_k * plane.radius_)
+    if (std::isfinite(radius) && radius >= 0 && std::isfinite(tangent2) && tangent2 <= radius * radius)
     {
       Eigen::Matrix<double, 1, 6> J_nq;
       J_nq.block<1, 3>(0, 0) = p_w - plane.center_;
