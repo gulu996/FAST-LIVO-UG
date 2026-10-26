@@ -1,0 +1,107 @@
+{
+  "note": "Recorded commands with private filesystem prefixes replaced by variables. Not a standalone public replay harness. Do not reuse historical output paths. ROS ports are recorded historical isolated masters, not required constants.",
+  "A804": {
+    "driver": [
+      "/usr/bin/time",
+      "-v",
+      "-o",
+      "$VISIBLE/runs/A804/driver_resource.txt",
+      "$VISIBLE/build/a_driver",
+      "$VISIBLE/runs/A804/input.fifo",
+      "$VISIBLE/runs/A804/capture",
+      "4029",
+      "1785915346.3774276"
+    ],
+    "producer": [
+      "/usr/bin/time",
+      "-v",
+      "-o",
+      "$VISIBLE/runs/A804/stream_resource.txt",
+      "/usr/bin/python3",
+      "$DIAGNOSTICS_ROOT/B_ONCE_INITIALIZATION_COMBINED_LONG_20261018_190109/scripts/prepare_a_full_input.py",
+      "stream",
+      "D3",
+      "$VISIBLE/runs/A804/input.fifo"
+    ]
+  },
+  "NO_DROP804": {
+    "commands": [
+      [
+        "roscore",
+        "-p",
+        "40953"
+      ],
+      [
+        "roslaunch",
+        "$VISIBLE/runs/NO_DROP804/run.launch",
+        "rviz:=false",
+        "use_sim_time:=true",
+        "output_root:=$VISIBLE/runs/NO_DROP804/native"
+      ],
+      [
+        "rosbag",
+        "play",
+        "--clock",
+        "-r",
+        "1",
+        "-d",
+        "2",
+        "$COMPETITION_BAG",
+        "--topics",
+        "/tiaozhanbei/lidar",
+        "/tiaozhanbei/imu",
+        "/tiaozhanbei/camera/left/image/compressed"
+      ]
+    ],
+    "drop": false,
+    "target": {
+      "dispatch": 28131,
+      "lio": 4029,
+      "vio": 24100
+    },
+    "runtime_thread_env": {
+      "OMP_NUM_THREADS": "1",
+      "OPENBLAS_NUM_THREADS": "1"
+    }
+  },
+  "DROP2_804": {
+    "commands": [
+      [
+        "roscore",
+        "-p",
+        "38087"
+      ],
+      [
+        "roslaunch",
+        "$VISIBLE/runs/DROP2_804/run.launch",
+        "rviz:=false",
+        "use_sim_time:=true",
+        "output_root:=$VISIBLE/runs/DROP2_804/native"
+      ],
+      [
+        "rosbag",
+        "play",
+        "--clock",
+        "-r",
+        "1",
+        "-d",
+        "2",
+        "$COMPETITION_BAG",
+        "--topics",
+        "/tiaozhanbei/lidar",
+        "/tiaozhanbei/imu",
+        "/tiaozhanbei/camera/left/image/compressed"
+      ]
+    ],
+    "drop": true,
+    "target": {
+      "dispatch": 28129,
+      "lio": 4029,
+      "vio": 24098
+    },
+    "runtime_thread_env": {
+      "OMP_NUM_THREADS": "1",
+      "OPENBLAS_NUM_THREADS": "1"
+    }
+  }
+}

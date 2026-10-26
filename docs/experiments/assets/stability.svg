@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="240" viewBox="0 0 760 240" role="img" aria-labelledby="title desc">
+<title id="title">Recorded 804-second regression maximum scan-difference speeds</title>
+<desc id="desc">Pure LIO 1.250006 metres per second, LIVO and DROP2 1.255960. Each completed 4029 LIO commits. These are stability diagnostics, not accuracy.</desc>
+<rect width="760" height="240" fill="white"/>
+<g font-family="sans-serif" font-size="16" fill="#153451">
+<text x="24" y="30">804 s regression at d9497af — maximum scan-difference speed</text>
+<text x="24" y="78">Pure LIO</text><text x="24" y="123">Full LIVO</text><text x="24" y="168">DROP2</text>
+<rect x="145" y="57" width="300.001" height="28" fill="#2378b8"/>
+<rect x="145" y="102" width="301.430" height="28" fill="#2378b8"/>
+<rect x="145" y="147" width="301.430" height="28" fill="#2378b8"/>
+<text x="465" y="78">1.250006 m/s</text><text x="465" y="123">1.255960 m/s</text><text x="465" y="168">1.255960 m/s</text>
+<text x="24" y="208">4029 LIO commits each. Stability diagnostics only; no ATE or ground truth.</text>
+</g></svg>

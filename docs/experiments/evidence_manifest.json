@@ -1,0 +1,197 @@
+{
+  "review_date": "2026-10-26",
+  "algorithm_commit": "d9497af2234d3fd368dfdc072918d81c5d59a585",
+  "backend_evidence_commit": "dd35f77fa0c1ff4728eace5330d7d9905ce36534",
+  "note": "Hashes identify original local evidence, not proof of public availability. No raw data copied. Fields below are extracted, not new experiments.",
+  "frontend_804_summary": {
+    "A804": {
+      "PASS": true,
+      "LIO": 4029,
+      "VIO": 0,
+      "accepted_VIO": 0,
+      "accepted_VIO_actual_changes": 0,
+      "max_scan_speed": 1.2500059477373417,
+      "first_last_distance": 1.2318236910584812,
+      "last_LIO_relative": 803.8300790786743,
+      "ESTIMATOR_REQUIRED_INPUT_VALID": "YES",
+      "observability_limits": [
+        "IMU history is the actual saved persistent before/after state; LIO may clear history before recording. Full deskew physical correctness is not newly established.",
+        "Per-step F/Q matrices were not independently recorded; frozen source, selected payload, derived intervals and full propagated P are checked.",
+        "Callback raw identities are observed; TCP send completion and full image payload hashing at callback are not observed."
+      ]
+    },
+    "NO_DROP804": {
+      "PASS": true,
+      "LIO": 4029,
+      "VIO": 24100,
+      "accepted_VIO": 3467,
+      "accepted_VIO_actual_changes": 3467,
+      "max_scan_speed": 1.2559602210309802,
+      "first_last_distance": 1.043327484295711,
+      "last_LIO_relative": 803.8300790786743,
+      "RAW_ALL_MESSAGES_DELIVERED": "YES",
+      "ESTIMATOR_REQUIRED_INPUT_VALID": "YES",
+      "observability_limits": [
+        "IMU history is the actual saved persistent before/after state; LIO may clear history before recording. Full deskew physical correctness is not newly established.",
+        "Per-step F/Q matrices were not independently recorded; frozen source, selected payload, derived intervals and full propagated P are checked.",
+        "Callback raw identities are observed; TCP send completion and full image payload hashing at callback are not observed."
+      ]
+    },
+    "DROP2_804": {
+      "PASS": true,
+      "LIO": 4029,
+      "VIO": 24098,
+      "accepted_VIO": 3467,
+      "accepted_VIO_actual_changes": 3467,
+      "max_scan_speed": 1.2559602210309802,
+      "first_last_distance": 1.043327484295711,
+      "last_LIO_relative": 803.8300790786743,
+      "RAW_ALL_MESSAGES_DELIVERED": "YES",
+      "ESTIMATOR_REQUIRED_INPUT_VALID": "YES",
+      "observability_limits": [
+        "IMU history is the actual saved persistent before/after state; LIO may clear history before recording. Full deskew physical correctness is not newly established.",
+        "Per-step F/Q matrices were not independently recorded; frozen source, selected payload, derived intervals and full propagated P are checked.",
+        "Callback raw identities are observed; TCP send completion and full image payload hashing at callback are not observed."
+      ]
+    }
+  },
+  "source_records": [
+    {
+      "archive_relative_path": "VIO_GRID_ASSOCIATION_REPAIR_20261026_184637/REPAIR_REPORT.md",
+      "bytes": 5503,
+      "sha256": "69fc26482fcdc9680bbf629c6f6386e8a8940338c9dc32f73b6078e215899250",
+      "availability": "maintainer-local; not included in repository"
+    },
+    {
+      "archive_relative_path": "VIO_GRID_ASSOCIATION_REPAIR_20261026_184637/results/FINAL_STATUS.json",
+      "bytes": 547,
+      "sha256": "9fb217e97514d378aa7054b18e2afefdf4c88cd538c0da150e3d856235c94043",
+      "availability": "maintainer-local; not included in repository"
+    },
+    {
+      "archive_relative_path": "VIO_GRID_ASSOCIATION_REPAIR_20261026_184637/results/FIXED_INPUT_NEGATIVE_DEPTH_PROOF.json",
+      "bytes": 4259,
+      "sha256": "69b0ce7499c81f58a58fb773d8bfbd4f8964ebcedc48f8256c78fdcace412b16",
+      "availability": "maintainer-local; not included in repository"
+    },
+    {
+      "archive_relative_path": "VIO_GRID_ASSOCIATION_REPAIR_20261026_184637/variants/VISIBLE/analysis/DROP2_PAIR.json",
+      "bytes": 1172,
+      "sha256": "62361a97d9c5cbd89d5c3eecbeb65724273f5493369ecf61c68fbeb6a4117d0d",
+      "availability": "maintainer-local; not included in repository"
+    },
+    {
+      "archive_relative_path": "VIO_GRID_ASSOCIATION_REPAIR_20261026_184637/variants/VISIBLE/analysis/DOOR_WINDOWS.json",
+      "bytes": 9401,
+      "sha256": "80509899f03a75bebf008a35aa03380c76162cd3a5ff4dbee7a3e8cc38983591",
+      "availability": "maintainer-local; not included in repository"
+    },
+    {
+      "archive_relative_path": "VIO_GRID_ASSOCIATION_REPAIR_20261026_184637/formal_check/analysis/B20_RECHECK_RESULTS.json",
+      "bytes": 5436,
+      "sha256": "a7a3a5a54a2d4757b14e2e36301e739dad92357aa265bf88d7927c7dd5ceb517",
+      "availability": "maintainer-local; not included in repository"
+    },
+    {
+      "archive_relative_path": "VIO_GRID_ASSOCIATION_REPAIR_20261026_184637/results/FORMAL_SHORT_EQUIVALENCE.json",
+      "bytes": 377,
+      "sha256": "1f92ce93cc536042833e87b75506ff2ec590b6a2cfefcff2deddf4b86bb266e6",
+      "availability": "maintainer-local; not included in repository"
+    },
+    {
+      "archive_relative_path": "VIO_GRID_ASSOCIATION_REPAIR_20261026_184637/variants/VISIBLE/analysis/A804_RESULTS.json",
+      "bytes": 6571,
+      "sha256": "3c795373d37fdab4b178c1964c856a7ad8b00b215a0a911e2a3f2983aa5b832c",
+      "availability": "maintainer-local; not included in repository"
+    },
+    {
+      "archive_relative_path": "VIO_GRID_ASSOCIATION_REPAIR_20261026_184637/variants/VISIBLE/analysis/NO_DROP804_RESULTS.json",
+      "bytes": 8092,
+      "sha256": "fd14f4799ee07e4309896c22f06b634f1687a6ad590dc9689fcb48c1863177af",
+      "availability": "maintainer-local; not included in repository"
+    },
+    {
+      "archive_relative_path": "VIO_GRID_ASSOCIATION_REPAIR_20261026_184637/variants/VISIBLE/analysis/DROP2_804_RESULTS.json",
+      "bytes": 8092,
+      "sha256": "87357cdc74cd617e3fe02795b5a2ce90df6833231a61687204a7f9cef2695641",
+      "availability": "maintainer-local; not included in repository"
+    },
+    {
+      "archive_relative_path": "FAST_LIVO2_GNSS_UWB_COMPATIBILITY_20261023_122137/legacy_removal_20261023_130945/LEGACY_GNSS_UWB_REMOVAL_REPORT.md",
+      "bytes": 2897,
+      "sha256": "42820ff97467dd56eff4710479f62bc620effd40d4b76d477f45be61164919a2",
+      "availability": "maintainer-local; not included in repository"
+    },
+    {
+      "archive_relative_path": "FAST_LIVO2_GNSS_UWB_COMPATIBILITY_20261023_122137/legacy_removal_20261023_130945/GNSS_FACTOR_REGRESSION.json",
+      "bytes": 391,
+      "sha256": "23edc79c4113485fad98464c51dcf8f2f666afaa93259a2cae6a4ca9effcd485",
+      "availability": "maintainer-local; not included in repository"
+    },
+    {
+      "archive_relative_path": "FAST_LIVO2_GNSS_UWB_COMPATIBILITY_20261023_122137/legacy_removal_20261023_130945/UWB_FACTOR_REGRESSION.json",
+      "bytes": 386,
+      "sha256": "ffb3d87bb884463baa52547f948c116288af05644c7be1910f0fb32b5eed2b39",
+      "availability": "maintainer-local; not included in repository"
+    },
+    {
+      "archive_relative_path": "FAST_LIVO2_GNSS_UWB_COMPATIBILITY_20261023_122137/legacy_removal_20261023_130945/JOINT_FACTOR_INTERFACE_TESTS.json",
+      "bytes": 457,
+      "sha256": "b552f62e4ca3a33a11782c3d5d154c9114e423764183d5b1009650c29cd5c2f9",
+      "availability": "maintainer-local; not included in repository"
+    },
+    {
+      "archive_relative_path": "FAST_LIVO2_GNSS_UWB_COMPATIBILITY_20261023_122137/legacy_removal_20261023_130945/scripts/formal_native_runner.py",
+      "bytes": 4893,
+      "sha256": "73706d5b8607507853c85037db3b7338f737bf83d7a2e8e933fa7e8b8cd86a65",
+      "availability": "maintainer-local; not included in repository"
+    },
+    {
+      "archive_relative_path": "VIO_GRID_ASSOCIATION_REPAIR_20261026_184637/variants/VISIBLE/runs/NO_DROP804/run_manifest.json",
+      "bytes": 221213,
+      "sha256": "927025a1196b4d30f3c9715221aa7ae1b7b31b0c057c346aec387d5f932ef9e2",
+      "availability": "maintainer-local; not included in repository"
+    },
+    {
+      "archive_relative_path": "VIO_GRID_ASSOCIATION_REPAIR_20261026_184637/variants/VISIBLE/runs/NO_DROP804/run.launch",
+      "bytes": 2723,
+      "sha256": "c026f26ebe7e23e73dfb0ae528bed5307e17eff7788e4d8130c4397ec64f857d",
+      "availability": "maintainer-local; not included in repository"
+    },
+    {
+      "archive_relative_path": "VIO_GRID_ASSOCIATION_REPAIR_20261026_184637/variants/VISIBLE/runs/DROP2_804/run_manifest.json",
+      "bytes": 221208,
+      "sha256": "cbb5480e2e4a27fe1e1d5e77cfb92ab169fadad82fd7e15502c70990371bd238",
+      "availability": "maintainer-local; not included in repository"
+    },
+    {
+      "archive_relative_path": "VIO_GRID_ASSOCIATION_REPAIR_20261026_184637/variants/VISIBLE/runs/DROP2_804/run.launch",
+      "bytes": 2722,
+      "sha256": "9dc96ac758e692ed88cbf4e1ee1551800b307a8ced7e8d42a49d2d9091241a93",
+      "availability": "maintainer-local; not included in repository"
+    },
+    {
+      "archive_relative_path": "VIO_GRID_ASSOCIATION_REPAIR_20261026_184637/variants/VISIBLE/runs/A804/commands.json",
+      "bytes": 1304,
+      "sha256": "807ac25388009ecbd1c9ee61450d6cc0c7a0efc34f310e5a6ffee06c57f77577",
+      "availability": "maintainer-local; not included in repository"
+    }
+  ],
+  "configuration_identity": [
+    {
+      "path": "src/FAST_LIVO2/config/petrochemical_site/mapping.yaml",
+      "committed_d9497af_sha256": "18186cdbdfdc1d0deb0a4e206f8b4eb2ea67b366e4b343e741102a90b646fc0a",
+      "scope": "committed base profile only; actual loaded overrides are preserved in hashed run_manifest.json, not inferred from this hash"
+    },
+    {
+      "path": "src/FAST_LIVO2/config/petrochemical_site/calibration.yaml",
+      "committed_d9497af_sha256": "403f44b820dd08500bc50026c956b24980503035a7b6f9d5550ff38c991a707f",
+      "scope": "committed base profile only; actual loaded overrides are preserved in hashed run_manifest.json, not inferred from this hash"
+    },
+    {
+      "path": "src/FAST_LIVO2/config/petrochemical_site/camera_left.yaml",
+      "committed_d9497af_sha256": "f5bc38bc45be4ae10cebfc60b1701a62edf83a65dc55d70881bc0cc356c12900",
+      "scope": "committed base profile only; actual loaded overrides are preserved in hashed run_manifest.json, not inferred from this hash"
+    }
+  ]
+}
