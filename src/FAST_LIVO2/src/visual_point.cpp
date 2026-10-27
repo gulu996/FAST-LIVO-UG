@@ -96,18 +96,20 @@ bool VisualPoint::getCloseViewObs(const Vector3d &framepos, Feature *&ftr, const
 
 void VisualPoint::findMinScoreFeature(const Vector3d &framepos, Feature *&ftr) const
 {
-  auto min_it = obs_.begin();
+  auto min_it = obs_.end();
   float min_score = std::numeric_limits<float>::max();
 
   for (auto it = obs_.begin(), ite = obs_.end(); it != ite; ++it)
   {
+    // History pruning must not silently replace the active reference.
+    if (*it == ref_patch) continue;
     if ((*it)->score_ < min_score)
     {
       min_score = (*it)->score_;
       min_it = it;
     }
   }
-  ftr = *min_it;
+  ftr = min_it == obs_.end() ? nullptr : *min_it;
 }
 
 void VisualPoint::deleteNonRefPatchFeatures()

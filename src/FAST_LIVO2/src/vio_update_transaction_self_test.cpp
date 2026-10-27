@@ -172,6 +172,7 @@ void checkPhotometricModel()
 void checkReferencePatchScores()
 {
   VIOManager vio;
+  vio.lidar_map_voxel_size = .8;
   VisualPoint point(V3D(0, 0, 5));
   point.is_normal_initialized_ = true;
   point.normal_ = V3D(0, 0, 1);

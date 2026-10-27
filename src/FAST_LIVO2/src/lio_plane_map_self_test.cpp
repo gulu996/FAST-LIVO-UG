@@ -3,8 +3,75 @@
 #include <cassert>
 #include <iostream>
 
+
+// Observation maintenance is independent of normal convergence and reference selection.
+static void checkObservationMaintenance(bool converged)
+{
+  vk::PinholeCamera camera(320, 240, 1, 100, 100, 160, 120, 0, 0, 0, 0);
+  VIOManager manager;
+  StatesGroup state;
+  const StatesGroup before = state;
+  manager.state = &state; manager.cam = &camera; manager.total_points = 1;
+  manager.patch_size = 8; manager.patch_size_half = 4; manager.patch_size_total = 64;
+  manager.lidar_map_voxel_size = .8; manager.visual_patch_quality_gate_en = false;
+  manager.console_timing_print_en = false; manager.visual_submap = new SubSparseMap;
+  manager.visual_submap->search_levels = {0}; manager.update_flag = {0};
+  cv::Mat image(240, 320, CV_8UC1);
+  for (int y = 0; y < image.rows; ++y)
+    for (int x = 0; x < image.cols; ++x) image.at<unsigned char>(y, x) = 40 + (x * 7 + y * 3) % 160;
+  manager.new_frame_.reset(new Frame(&camera, image));
+  VisualPoint point(V3D(0, 0, 5));
+  point.normal_ = point.previous_normal_ = V3D(0, 0, 1);
+  point.is_normal_initialized_ = true; point.is_converged_ = converged;
+  point.covariance_ = M3D::Identity() * .001;
+  manager.visual_submap->voxel_points.push_back(&point);
+  float *patch = new float[64]; manager.getImagePatch(image, V2D(160, 120), patch, 0);
+  Feature *initial = new Feature(&point, patch, V2D(160, 120), V3D(0, 0, 1), SE3(), 0);
+  initial->img_ = image; initial->id_ = 0; point.addFrameRef(initial);
+  point.ref_patch = initial; point.has_ref_patch_ = true;
+  std::unordered_map<VOXEL_LOCATION, VoxelOctoTree *> empty;
+  for (int i = 1; i <= 60; ++i)
+  {
+    manager.new_frame_->id_ = 2 * i;
+    manager.new_frame_->T_f_w_ = SE3(M3D::Identity(), V3D(i % 2 ? 1 : 0, 0, 0));
+    manager.update_flag[0] = 0; manager.updateVisualMapPoints(image);
+    assert(manager.update_flag[0] == 1 && point.obs_.front()->id_ == 2 * i);
+    assert(point.obs_.size() > 1 && point.obs_.size() <= 30);
+    assert(point.ref_patch != nullptr); // pruning alone cannot clear the active reference
+    if (i == 1) { point.ref_patch = nullptr; point.has_ref_patch_ = false; }
+    manager.updateReferencePatch(empty);
+    assert(point.ref_patch && point.has_ref_patch_);
+    const auto history = point.obs_;
+    Feature *reference = point.ref_patch;
+    manager.new_frame_->id_++; manager.update_flag[0] = 0;
+    manager.updateVisualMapPoints(image); // same pose: do not compare against the oldest view
+    assert(manager.update_flag[0] == 0 && point.obs_ == history && point.ref_patch == reference);
+    manager.updateReferencePatch(empty);
+    assert(point.ref_patch == reference);
+    for (const Feature *f : point.obs_)
+      assert((camera.world2cam(f->T_f_w_ * point.pos_) - f->px_).norm() < 1e-6);
+  }
+  assert(point.obs_.size() == 30);
+  const auto history = point.obs_; Feature *reference = point.ref_patch;
+  manager.visual_patch_quality_gate_en = true;
+  manager.image_quality_saturated_pixel_value = 250;
+  manager.visual_patch_max_saturated_fraction = .2;
+  manager.visual_patch_min_intensity_std = 1;
+  manager.new_frame_->T_f_w_ = SE3(M3D::Identity(), V3D(1, 0, 0));
+  manager.update_flag[0] = 0;
+  manager.updateVisualMapPoints(cv::Mat(240, 320, CV_8UC1, cv::Scalar(255)));
+  assert(manager.update_flag[0] == 0 && point.obs_ == history && point.ref_patch == reference);
+  point.ref_patch->score_ = -.5; Feature *prune = nullptr;
+  point.findMinScoreFeature(V3D::Zero(), prune);
+  assert(prune && prune != point.ref_patch);
+  assert((state - before).norm() == 0 && (state.cov - before.cov).norm() == 0);
+  assert(point.is_converged_ == converged && (point.normal_ - V3D(0, 0, 1)).norm() == 0);
+}
+
 int main()
 {
+  checkObservationMaintenance(false);
+  checkObservationMaintenance(true);
   using V = Eigen::Vector3d;
   std::vector<pointWithVar> points(6);
   for (int i=0;i<6;++i) {points[i].point_w=V(i,0,0);points[i].var=Eigen::Matrix3d::Identity()*.001;}

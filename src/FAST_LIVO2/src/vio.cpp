@@ -3608,11 +3608,8 @@ void VIOManager::updateVisualMapPoints(cv::Mat img)
   {
     VisualPoint *pt = visual_submap->voxel_points[i];
     if (pt == nullptr) continue;
-    if (pt->is_converged_)
-    { 
-      pt->deleteNonRefPatchFeatures();
-      continue;
-    }
+    // Normal convergence does not freeze appearance or viewing geometry.
+    // Keep the existing bounded observation maintenance for these points too.
 
     V2D pc = snapPixelForDeterminism(new_frame_->w2c(pt->pos_));
     if (!isPixelInUsableTile(pc)) continue;
@@ -3620,7 +3617,8 @@ void VIOManager::updateVisualMapPoints(cv::Mat img)
 
     // TODO: condition: distance and view_angle
     // Step 1: time
-    Feature *last_feature = pt->obs_.back();
+    // addFrameRef pushes to the front: compare with the latest accepted observation.
+    Feature *last_feature = pt->obs_.front();
     // if(new_frame_->id_ >= last_feature->id_ + 10) add_flag = true; // 10
 
     // Step 2: delta_pose
@@ -3635,18 +3633,8 @@ void VIOManager::updateVisualMapPoints(cv::Mat img)
     double pixel_dist = (pc - last_px).norm();
     if (pixel_dist > 40) add_flag = true;
 
-    // Maintain the size of 3D point observation features.
-    if (pt->obs_.size() >= 30)
-    {
-      Feature *ref_ftr;
-      pt->findMinScoreFeature(new_frame_->pos(), ref_ftr);
-      pt->deleteFeatureRef(ref_ftr);
-      // cout<<"pt->obs_.size() exceed 20 !!!!!!"<<endl;
-    }
     if (add_flag)
     {
-      update_num += 1;
-      update_flag[i] = 1;
       float *patch_temp = new float[patch_size_total];
       getImagePatch(img, pc, patch_temp, 0);
       if (visual_patch_quality_gate_en)
@@ -3659,12 +3647,23 @@ void VIOManager::updateVisualMapPoints(cv::Mat img)
           continue;
         }
       }
+      // Maintain the size of 3D point observation features.
+      if (pt->obs_.size() >= 30)
+      {
+        Feature *ref_ftr;
+        pt->findMinScoreFeature(new_frame_->pos(), ref_ftr);
+        if (ref_ftr != nullptr) pt->deleteFeatureRef(ref_ftr);
+        // cout<<"pt->obs_.size() exceed 20 !!!!!!"<<endl;
+      }
+
       Vector3d f = cam->cam2world(pc);
       Feature *ftr_new = new Feature(pt, patch_temp, pc, f, new_frame_->T_f_w_, visual_submap->search_levels[i]);
       ftr_new->img_ = img;
       ftr_new->id_ = new_frame_->id_;
       ftr_new->inv_expo_time_ = state->inv_expo_time;
       pt->addFrameRef(ftr_new);
+      update_flag[i] = 1;
+      ++update_num;
     }
   }
   if (console_timing_print_en && (frame_count % std::max(1, console_timing_print_stride) == 0))
@@ -3682,56 +3681,61 @@ void VIOManager::updateReferencePatch(const unordered_map<VOXEL_LOCATION, VoxelO
     VisualPoint *pt = visual_submap->voxel_points[i];
 
     if (!pt->is_normal_initialized_) continue;
-    if (pt->is_converged_) continue;
-    if (pt->obs_.size() <= 5) continue;
+    // Pairwise reference scoring needs one peer; normal refinement retains its own support requirement.
+    if (pt->obs_.size() <= 1) continue;
     if (update_flag[i] == 0) continue;
 
-    const V3D &p_w = pt->pos_;
-    VOXEL_LOCATION position;
-    if (!storedLidarVoxelLocation(p_w, lidar_map_voxel_size, position)) continue;
-    auto iter = plane_map.find(position);
-    if (iter != plane_map.end())
+    // Only normal estimation converges; reference selection remains live.
+    if (!pt->is_converged_ && pt->obs_.size() > 5)
     {
-      VoxelOctoTree *current_octo;
-      current_octo = iter->second->find_correspond(p_w);
-      if (current_octo->plane_ptr_->is_plane_)
+      const V3D &p_w = pt->pos_;
+      VOXEL_LOCATION position;
+      if (!storedLidarVoxelLocation(p_w, lidar_map_voxel_size, position)) continue;
+      auto iter = plane_map.find(position);
+      if (iter != plane_map.end())
       {
-        VoxelPlane &plane = *current_octo->plane_ptr_;
-        const double dis_to_plane = plane.normal_.dot(p_w) + plane.d_;
-        const double dis_to_plane_abs = std::abs(dis_to_plane);
-        const double radius = 3 * plane.radius_;
-        const double tangent2 = planeTangentialDistanceSquared(p_w - plane.center_, plane.normal_);
-        if (std::isfinite(radius) && radius >= 0 && std::isfinite(tangent2) && tangent2 <= radius * radius)
+        VoxelOctoTree *current_octo;
+        current_octo = iter->second->find_correspond(p_w);
+        if (current_octo->plane_ptr_->is_plane_)
         {
-          Eigen::Matrix<double, 1, 6> J_nq;
-          J_nq.block<1, 3>(0, 0) = p_w - plane.center_;
-          J_nq.block<1, 3>(0, 3) = -plane.normal_;
-          double sigma_l = J_nq * plane.plane_var_ * J_nq.transpose();
-          sigma_l += plane.normal_.transpose() * pt->covariance_ * plane.normal_;
-
-          if (dis_to_plane_abs < 3 * sqrt(sigma_l))
+          VoxelPlane &plane = *current_octo->plane_ptr_;
+          const double dis_to_plane = plane.normal_.dot(p_w) + plane.d_;
+          const double dis_to_plane_abs = std::abs(dis_to_plane);
+          const double radius = 3 * plane.radius_;
+          const double tangent2 = planeTangentialDistanceSquared(p_w - plane.center_, plane.normal_);
+          if (std::isfinite(radius) && radius >= 0 && std::isfinite(tangent2) && tangent2 <= radius * radius)
           {
-            // V3D norm_vec(new_frame_->T_f_w_.rotation_matrix() * plane.normal_);
-            // V3D pf(new_frame_->T_f_w_ * pt->pos_);
-            // V3D pf_ref(pt->ref_patch->T_f_w_ * pt->pos_);
-            // V3D norm_vec_ref(pt->ref_patch->T_f_w_.rotation_matrix() *
-            // plane.normal); double cos_ref = pf_ref.dot(norm_vec_ref);
-            
-            if (pt->previous_normal_.dot(plane.normal_) < 0) { pt->normal_ = -plane.normal_; }
-            else { pt->normal_ = plane.normal_; }
+            Eigen::Matrix<double, 1, 6> J_nq;
+            J_nq.block<1, 3>(0, 0) = p_w - plane.center_;
+            J_nq.block<1, 3>(0, 3) = -plane.normal_;
+            double sigma_l = J_nq * plane.plane_var_ * J_nq.transpose();
+            sigma_l += plane.normal_.transpose() * pt->covariance_ * plane.normal_;
 
-            double normal_update = (pt->normal_ - pt->previous_normal_).norm();
-
-            pt->previous_normal_ = pt->normal_;
-
-            if (normal_update < 0.0001 && pt->obs_.size() > 10)
+            if (dis_to_plane_abs < 3 * sqrt(sigma_l))
             {
-              pt->is_converged_ = true;
-              // visual_converged_point.push_back(pt);
+              // V3D norm_vec(new_frame_->T_f_w_.rotation_matrix() * plane.normal_);
+              // V3D pf(new_frame_->T_f_w_ * pt->pos_);
+              // V3D pf_ref(pt->ref_patch->T_f_w_ * pt->pos_);
+              // V3D norm_vec_ref(pt->ref_patch->T_f_w_.rotation_matrix() *
+              // plane.normal); double cos_ref = pf_ref.dot(norm_vec_ref);
+            
+              if (pt->previous_normal_.dot(plane.normal_) < 0) { pt->normal_ = -plane.normal_; }
+              else { pt->normal_ = plane.normal_; }
+
+              double normal_update = (pt->normal_ - pt->previous_normal_).norm();
+
+              pt->previous_normal_ = pt->normal_;
+
+              if (normal_update < 0.0001 && pt->obs_.size() > 10)
+              {
+                pt->is_converged_ = true;
+                // visual_converged_point.push_back(pt);
+              }
             }
           }
         }
       }
+
     }
 
     float score_max = -1000.;
