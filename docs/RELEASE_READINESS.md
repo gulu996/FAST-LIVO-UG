@@ -1,67 +1,92 @@
 # Release and application readiness
 
-Documentation baseline: 2026-10-26; algorithm `d9497af2234d3fd368dfdc072918d81c5d59a585`.
-The repository is a catkin workspace (`src/FAST_LIVO2` is the package).
-Read-only remote inspection returned default branch `main` at
-`b9dfc0ab47ac08edcd44c101d37dc49612c0417c`, while local main was `d9497af`.
-This documentation preparation does not push any commits. Readers of the older
-remote must not assume they have the algorithm described by the latest results.
+Documentation baseline: **2026-10-28**. The catkin workspace root is the
+repository; `src/FAST_LIVO2` is the package.
+
+- Maintainer-local `main`: `5be5538b922ab3a621cd902ecb60b2658aeb3685`
+  (`fix(lio): use floor voxel keys and metre neighbourhood units`).
+- Public `origin/main`: `02343a3` (`fix(vio): separate observation maintenance
+  from reference selection`).
+- Local `main` is one commit ahead of the public branch. **No push was performed
+  by this documentation change.**
+- The maintainer's uncommitted `config/mid360.yaml` (`img_en: 1`), the Hikrobot
+  driver changes, the ZED worktree and the GNSS/UWB backend files were preserved.
 
 ## Ready now / still needed
 
 | Item | State |
 |---|---|
-| English architecture, core dependency/build/run instructions | Added; statically checked, not a fresh installation test |
-| GPLv2 text and upstream attribution | Present at root and package; see unresolved third-party issues |
-| Public mathematical/software test entrypoints | Existing tracked native tests documented |
-| 804 s results, DROP2 and geometry evidence | Versioned summaries with source hashes; private data/harness still restrict exact replay |
-| GNSS, UWB and joint graph distinctions | Separate real-input and synthetic scopes documented |
-| License clearance for all distributed components | **Not complete**: GPL versions, MVS wrapper, firmware and notices |
-| New images / raw datasets | None added; no permission assumed |
-| Fresh clone build / CI | Still needed on a clean authorized environment; no rebuild in this docs task |
-| Application or remote publication | Not submitted; no push performed |
+| English architecture, build and run documentation | Updated for the public tunnel entry; statically checked, not a fresh install test |
+| Public tunnel dataset | Share link and extraction code checked 2026-10-28; file name/size recorded; local SHA-256 recorded |
+| A5/A1 voxel-key and neighbour-unit fix | In maintainer-local `5be5538`; native test, tunnel replay and internal competition evidence exist; **not on public `origin/main`** |
+| Public tunnel result | 3542 LIO, 0.542 m first/last, 2.02 m/s maximum adjacent-scan speed; revisit diagnostic, not ATE |
+| Restricted 804 s competition / DROP2 / real-map geometry | Existing summaries; private data and harness still restrict exact replay; **not the tunnel dataset** |
+| GNSS, UWB and joint graph | Separate real 90 s software tests and a synthetic joint graph; no real simultaneous field-accuracy certification |
+| License clearance for all distributed components | **Not complete**: GPLv2/GPLv3 combination, MVS wrapper `TODO`, firmware/vendor notices |
+| Fresh clone build / CI | Still needed on a clean authorized environment; no clean-clone build was performed |
+| Remote publication / application | No push; the OpenAI Codex for OSS form was not submitted by this task |
 
-## Privacy and release review
+## Public reproduction status
 
-New docs use public upstream author attribution and anonymized aggregate counts.
-No site photographs, maps, exact geodetic origin or raw person/vehicle imagery are
-added. Evidence manifests use relative archival identifiers, not private mount
-paths. Existing configuration files contain deployment coordinates, anchors,
-serial/network details and local paths; e.g. `gnss_adapter_mid360.yaml` stores an
-origin and `mid360.yaml` stores local paths/anchors. Review these **existing**
-files for consent before a release; this task deliberately does not change YAML.
-The firmware tree includes old Keil user-project files and listings that also
-need publication review. A pattern scan is not certification of the whole Git
-history as credential-free. Check Git history and SDK/data rights before uploading
-release archives. Do not include local untracked reports or the ZED worktree.
+The public tunnel share is the recommended reproduction entry. The link returned
+HTTP 200, extraction code `mbpr` was accepted, and the share listing reported
+`suidao2_resized.bag` at 16,334,415,367 bytes. The maintainer's exact-size local
+copy has SHA-256
+`9289318857b0ca009dab4570ac6f51915de1681fe60b2abc0b481c20d6711169`.
+The file was not re-downloaded in this documentation pass, so this is link and
+metadata verification, not an independent download/replay.
+
+The 0.542 m tunnel result is tied to maintainer-local `5be5538`. Because that
+commit is not on the public branch, the result is **maintainer-verified, not
+public-code reproducible** until the commit is published. No third-party
+reproduction has been reported.
+
+## License and data boundaries
+
+- The FAST-LIVO2-derived component retains **GPLv2** (root and package `LICENSE`
+  are byte-identical; SHA-256
+  `8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643`).
+- `src/FAST_LIVO2/package.xml` still says `BSD`; this inherited metadata tag is
+  **not** a relicensing grant and remains a correction action.
+- `src/rpg_vikit/vikit_common` declares GPLv3 and compiles GPLv3 components into
+  a linked shared library; `src/gnss_comm` declares GPL-3.0-or-later. The
+  GPLv2/GPLv3 combined-work question is unresolved.
+- `src/mvs_ros_driver` has a `TODO` license and depends on an external vendor SDK;
+  STM32 vendor-derived files carry their own unresolved notices. No component is
+  relicensed to MIT by this fork.
+- See [third-party terms](../THIRD_PARTY_LICENSES.md) for the file-level register.
+  The repository is **not certified release-ready**.
+- The tunnel bag is not in this repository. The maintainer states it is
+  self-collected and shareable; users must still check privacy, participant and
+  site constraints before redistributing it. Competition, GNSS and UWB recordings
+  have no verified public redistribution grant here.
 
 ## Codex for Open Source preparation
 
-The official [Codex for Open Source page](https://developers.openai.com/community/codex-for-oss)
-invites core maintainers and asks applicants to explain ecosystem importance.
-It describes Pro/Codex support, conditional security access and API-credit support;
-acceptance is reviewed, not guaranteed by this documentation.
+The public repository is <https://github.com/gulu996/FAST-LIVO-UG>. Factual
+material available for an application:
 
-Prepare factual maintainer/write-access evidence, project activity and public
-usage/dependents (do not invent adoption), the unresolved license action plan,
-and a concrete Codex maintenance proposal: reproducible geometry/transaction
-regressions, code review, issue triage and release checks. For API credits,
-explain the workflow and requested resources. Supply public, permission-cleared
-minimal test fixtures and a clean-build result where possible. Review the current
-program form/terms at submission time. No application or message to OpenAI was
+- A maintained ROS 1 FAST-LIVO2 fork with a separate GTSAM fixed-lag GNSS/UWB
+  backend and transaction-oriented frontend.
+- A native geometry test, source-available transaction tests, and a documented
+  public tunnel replay entry.
+- A concrete license action plan and a release checklist rather than an
+  unsupported “open-source ready” claim.
+- Maintainer-run evidence on local `5be5538` and separate internal competition
+  evidence; no adoption, dependent-project or user-count claims are invented.
+
+A support proposal can target reproducible geometry/transaction regressions,
+code review, issue triage and release checks. API-credit requests should state
+the workflow and resources actually needed. The program terms and current form
+must be reviewed at submission time; no application or message to OpenAI was
 sent by this task.
 
 ## Documentation checks performed
 
-- Internal Markdown links and code fences checked; SVG parsed as XML; evidence
-  JSON parsed; root LICENSE byte-identical to upstream and the package copy
-  (SHA256 `8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643`).
-- Both mapping launches and the recording example resolved with `roslaunch --files`;
-  no nodes, sensors or replay were started.
-- Core build whitelist checked against tracked package dependencies; documented
-  native targets checked against CMake/source. No clean-build claim is made.
-- Twelve documentation external links returned HTTP 200. The OpenAI program page
-  returned 403 to a direct scripted request but was successfully read through the
-  documentation browser; it is not reported as a broken URL or a guaranteed API.
-- New text checked for common credential patterns; new figure is generated SVG
-  containing only aggregate statistics. This is not a full-history secret audit.
+- Internal Markdown links and code fences checked; external tunnel link checked
+  by HTTP and Baidu share metadata on 2026-10-28.
+- The bag's `rosbag info` was checked on the maintainer copy; no new long SLAM
+  replay was run for this documentation commit.
+- Git diff reviewed to exclude `config/mid360.yaml`, the Hikrobot driver, ZED,
+  GNSS/UWB code, bags, logs, binaries and untracked internal reports.
+- No push, no history rewrite and no destructive cleanup was performed.

@@ -9,10 +9,24 @@ and UWB range factors. Optimized poses are separate outputs: the backend does
 **not** overwrite the frontend ESIKF state or covariance.
 
 This is a research implementation, not a certified navigation product.
-The documented algorithm revision is `d9497af2234d3fd368dfdc072918d81c5d59a585`.
-See [versioned experiments](docs/experiments/README.md) for tested configurations
-and [release blockers](docs/RELEASE_READINESS.md) before redistributing a build.
-The local validated revision and the published GitHub branch can differ.
+The public branch `origin/main` (local remote ref, 2026-10-28) is `02343a3`;
+the maintainer's locally validated `main` is `5be5538` (one commit ahead, not
+yet pushed). The public tunnel dataset
+below is the recommended reproduction entry. The 804 s competition recording is
+private and is **not** the tunnel dataset; its numbers are internal validation
+only. See [versioned experiments](docs/experiments/README.md) and
+[release blockers](docs/RELEASE_READINESS.md) before redistributing a build.
+
+| Area | Current status |
+|---|---|
+| FAST-LIVO2 frontend: LIO, VIO, scan/visual transactions | Maintainer-verified with `lio_plane_map_self_test` and the public tunnel replay; the voxel-key/neighbour fix is in local `5be5538` |
+| GTSAM GNSS/UWB fixed-lag backend | Experimental/software-verified; no real simultaneous field-accuracy certification |
+| Public tunnel dataset | Baidu share link and extraction code checked on 2026-10-28; file name, size and local SHA-256 recorded in [the tunnel page](docs/experiments/tunnel.md) |
+| License clearance | Not complete; GPLv2/GPLv3, driver-wrapper and firmware questions remain open |
+
+A fresh clone of the public branch (at `02343a3`) does **not** contain the local
+`5be5538` fixes. The tunnel result below is tied to `5be5538`; until that commit
+is published, it is maintainer-verified rather than public-code reproducible.
 
 ## Architecture
 
@@ -47,8 +61,10 @@ Compared with the upstream frontend, this fork adds:
   persistent propagation state unchanged.
 - Initialization time alignment, 0/1-IMU interval coverage, consistent point/history
   time origins, boundary handling and protection against repeated deskew writes.
-- Plane validity and tangential-distance checks, consistent VIO/LiDAR map keys,
-  and positive-depth support checks for plane-warped visual patches.
+- Plane validity and tangential-distance checks, consistent VIO/LiDAR map keys
+  (including floor-based negative-boundary keys and metre-based neighbour queries
+  in local `5be5538`), and positive-depth support checks for plane-warped visual
+  patches.
 - Transaction tests, per-frame cloud export, and sensor recording/time bridges.
 
 These changes do not establish full physical correctness of all deskew modes,
@@ -76,36 +92,91 @@ GTSAM 4.2 with `gtsam_unstable`, the bundled Vikit packages, an SDK-free core
 build, and optional sensor drivers. No CUDA dependency is required by the core
 frontend/backend build. Do not install a second Vikit copy into the workspace.
 
-## Minimal run
+## Public tunnel dataset and reproduction
 
-After building, source `devel/setup.bash` in **every terminal**. Pick the profile
-matching the data, intrinsics, extrinsics, units and time conventions. Neither
-profile is universal calibration.
+The recommended public input is a self-collected tunnel recording shared by the
+maintainer. It is a separate recording from the private competition 804 s bag.
 
-For the petrochemical dataset profile:
+- Baidu Netdisk: [share link](https://pan.baidu.com/s/1vArBc4Gn5unoczOqP880RQ?pwd=mbpr),
+  extraction code `mbpr`
+- Share folder: `/采集数据集/隧道`; file: `suidao2_resized.bag`
+- Size: **16,334,415,367 bytes** (about 15.2 GiB)
+- SHA-256 of the maintainer's exact-size local copy:
+  `9289318857b0ca009dab4570ac6f51915de1681fe60b2abc0b481c20d6711169`
+- Bag contents: 355 s, 78,063 messages; 3,549 `livox_ros_driver2/CustomMsg`
+  LiDAR scans, 70,963 `sensor_msgs/Imu`, 3,551 raw `sensor_msgs/Image` frames
+  (1300x1080, `rgb8`); topics `/livox/lidar`, `/livox/imu`, `/left_camera/image`.
+  The bag clock starts at 510.32 s; always replay with `--clock`.
+- Link check on 2026-10-28: the share page returned HTTP 200, the extraction code
+  `mbpr` was accepted, and the file above was listed with the stated size. The
+  file was **not** re-downloaded for this documentation pass; the SHA-256 is from
+  the maintainer's local copy of the same size. Recompute it after download and
+  contact the maintainer if it differs.
+
+The bag is not part of this Git repository. The repository contains no copy of
+the recording, site map or raw sensor payload. The maintainer states that the
+recording is self-collected and shareable; users remain responsible for checking
+privacy, participant and site constraints before further redistribution.
+
+### Run the tunnel replay
+
+Terminal 1 — ROS master:
 
 ```bash
-source ~/fast_livo_ug_ws/devel/setup.bash
-roslaunch fast_livo mapping_petrochemical_site.launch use_sim_time:=true rviz:=false
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+roscore
 ```
 
-In another terminal, after subscriber initialization:
+Terminal 2 — explicit frontend startup (load parameters before the node):
 
 ```bash
-source ~/fast_livo_ug_ws/devel/setup.bash
-rosbag info /path/to/competition.bag
-rosbag play --clock -r 1 -d 2 /path/to/competition.bag \
-  /tiaozhanbei/camera/left/image/compressed:=/petrochemical/camera/left/image_raw/compressed
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+rosparam set /use_sim_time true
+PKG=$(rospack find fast_livo)
+rosparam load "$PKG/config/mid360.yaml"
+rosparam set /common/img_en 1
+rosparam set /diagnostics/livo_scan_contract_en true
+rosparam set /pcd_save/pcd_save_en false
+rosparam load "$PKG/config/camera_pinhole_mid360.yaml" /laserMapping
+rosrun fast_livo fastlivo_mapping __name:=laserMapping _save_path:=/tmp/tunnel_run
 ```
 
-This is a normal launch example, **not** the historical instrumented DROP2
-experiment. The stock launch uses `image_transport republish`; the published
-regression counts used a separate traced queue-8 decoder. See the experiment
-pages for that distinction. The competition bag is not distributed here.
-The petrochemical launch loads GNSS settings too; use the explicit
-[fusion-mode startup](docs/FUSION_MODES.md) for frontend-only or controlled modes.
-Its current output directory is dataset-specific; the same guide shows how to
-set a writable output directory before starting nodes.
+Terminal 3 — replay:
+
+```bash
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+rosbag play --clock -r 1 -d 2 /path/to/suidao2_resized.bag \
+  --topics /livox/lidar /livox/imu /left_camera/image
+```
+
+Notes:
+
+- The tracked `config/mid360.yaml` defaults to `common/img_en: 0` (LiDAR/IMU
+  only). The `rosparam set /common/img_en 1` line is required for the LIVO path
+  and reflects the maintainer's local setting; it is not a committed config change.
+- `config/camera_pinhole_mid360.yaml` is defined at 2600x2160 with `scale: 0.5`;
+  it consumes the resized 1300x1080 stream directly. Do not rescale a second time.
+- This bag has no GNSS or UWB data. Do not start the GNSS adapter or fixed-lag
+  backend nodes for this replay.
+- The maintainer's `5be5538` tunnel run used 3542 LIO commits and produced a
+  first/last distance of **0.542 m**, with a maximum adjacent-scan speed of
+  2.02 m/s. These are revisit/stability diagnostics, **not ATE**, and accepted
+  visual counts may vary with timing. The exact run requires the local `5be5538`
+  commit; the public `origin/main` (`02343a3`) does not include it yet.
+
+## Restricted internal competition replay
+
+The ~804 s competition recording is private and is **not** the public tunnel
+dataset. Internal runs on `02343a3` and `5be5538` gave first/last distances of
+about 1.07 m and 1.014 m respectively; these are stability/revisit diagnostics,
+not absolute accuracy, and are not reproducible from this README. See
+[competition 804](docs/experiments/competition-804.md) for the evidence scope.
+Do not attribute the 804 s numbers to the tunnel recording.
+
+## Live MID-360 hardware
 
 For configured MID-360 hardware:
 
@@ -182,35 +253,84 @@ serial arrival time does not by itself establish physical measurement time.
   [`uwb_serial_driver`](src/uwb_serial_driver): capture and stamped sensor inputs.
 - [`docs/experiments`](docs/experiments/README.md): versioned results and limits.
 
+The public tunnel replay uses `config/mid360.yaml` plus
+`config/camera_pinhole_mid360.yaml`. The tracked `img_en` default is `0`; set it
+to `1` at runtime as shown above to enable the visual path. The private
+`config/petrochemical_site` profile is for the restricted competition recording,
+not the tunnel dataset.
+
 Keep experiment source copies outside ROS packages: recursive launch discovery
 can make identical launch names ambiguous. Diagnose with `rospack find fast_livo`
 and `roslaunch --files fast_livo mapping_mid360.launch` without starting hardware.
 
-## Validation status
+## Verification status
 
-The latest isolated frontend candidate completed three ~804 s runs: pure LIO,
-LIVO and exact two-image omission. The integrated source matched the candidate,
-and the formal build passed a 20 s online comparison. This does not mean a new
-804 s run was performed with the formal installed binary.
+### Verified in the maintainer environment
 
-Separate recorded GNSS and UWB software regressions and a synthetic joint graph
-test exist. **No real simultaneous GNSS+UWB field positioning accuracy
-certification is claimed.** Data availability, sample counts, versions and
-commands are in the [experiment index](docs/experiments/README.md).
+- `lio_plane_map_self_test` passes on local `5be5538`; the formal
+  `catkin_make --pkg fast_livo` build and a 20 s exact-config replay smoke test
+  also passed. This is not a clean-clone CI result.
+- Public tunnel replay on local `5be5538`: 3542 LIO commits, first/last
+  **0.542 m**, maximum adjacent-scan speed 2.02 m/s. This is the A5/A1
+  voxel-key/neighbour fix. First/last distance is a revisit diagnostic, not ATE;
+  accepted visual counts can vary with timing.
+- Internal competition 804 s: about 1.070 m on public `02343a3` and 1.014 m on
+  local `5be5538`. The recording is private and is **not** the tunnel dataset;
+  these numbers are internal stability/revisit diagnostics, not public
+  reproduction results.
+- The dataset share link, extraction code and listed file size were checked on
+  2026-10-28. The maintainer's local copy has the same size and the SHA-256 in
+  [the tunnel page](docs/experiments/tunnel.md); the file was not re-downloaded.
 
-Remaining research includes broader scene coverage, general visual occlusion,
-raycast mode, physical deskew/history consistency, UWB device timing/antenna
-calibration and real joint-frame validation. Shadow landmark/full-state modules
-are experimental. Do not enable them on the strength of the frontend tests.
+### Experimental
+
+- GNSS adapter and GTSAM fixed-lag backend: software tests and recorded 90 s
+  single-sensor runs exist; a synthetic joint graph uses declared common
+  frame/time. **No real simultaneous GNSS+UWB field accuracy certification is
+  claimed.**
+- ZED integration, ArUco landmark fusion and shadow landmark/full-state modules
+  are separate, experimental paths. They are not part of the verified core
+  frontend and should not be enabled on the strength of the tunnel replay.
+- Raycast mode, physical deskew/history consistency, general visual occlusion,
+  arbitrary image-loss invariance and UWB device timing/antenna calibration
+  remain research items. See the [experiment index](docs/experiments/README.md).
+
+### Rejected, not part of `5be5538`
+
+- A2 LiDAR query-covariance corrections: query-only tunnel first/last 2.159 m;
+  query plus stored-map covariance 15.316 m. Both failed long-run regression.
+- A6 scalar-`Exp` small-angle correction: tunnel 0.5475 m but competition
+  72.76 m. Rejected.
+- A5/A1+A6 combination: tunnel first/last 0.535 m but a 3.008 m reverse segment
+  in 233–260 s. Rejected.
+
+These candidates are not written up as fixed features. The internal audit report
+is maintainer-local and is not linked as a public artifact.
+
+### Not verified
+
+- No independent reproduction of the tunnel result by a third party yet.
+- No clean-clone build/CI in this documentation pass.
+- No ground truth or ATE; no absolute accuracy certification.
+- No real simultaneous GNSS+UWB field validation.
+- No certification of all deskew modes, occlusion reasoning or image-loss
+  invariance.
 
 ## License and acknowledgements
 
 The FAST-LIVO2-derived component retains **GNU GPL version 2**; see
 [LICENSE](LICENSE) and the original [package license](src/FAST_LIVO2/LICENSE).
-Other components retain their own terms. The repository is not blanket MIT/BSD.
-The [third-party register](THIRD_PARTY_LICENSES.md) identifies unresolved
-GPLv2/GPLv3 combination, driver and firmware redistribution questions; adding a
-license file is not clearance for those components.
+Other components retain their own terms. The repository is not blanket MIT/BSD,
+and this fork does **not** relicense any component to MIT. The
+[third-party register](THIRD_PARTY_LICENSES.md) identifies unresolved
+GPLv2/GPLv3 combination questions (including the linked Vikit components and
+`gnss_comm`), the MVS wrapper's `TODO` license, and firmware/vendor notices.
+Adding a root license file is not clearance for those components.
+
+The source tree is **not currently certified release-ready**. Correcting the
+contradictory `package.xml` BSD tag, resolving the linked GPL version question,
+and confirming driver/firmware/data permissions are follow-up actions, not
+claims made by this README. See [release readiness](docs/RELEASE_READINESS.md).
 
 Credit belongs to Chunran Zheng, Fu Zhang and the FAST-LIVO2/FAST-LIVO authors,
 and to contributors to LOAM, RPG Vikit/PTAM/dvo, GTSAM, Livox, gnss_comm and the

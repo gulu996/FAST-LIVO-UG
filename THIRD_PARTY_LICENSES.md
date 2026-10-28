@@ -1,6 +1,6 @@
 # Licensing and third-party attribution
 
-Reviewed against tracked files at `d9497af` on 2026-10-26. This is a source
+Reviewed against tracked files at maintainer-local `5be5538` on 2026-10-28. This is a source
 inventory and unresolved-permissions register, **not clearance of every component**.
 No uncertain code, driver or firmware has been deleted or relicensed.
 
@@ -78,6 +78,11 @@ status requires maintainer follow-up independently of these documentation change
 - `rpg_vikit/vikit_common/test/data/scene_000.png` is existing third-party test
   imagery. Its data-specific permission was not established; it is not reused in
   new docs. Existing vendor/UI code is not new authorship by this project.
+- The maintainer's self-collected tunnel recording is shared outside this
+  repository (Baidu Netdisk; see
+  [docs/experiments/tunnel.md](docs/experiments/tunnel.md)). The maintainer states
+  that it is shareable. No bag is added here; users must check privacy,
+  participant and site constraints before further redistribution.
 - Competition, GNSS and UWB recordings have no verified public redistribution
   grant here. No bag, PCD, site photo, trajectory map or raw sensor payload is
   added. New experiment pages publish aggregate software observations only.
