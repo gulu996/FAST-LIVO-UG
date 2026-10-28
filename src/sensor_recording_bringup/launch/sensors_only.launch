@@ -3,7 +3,7 @@
 
   <arg name="enable_time_bridge" default="true"/>
   <arg name="enable_livox" default="true"/>
-  <arg name="enable_camera" default="true"/>
+  <arg name="enable_camera" default="false"/>
   <arg name="enable_gnss" default="true"/>
   <arg name="enable_gnss_adapter" default="true"/>
   <arg name="enable_uwb" default="true"/>

@@ -9,6 +9,7 @@
     <arg name="publish_freq" default="10.0"/>
     <arg name="output_type" default="0"/>
     <arg name="rviz_enable" default="false"/>
+    <arg name="enable_camera" default="false"/>
     <arg name="rosbag_enable" default="false"/>
     <arg name="cmdline_arg" default="$(arg bd_list)"/>
     <arg name="msg_frame_id" default="livox_frame"/>
@@ -47,25 +48,31 @@
     </group>
 
     <!-- ==================== 相机节点配置 ==================== -->
-    <group if="$(arg wait_for_fast_livo)">
-        <node pkg="mvs_ros_driver" type="grabImgWithTrigger"
-              name="mvs_camera_trigger"
-              args="$(find mvs_ros_driver)/config/left_camera_trigger.yaml"
-              launch-prefix="$(find fast_livo)/scripts/wait_for_fast_livo_ready.sh"
-              respawn="true" output="screen"/>
+    <!-- The Hikrobot MVS wrapper is optional and external. Install it separately
+         (LIV_handhold) and pass enable_camera:=true to use these nodes. -->
+    <group if="$(arg enable_camera)">
+        <group if="$(arg wait_for_fast_livo)">
+            <node pkg="mvs_ros_driver" type="grabImgWithTrigger"
+                  name="mvs_camera_trigger"
+                  args="$(find mvs_ros_driver)/config/left_camera_trigger.yaml"
+                  launch-prefix="$(find fast_livo)/scripts/wait_for_fast_livo_ready.sh"
+                  respawn="true" output="screen"/>
+        </group>
+        <group unless="$(arg wait_for_fast_livo)">
+            <node pkg="mvs_ros_driver" type="grabImgWithTrigger"
+                  name="mvs_camera_trigger"
+                  args="$(find mvs_ros_driver)/config/left_camera_trigger.yaml"
+                  respawn="true" output="screen"/>
+        </group>
     </group>
-    <group unless="$(arg wait_for_fast_livo)">
-        <node pkg="mvs_ros_driver" type="grabImgWithTrigger"
-              name="mvs_camera_trigger"
-              args="$(find mvs_ros_driver)/config/left_camera_trigger.yaml"
-              respawn="true" output="screen"/>
-    </group>
-    
+
     <!-- 注意：rviz节点通常只需启动一个 -->
-    <node 
-        pkg="rviz"
-        type="rviz"
-        name="rviz"
-        args="-d $(find mvs_ros_driver)/rviz_cfg/mvs_camera.rviz"
-    />
+    <group if="$(arg rviz_enable)">
+        <node
+            pkg="rviz"
+            type="rviz"
+            name="rviz"
+            args="-d $(find fast_livo)/rviz_cfg/fast_livo2.rviz"
+        />
+    </group>
 </launch>

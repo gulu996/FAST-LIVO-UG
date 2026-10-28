@@ -1,6 +1,7 @@
 <launch>
   <arg name="rviz" default="true"/>
   <arg name="cmd_name" default=""/>
+  <arg name="enable_camera" default="false"/>
 
   <!-- Mapping registers all required subscribers and publishes a latched ready
        state before either required sensor publisher is allowed to start. -->
@@ -11,5 +12,6 @@
   <include file="$(find fast_livo)/launch/sensors.launch">
     <arg name="rviz_enable" value="false"/>
     <arg name="wait_for_fast_livo" value="true"/>
+    <arg name="enable_camera" value="$(arg enable_camera)"/>
   </include>
 </launch>

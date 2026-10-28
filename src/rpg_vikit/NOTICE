@@ -1,0 +1,15 @@
+License scope for this vendored multi-package tree
+=================================================
+
+`vikit_common/package.xml` and `vikit_ros/package.xml` declare GPLv3. The
+`LICENSE` file in this directory is the verbatim GNU GPL version 3 text and is
+intended for those two packages.
+
+`vikit_py/package.xml` declares BSD. No complete package-level BSD text was
+found in this tree; the presence of the GPLv3 `LICENSE` here does not relicense
+`vikit_py`.
+
+Per-file notices in `vikit_common` (for example PTAM/Isis Innovation and
+Christian Kerl/dvo notices) remain in effect. See the repository-level
+`THIRD_PARTY_LICENSES.md` for the unresolved GPLv2-only/GPLv3 combined-work
+question.

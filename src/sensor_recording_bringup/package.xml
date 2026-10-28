@@ -11,7 +11,7 @@
   <build_depend>std_msgs</build_depend>
   <exec_depend>gnss_serial_driver</exec_depend>
   <exec_depend>livox_ros_driver2</exec_depend>
-  <exec_depend>mvs_ros_driver</exec_depend>
+  <!-- MVS camera driver is optional and external (LIV_handhold); install it separately to enable camera capture. -->
   <exec_depend>rosbag</exec_depend>
   <exec_depend>rospy</exec_depend>
   <exec_depend>sensor_time_bridge</exec_depend>
