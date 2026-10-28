@@ -7,6 +7,11 @@
 - 独立 GTSAM `IncrementalFixedLagSmoother` 后端：GNSS 位置因子 + UWB 测距因子；
 - 后端只输出优化位姿，不回写前端 ESIKF 的 state/P；
 - 海康（mvs_ros_driver）、ZED、Livox/MID-360、串口 GNSS/UWB 采集链路均属于用户现有环境，修改时不得破坏。
+- 2026-10-28 公开仓库整理后，公开 Git 树不再跟踪 `src/mvs_ros_driver`、
+  `src/stm32_timersync-open` 与 `src/FAST-Calib`（后者原为无 `.gitmodules` 的 gitlink）；
+  维护者本机文件仍保留，真实相机/固件/标定工具需从
+  [LIV_handhold](https://github.com/xuankuzcr/LIV_handhold) 或
+  [FAST-Calib](https://github.com/hku-mars/FAST-Calib) 单独安装。
 
 Git 仓库根目录是工作区根（用 `git rev-parse --show-toplevel` 确认），本包位于 `src/FAST_LIVO2`。
 本文件用 `<workspace>`、`<tunnel-bag>`、`<competition-bag>` 等占位符，避免把维护者本机路径写入公开仓库。
@@ -14,10 +19,16 @@ Git 仓库根目录是工作区根（用 `git rev-parse --show-toplevel` 确认�
 
 当前基线（2026-10-28 核对）：
 
-- 代码 HEAD（本轮文档提交之前）：`5be5538 fix(lio): use floor voxel keys and metre neighbourhood units`。
-- `origin/main`：`02343a3 fix(vio): separate observation maintenance from reference selection`；
-  本地 `main` 比远端领先 1 个提交，**未 push**。本轮文档提交会再增加一个独立 docs commit。
+- 公开 `origin/main`（2026-10-28 整理前）：`e991e383 docs: document public tunnel reproduction and release status`；
+  其算法提交为 `9fe7e510 fix(lio): use floor voxel keys and metre neighbourhood units`，树与旧
+  SHA `5be5538` 相同。
+- 2026-10-28 历史清理只移除了旧提交中的 Claude 自动 co-author trailer；旧 SHA `5be5538`、
+  `9190aa4` 仅用于历史引用。本轮许可证/公开树整理在隔离分支
+  `release/oss-cleanup-20261028`，尚未 push。
 - `config/mid360.yaml` 与海康驱动存在用户未提交修改；不要 reset/checkout/stash 它们。
+- 公开树新增 `src/rpg_vikit/LICENSE`（GPLv3）和五个自研包的 BSD-3-Clause `LICENSE`；
+  `src/FAST_LIVO2/package.xml` 的 `BSD` 已更正为 `GPLv2`。GPLv2-only 与 GPLv3 的
+  组合授权问题**未解决**，见 `THIRD_PARTY_LICENSES.md`。
 - 公开隧道数据（维护者自采）：百度网盘 `https://pan.baidu.com/s/1vArBc4Gn5unoczOqP880RQ?pwd=mbpr`，
   提取码 `mbpr`，文件 `suidao2_resized.bag`，16,334,415,367 bytes；本地副本 SHA-256
   `9289318857b0ca009dab4570ac6f51915de1681fe60b2abc0b481c20d6711169`。链接/提取码已于
@@ -104,18 +115,20 @@ Bag 内包含 `/tiaozhanbei/gnss/pose`，但前端无外部因子模式不订阅
 
 ## 5. 当前状态与本轮待办
 
-当前代码 HEAD：`5be5538 fix(lio): use floor voxel keys and metre neighbourhood units`（main，未 push）。
-本轮公开文档/README 提交在此之后单独创建；它不改算法。
+当前公开算法树：`9fe7e510 fix(lio): use floor voxel keys and metre neighbourhood units`
+（`e991e383` 为公开 main 的文档基线；本轮许可证/公开树清理在其上单独提交，未 push）。
+本轮不改算法。
 
 已合入并通过回归的修复：
 
 - `027fc06`：平面有效性（非退化特征值间隔/有限性）与 LIO/VIO 统一平方切向距离；
 - `d9497af`：VIO 按 LiDAR 地图真实尺寸/索引查询，Patch 正深度检查；
 - `02343a3`：视觉观测维护、参考选择、历史裁剪生命周期解耦；
-- `5be5538`：LiDAR 体素 key 统一为 `floor(p/size)`（含精确负整数边界），邻域回退改为米制
-  `point_w` 与 `voxel_center_ ± quater_length_` 比较。验证：原生测试 PASS；suidao2 首末
-  `0.542 m`（基线 0.549 m）、233–260 s 反向 0.473 m；competition 804 s 首末 `1.014 m`
-  （历史基线 1.043/1.070 m）、4029 次 LIO、最大相邻扫描 1.27 m/s、无连续 >5 m/s。
+- `9fe7e510`（旧 SHA `5be5538`，树相同）：LiDAR 体素 key 统一为 `floor(p/size)`（含精确负整数边界），
+  邻域回退改为米制 `point_w` 与 `voxel_center_ ± quater_length_` 比较。验证：原生测试 PASS；
+  suidao2 首末 `0.542 m`（基线 0.549 m）、233–260 s 反向 0.473 m；competition 804 s 首末
+  `1.014 m`（历史基线 1.043/1.070 m）、4029 次 LIO、最大相邻扫描 1.27 m/s、无连续 >5 m/s。
+  该隧道运行使用 `img_en=1`，是 LIVO 而非纯 LIO；首末距离不是 ATE。
 
 仍未合入（详见 `reports/lidar_geometry_repair_20261028/README.md`）：
 
@@ -140,6 +153,7 @@ A1/A5 与 A6 单独都通过 suidao2，但组合出现 3 m 反向段；A6 单独
 1. 不调噪声、不关闭传感器、不限速、不放宽视觉或几何门限来“通过”回归。
 2. 不修改 IMU/VIO 事务机制时不需要 DROP2；若修改了才需要。
 3. 保留用户 `config/mid360.yaml`、海康驱动、ZED 工作树、GNSS/UWB 后端与锚点配置。
+   公开树外置 `mvs_ros_driver`/`stm32_timersync-open`/`FAST-Calib` 不表示可以删除本机文件。
 4. 修复候选未通过长期测试时：保留失败证据、单独存放补丁、不合并 main。
 5. 不自动 push；不覆盖未经验证的正式二进制；提交/合并需在验证通过后谨慎执行。
 6. 每个修复保持独立差异，便于定位回归；共享 helper 变更必须列出全部消费者。
@@ -163,3 +177,19 @@ A1/A5 与 A6 单独都通过 suidao2，但组合出现 3 m 反向段；A6 单独
 `ROS_MASTER_URI`/`ROS_IP`/`ROS_HOME`/`ROS_LOG_DIR`）。默认 11311 可能被用户
 终端同时运行的 `mapping_mid360.launch` 占用，两个 mapper 会抢同一批 bag 话题，
 导致轨迹与计数无效。发现端口冲突时不要杀用户的进程。
+
+## 9. 许可证与公开发布
+
+- `src/FAST_LIVO2/LICENSE` 是 GPLv2；上游没有 “or later” 授权，按 **GPLv2-only** 处理。
+  `package.xml` 的 `BSD` 元数据已更正为 `GPLv2`，不是重新授权。
+- `rpg_vikit` 的 `vikit_common`/`vikit_ros` 为 GPLv3，且 `homography.cpp`、
+  `robust_cost.cpp` 实际编入 `libvikit_common.so` 并被 `fast_livo` 链接；
+  `gnss_comm` 为 GPL-3.0-or-later。GPLv2-only 与 GPLv3 的组合授权问题**未解决**：
+  submodule、独立 clone 或独立共享库都不能自行消除该问题。
+- 五个自研 ROS 包为 BSD-3-Clause，已补充完整 LICENSE 文本；根目录 GPL 文本不覆盖它们。
+- `mvs_ros_driver` 的 `TODO` 许可证、STM32 厂商/ST/ARM 声明不因为 LIV_handhold 顶层
+  GPLv3 而自动解决；它们已移出公开跟踪，但本机保留。
+- 需要上游书面澄清/例外：FAST-LIVO2 作者（Chunran Zheng、Fu Zhang）、
+  rpg_vikit 维护者（Christian Forster）、robust_cost 作者（Christian Kerl）、
+  gnss_comm 维护者（CAO Shaozu）。具体文件与联系方式见根目录
+  `THIRD_PARTY_LICENSES.md`。不要自行宣称兼容性已解决。

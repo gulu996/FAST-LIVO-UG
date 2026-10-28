@@ -10,7 +10,7 @@ original local harness; they are not a new public replay script.
 
 | Experiment | Publicly runnable now? | Evidence scope |
 |---|---|---|
-| [Public tunnel LIVO](tunnel.md) | **Dataset yes**: Baidu share link/code checked; exact result requires maintainer-local `5be5538` (not pushed) | 3542 LIO, 0.542 m first/last; A5/A1 voxel-key/neighbour fix; not ATE |
+| [Public tunnel LIVO](tunnel.md) | **Dataset yes**: Baidu share link/code checked; tested code is public as `9fe7e510` | 3542 LIO, 0.542 m first/last; LIVO with vision enabled; A5/A1 voxel-key/neighbour fix; not ATE |
 | [804 s LIO/LIVO](competition-804.md) | **Not end-to-end**: private bag and diagnostic harness required; **not the tunnel dataset** | Completed isolated candidate runs; integrated build checked at 20 s |
 | [DROP2](drop2.md) | Native query/transaction tests are source-available; exact replay is restricted | Two explicitly omitted unaccepted images; common persisted state/P equality |
 | [415 s geometry and VIO](geometry.md) | Native geometric counterexamples yes; real-map replay restricted | Point/plane and patch-depth defects, descriptive trajectory windows |
@@ -33,16 +33,21 @@ or the public tunnel result.
 | `dd35f77fa0c1ff4728eace5330d7d9905ce36534` | Remove legacy frontend GNSS/UWB updates; transaction-completed backend publication |
 | `027fc06a7ffcf7209b22108d079848a3b860da23` | Plane validity and shared squared tangential-distance fixes |
 | `d9497af2234d3fd368dfdc072918d81c5d59a585` | Correct VIO map key/size and reject invalid plane-warp depth support |
-| `02343a3` | Separate visual observation maintenance from reference selection; current public `origin/main` |
-| `5be5538` | Floor-based LiDAR voxel keys and metre-based neighbour queries; maintainer-local, one commit ahead of public `origin/main` |
+| `02343a3` | Separate visual observation maintenance from reference selection |
+| `5be5538` | Pre-rewrite SHA of the floor-based LiDAR voxel key and metre-neighbour fix; kept for historical references only |
+| `9fe7e510889a12b3d2f29930c7710c5fe5e264d4` | Current public algorithm commit: same tree as `5be5538` |
+| `e991e3838f11ed055cebe0fd00a03c109d9a076c` | Public `origin/main` before the 2026-10-28 cleanup: tunnel/release documentation on top of `9fe7e510` |
 
-The current documentation describes maintainer-local `5be5538`; the public branch
-is `02343a3`. The tunnel result requires `5be5538` and is not yet reproducible
-from the public branch alone. Backend real-input tests are from `dd35f77`;
-later frontend revisions did not modify those backend libraries, but that is not
-a new real joint-hardware test. Older rejected P5, global rebinning, A2
-covariance, A6 small-angle and index-only candidates are not the current
-released algorithm.
+The current documentation describes the public algorithm tree `9fe7e510`. The
+2026-10-28 history cleanup rewrote the two old public commits `5be5538` and
+`9190aa4` to remove an automatic co-author trailer; their trees are unchanged.
+Old SHAs are meaningful only for historical references and old commit pages.
+The tunnel result was produced on the pre-rewrite commit `5be5538` and therefore
+applies to the identical public tree `9fe7e510`, not to an uncommitted local
+change. Backend real-input tests are from `dd35f77`; later frontend revisions did
+not modify those backend libraries, but that is not a new real joint-hardware
+test. Older rejected P5, global rebinning, A2 covariance, A6 small-angle and
+index-only candidates are not the current released algorithm.
 
 ## Metrics and publication policy
 

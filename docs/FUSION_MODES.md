@@ -1,8 +1,9 @@
 # Frontend and external-factor modes
 
-These instructions target the implemented fixed-lag path at `dd35f77` and its
-unchanged backend in `d9497af`. Do not use removed frontend GNSS/UWB selectors.
-GNSS-only and UWB-only mean external-factor selection, not replacement of LIVO.
+These instructions target the fixed-lag path introduced at `dd35f77` and
+unchanged by the later frontend revisions through the current public algorithm
+tree `9fe7e510`. Do not use removed frontend GNSS/UWB selectors. GNSS-only and
+UWB-only mean external-factor selection, not replacement of LIVO.
 
 ## Explicit startup without launch parameter overwrite
 

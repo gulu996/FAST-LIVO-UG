@@ -8,25 +8,48 @@ A GTSAM `IncrementalFixedLagSmoother` combines that odometry with GNSS position
 and UWB range factors. Optimized poses are separate outputs: the backend does
 **not** overwrite the frontend ESIKF state or covariance.
 
-This is a research implementation, not a certified navigation product.
-The public branch `origin/main` (local remote ref, 2026-10-28) is `02343a3`;
-the maintainer's locally validated `main` is `5be5538` (one commit ahead, not
-yet pushed). The public tunnel dataset
-below is the recommended reproduction entry. The 804 s competition recording is
-private and is **not** the tunnel dataset; its numbers are internal validation
-only. See [versioned experiments](docs/experiments/README.md) and
+This is a research implementation, not a certified navigation product. The
+public baseline before the 2026-10-28 cleanup is `e991e383`; its algorithm
+commit is `9fe7e510` (tree-identical to the tested pre-rewrite commit `5be5538`).
+The cleanup adds the public-tree and license-documentation changes described
+below and is not pushed by this task. The public tunnel dataset is the
+recommended reproduction entry. The 804 s competition recording is private and
+is **not** the tunnel dataset; its numbers are internal validation only. See
+[versioned experiments](docs/experiments/README.md) and
 [release blockers](docs/RELEASE_READINESS.md) before redistributing a build.
 
 | Area | Current status |
 |---|---|
-| FAST-LIVO2 frontend: LIO, VIO, scan/visual transactions | Maintainer-verified with `lio_plane_map_self_test` and the public tunnel replay; the voxel-key/neighbour fix is in local `5be5538` |
+| FAST-LIVO2 frontend: LIO, VIO, scan/visual transactions | Maintainer-verified with `lio_plane_map_self_test` and the public tunnel replay; the voxel-key/neighbour fix is public in `9fe7e510` |
 | GTSAM GNSS/UWB fixed-lag backend | Experimental/software-verified; no real simultaneous field-accuracy certification |
 | Public tunnel dataset | Baidu share link and extraction code checked on 2026-10-28; file name, size and local SHA-256 recorded in [the tunnel page](docs/experiments/tunnel.md) |
-| License clearance | Not complete; GPLv2/GPLv3, driver-wrapper and firmware questions remain open |
+| Core build without optional hardware | Whitelisted frontend/backend build checked in an isolated clone; no clean-host CI yet |
+| License clearance | Not complete; the GPLv2-only/GPLv3 combined-work question and upstream driver/firmware terms remain open |
 
-A fresh clone of the public branch (at `02343a3`) does **not** contain the local
-`5be5538` fixes. The tunnel result below is tied to `5be5538`; until that commit
-is published, it is maintainer-verified rather than public-code reproducible.
+## Repository contents
+
+The public tree is limited to the core estimator, its required messages and
+time-sync support, and the MIT-licensed Livox driver:
+
+| Path | Role | License status |
+|---|---|---|
+| [`src/FAST_LIVO2`](src/FAST_LIVO2) | Frontend, GNSS adapter, fixed-lag backend, tests | GPLv2; linked-license question open |
+| [`src/rpg_vikit`](src/rpg_vikit) | Visual toolkit used by the frontend | GPLv3; license text added |
+| [`src/gnss_comm`](src/gnss_comm) | GNSS message definitions | GPL-3.0-or-later |
+| [`src/gnss_serial_driver`](src/gnss_serial_driver), [`src/uwb_serial_driver`](src/uwb_serial_driver) | Serial GNSS/UWB drivers | BSD-3-Clause; license text added |
+| [`src/sensor_time_bridge`](src/sensor_time_bridge), [`src/sensor_time_msgs`](src/sensor_time_msgs) | Time synchronization and messages | BSD-3-Clause; license text added |
+| [`src/sensor_recording_bringup`](src/sensor_recording_bringup) | Recording and readiness launch files | BSD-3-Clause; license text added |
+| [`src/livox_ros_driver2`](src/livox_ros_driver2) | Optional Livox/MID-360 driver | MIT; Livox-SDK2 external |
+
+The Hikrobot (`mvs_ros_driver`) camera wrapper, the `stm32_timersync-open`
+firmware project and the bare `FAST-Calib` gitlink are **not** in the public
+tree. They remain in the maintainer's local workspace. The camera wrapper's
+upstream `package.xml` still has a `TODO` license, and the STM32 tree contains
+ST/ARM vendor notices; LIV_handhold's top-level GPLv3 does not resolve either.
+Install those components separately from
+[LIV_handhold](https://github.com/xuankuzcr/LIV_handhold) and
+[FAST-Calib](https://github.com/hku-mars/FAST-Calib) if needed. Real camera
+capture is not required for the core build or the tunnel bag replay.
 
 ## Architecture
 
@@ -48,9 +71,9 @@ flowchart LR
 
 The graph diagram expresses data ownership, not sequential sensor processing.
 GNSS and UWB constrain the same backend pose variables. There is no optimized
-pose feedback arrow into LIVO. Rejected visual queries cannot publish speculative
-motion to the backend. A completed LiDAR scan can publish its legal predicted
-state if its measurement update is rejected.
+pose feedback arrow into LIVO. Rejected visual queries cannot publish
+speculative motion to the backend. A completed LiDAR scan can publish its legal
+predicted state if its measurement update is rejected.
 
 Compared with the upstream frontend, this fork adds:
 
@@ -59,23 +82,24 @@ Compared with the upstream frontend, this fork adds:
   explicit anchor-frame and timing requirements.
 - IMU working queries and atomic state/P commits; rejected visual queries leave
   persistent propagation state unchanged.
-- Initialization time alignment, 0/1-IMU interval coverage, consistent point/history
-  time origins, boundary handling and protection against repeated deskew writes.
+- Initialization time alignment, 0/1-IMU interval coverage, consistent
+  point/history time origins, boundary handling and protection against repeated
+  deskew writes.
 - Plane validity and tangential-distance checks, consistent VIO/LiDAR map keys
-  (including floor-based negative-boundary keys and metre-based neighbour queries
-  in local `5be5538`), and positive-depth support checks for plane-warped visual
-  patches.
+  (including floor-based negative-boundary keys and metre-based neighbour
+  queries), and positive-depth support checks for plane-warped visual patches.
 - Transaction tests, per-frame cloud export, and sensor recording/time bridges.
 
 These changes do not establish full physical correctness of all deskew modes,
-complete occlusion reasoning, arbitrary image-loss invariance, or absolute accuracy.
+complete occlusion reasoning, arbitrary image-loss invariance, or absolute
+accuracy.
 
 ## Build
 
-Tested development environment: **Ubuntu 20.04, ROS Noetic, x86-64 RTX 2060 laptop**.
-The machine name is not a GPU specification. No Jetson throughput or real-time
-navigation benchmark is claimed here. ROS 1/Ubuntu 20.04 are legacy platforms;
-newer platforms require separate validation.
+Tested development environment: **Ubuntu 20.04, ROS Noetic, x86-64 RTX 2060
+laptop**. The machine name is not a GPU specification. No Jetson throughput or
+real-time navigation benchmark is claimed here. ROS 1/Ubuntu 20.04 are legacy
+platforms; newer platforms require separate validation.
 
 This repository is the **workspace root**, not a package to clone inside another
 workspace's `src/` directory:
@@ -86,11 +110,24 @@ cd ~/fast_livo_ug_ws
 source /opt/ros/noetic/setup.bash
 ```
 
-Install the dependencies and build using the complete
+Install the dependencies using the complete
 [build guide](docs/BUILD_AND_CAPTURE.md). It covers the non-templated Sophus,
 GTSAM 4.2 with `gtsam_unstable`, the bundled Vikit packages, an SDK-free core
 build, and optional sensor drivers. No CUDA dependency is required by the core
 frontend/backend build. Do not install a second Vikit copy into the workspace.
+
+The core whitelist, which needs neither the MVS SDK nor Livox-SDK2, is:
+
+```bash
+catkin_make -j4 -DCMAKE_BUILD_TYPE=Release \
+  -DCATKIN_WHITELIST_PACKAGES='sensor_time_msgs;sensor_time_bridge;gnss_comm;gnss_serial_driver;uwb_serial_driver;vikit_common;vikit_ros;sensor_recording_bringup;fast_livo'
+source devel/setup.bash
+roslaunch --files fast_livo mapping_mid360.launch
+```
+
+The complete workspace additionally builds `livox_ros_driver2` and needs
+Livox-SDK2. The external MVS camera wrapper is not built by either command.
+This is not a claim of clean-machine or CI validation.
 
 ## Public tunnel dataset and reproduction
 
@@ -105,8 +142,9 @@ maintainer. It is a separate recording from the private competition 804 s bag.
   `9289318857b0ca009dab4570ac6f51915de1681fe60b2abc0b481c20d6711169`
 - Bag contents: 355 s, 78,063 messages; 3,549 `livox_ros_driver2/CustomMsg`
   LiDAR scans, 70,963 `sensor_msgs/Imu`, 3,551 raw `sensor_msgs/Image` frames
-  (1300x1080, `rgb8`); topics `/livox/lidar`, `/livox/imu`, `/left_camera/image`.
-  The bag clock starts at 510.32 s; always replay with `--clock`.
+  (1300x1080, `rgb8`); topics `/livox/lidar`, `/livox/imu`,
+  `/left_camera/image`. The bag clock starts at 510.32 s; always replay with
+  `--clock`.
 - Link check on 2026-10-28: the share page returned HTTP 200, the extraction code
   `mbpr` was accepted, and the file above was listed with the stated size. The
   file was **not** re-downloaded for this documentation pass; the SHA-256 is from
@@ -161,18 +199,20 @@ Notes:
   it consumes the resized 1300x1080 stream directly. Do not rescale a second time.
 - This bag has no GNSS or UWB data. Do not start the GNSS adapter or fixed-lag
   backend nodes for this replay.
-- The maintainer's `5be5538` tunnel run used 3542 LIO commits and produced a
-  first/last distance of **0.542 m**, with a maximum adjacent-scan speed of
-  2.02 m/s. These are revisit/stability diagnostics, **not ATE**, and accepted
-  visual counts may vary with timing. The exact run requires the local `5be5538`
-  commit; the public `origin/main` (`02343a3`) does not include it yet.
+- The maintainer's tunnel run used `img_en: 1`, i.e. **LIVO**, not a pure
+  LiDAR/IMU run. It produced 3542 LIO commits and a first/last distance of
+  **0.542 m**, with a maximum adjacent-scan speed of 2.02 m/s. These are
+  revisit/stability diagnostics, **not ATE**, and accepted visual counts may
+  vary with timing. The run was performed on pre-rewrite commit `5be5538`, whose
+  tree is public as `9fe7e510`; no third party has independently reproduced it.
 
 ## Restricted internal competition replay
 
 The ~804 s competition recording is private and is **not** the public tunnel
-dataset. Internal runs on `02343a3` and `5be5538` gave first/last distances of
-about 1.07 m and 1.014 m respectively; these are stability/revisit diagnostics,
-not absolute accuracy, and are not reproducible from this README. See
+dataset. Internal runs on the tree of `02343a3` and on the tree of `9fe7e510`
+(formerly called `5be5538`) gave first/last distances of about 1.070 m and
+1.014 m respectively; these are stability/revisit diagnostics, not absolute
+accuracy, and are not reproducible from this README. See
 [competition 804](docs/experiments/competition-804.md) for the evidence scope.
 Do not attribute the 804 s numbers to the tunnel recording.
 
@@ -184,12 +224,18 @@ For configured MID-360 hardware:
 roslaunch fast_livo mapping_mid360.launch rviz:=true
 ```
 
-Start the matching drivers separately (see the recording guide). MID-360 launch
-has no `use_sim_time` argument: for bag replay, start `roscore` and set
-`rosparam set /use_sim_time true` **before** launching it, then play with `--clock`.
-Normal-rate replay is the reference; 2x playback is not a guaranteed equivalent
-or loss-free mode. At EOF, inspect final callbacks and transaction completion
-before stopping nodes; player exit alone does not prove delivery.
+Start the matching drivers separately (see the recording guide). The public tree
+includes the MIT-licensed Livox driver but not the external Hikrobot camera
+wrapper. `live_mid360.launch` defaults to `enable_camera:=false`; after
+installing the MVS wrapper from LIV_handhold, pass `enable_camera:=true` for
+camera capture. Without that external package the camera-enabled launch fails
+with a clear “resource not found”, while the LiDAR-only path still resolves.
+
+MID-360 launch has no `use_sim_time` argument: for bag replay, start `roscore`
+and set `rosparam set /use_sim_time true` **before** launching it, then play with
+`--clock`. Normal-rate replay is the reference; 2x playback is not a guaranteed
+equivalent or loss-free mode. At EOF, inspect final callbacks and transaction
+completion before stopping nodes; player exit alone does not prove delivery.
 
 ## GNSS only, UWB only, and both
 
@@ -267,16 +313,20 @@ and `roslaunch --files fast_livo mapping_mid360.launch` without starting hardwar
 
 ### Verified in the maintainer environment
 
-- `lio_plane_map_self_test` passes on local `5be5538`; the formal
+- `lio_plane_map_self_test` passes on the `9fe7e510` algorithm tree; the formal
   `catkin_make --pkg fast_livo` build and a 20 s exact-config replay smoke test
   also passed. This is not a clean-clone CI result.
-- Public tunnel replay on local `5be5538`: 3542 LIO commits, first/last
-  **0.542 m**, maximum adjacent-scan speed 2.02 m/s. This is the A5/A1
-  voxel-key/neighbour fix. First/last distance is a revisit diagnostic, not ATE;
-  accepted visual counts can vary with timing.
-- Internal competition 804 s: about 1.070 m on public `02343a3` and 1.014 m on
-  local `5be5538`. The recording is private and is **not** the tunnel dataset;
-  these numbers are internal stability/revisit diagnostics, not public
+- The whitelisted core build in the isolated 2026-10-28 cleanup clone completed
+  without the MVS SDK, Livox-SDK2, STM32 project or FAST-Calib. Native tests were
+  run from that build; see [release readiness](docs/RELEASE_READINESS.md).
+- Public tunnel replay on the `9fe7e510` tree (run as `5be5538`): LIVO with
+  vision enabled, 3542 LIO commits, first/last **0.542 m**, maximum
+  adjacent-scan speed 2.02 m/s. This includes the A5/A1 voxel-key/neighbour fix.
+  First/last distance is a revisit diagnostic, not ATE; accepted visual counts
+  can vary with timing.
+- Internal competition 804 s: about 1.070 m on the tree of `02343a3` and 1.014 m
+  on the tree of `9fe7e510`. The recording is private and is **not** the tunnel
+  dataset; these numbers are internal stability/revisit diagnostics, not public
   reproduction results.
 - The dataset share link, extraction code and listed file size were checked on
   2026-10-28. The maintainer's local copy has the same size and the SHA-256 in
@@ -295,7 +345,7 @@ and `roslaunch --files fast_livo mapping_mid360.launch` without starting hardwar
   arbitrary image-loss invariance and UWB device timing/antenna calibration
   remain research items. See the [experiment index](docs/experiments/README.md).
 
-### Rejected, not part of `5be5538`
+### Rejected, not part of `9fe7e510`
 
 - A2 LiDAR query-covariance corrections: query-only tunnel first/last 2.159 m;
   query plus stored-map covariance 15.316 m. Both failed long-run regression.
@@ -310,7 +360,7 @@ is maintainer-local and is not linked as a public artifact.
 ### Not verified
 
 - No independent reproduction of the tunnel result by a third party yet.
-- No clean-clone build/CI in this documentation pass.
+- No clean-clone build/CI on a clean host.
 - No ground truth or ATE; no absolute accuracy certification.
 - No real simultaneous GNSS+UWB field validation.
 - No certification of all deskew modes, occlusion reasoning or image-loss
@@ -320,17 +370,23 @@ is maintainer-local and is not linked as a public artifact.
 
 The FAST-LIVO2-derived component retains **GNU GPL version 2**; see
 [LICENSE](LICENSE) and the original [package license](src/FAST_LIVO2/LICENSE).
-Other components retain their own terms. The repository is not blanket MIT/BSD,
-and this fork does **not** relicense any component to MIT. The
-[third-party register](THIRD_PARTY_LICENSES.md) identifies unresolved
-GPLv2/GPLv3 combination questions (including the linked Vikit components and
-`gnss_comm`), the MVS wrapper's `TODO` license, and firmware/vendor notices.
-Adding a root license file is not clearance for those components.
+Upstream states no “or later” grant, so this fork treats it as GPLv2-only.
+`src/FAST_LIVO2/package.xml` was corrected from the inherited `BSD` tag to
+`GPLv2`; that tag was never a relicensing grant. Other components retain their
+own terms: `vikit_common`/`vikit_ros` and `gnss_comm` are GPLv3-family, the
+self-developed sensor packages are BSD-3-Clause, and Livox is MIT.
 
-The source tree is **not currently certified release-ready**. Correcting the
-contradictory `package.xml` BSD tag, resolving the linked GPL version question,
-and confirming driver/firmware/data permissions are follow-up actions, not
-claims made by this README. See [release readiness](docs/RELEASE_READINESS.md).
+The repository is not blanket MIT/BSD, and this fork does **not** relicense any
+component to MIT, BSD or GPLv3. The [third-party register](THIRD_PARTY_LICENSES.md)
+identifies the unresolved GPLv2-only/GPLv3 combined-work question (the linked
+Vikit components and `gnss_comm`), the external MVS wrapper's upstream `TODO`
+license, and firmware/vendor notices. Moving a component to a submodule or a
+separate clone does not by itself resolve the compatibility question.
+
+The source tree is **not currently certified release-ready**. Resolving the
+linked GPL version question and confirming driver/firmware/data permissions are
+follow-up actions, not claims made by this README. See
+[release readiness](docs/RELEASE_READINESS.md).
 
 Credit belongs to Chunran Zheng, Fu Zhang and the FAST-LIVO2/FAST-LIVO authors,
 and to contributors to LOAM, RPG Vikit/PTAM/dvo, GTSAM, Livox, gnss_comm and the

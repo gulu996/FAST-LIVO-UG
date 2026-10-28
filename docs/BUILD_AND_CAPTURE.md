@@ -1,9 +1,11 @@
 # Build and sensor capture
 
-Scope: the source tree at `d9497af`, Ubuntu 20.04 / ROS 1 Noetic. Commands were
-checked against CMake, package manifests and launch files; no clean-machine
-installation or algorithm rebuild was performed for this documentation change.
-Resolve [redistribution issues](../THIRD_PARTY_LICENSES.md) before shipping binaries.
+Scope: the cleaned public tree at the 2026-10-28 baseline (`e991e383`, algorithm
+tree `9fe7e510`), Ubuntu 20.04 / ROS 1 Noetic. Commands were checked against
+CMake, package manifests and launch files. The whitelisted core build was run in
+an isolated clone on the maintainer host; no clean-machine installation or new
+long SLAM replay was performed. Resolve
+[redistribution issues](../THIRD_PARTY_LICENSES.md) before shipping binaries.
 
 ## Core dependencies
 
@@ -69,7 +71,7 @@ For a nonstandard installation, pass `GTSAM_DIR` and `GTSAM_UNSTABLE_ROOT` to
 catkin/CMake and arrange the runtime library search path consistently. Do not
 mix header/library versions from different GTSAM builds.
 
-### Build without optional proprietary camera SDK or LiDAR driver
+### Build the core without optional hardware SDKs
 
 From the repository/workspace root:
 
@@ -84,21 +86,21 @@ roslaunch --files fast_livo mapping_mid360.launch
 roslaunch --files fast_livo mapping_petrochemical_site.launch
 ```
 
-The whitelist builds the frontend/backend and sensor message/time support, but
-not the hardware camera or Livox driver. It does not make all recording launch
-options usable without their drivers. `src/FAST-Calib` is not tracked in the
-current local commit; do not assume it is provided by a clone.
+The whitelist builds the frontend/backend, Vikit, GNSS/UWB messages and serial
+drivers, and the recording/time-sync support. It does **not** build the optional
+MVS camera wrapper, the STM32 firmware or the Livox driver, and it needs neither
+the MVS SDK nor Livox-SDK2. The MVS camera wrapper, STM32 project and FAST-Calib
+are not in the public tree; their public upstream is
+[LIV_handhold](https://github.com/xuankuzcr/LIV_handhold) or
+[FAST-Calib](https://github.com/hku-mars/FAST-Calib). Installing them separately
+does not change their license terms.
 
-### Optional drivers and complete workspace
+### Optional Livox driver and complete workspace
 
-The existing `mvs_ros_driver` needs a separately installed Hikrobot **MVS SDK**:
-`/opt/MVS/include` and `/opt/MVS/lib/64` on x86-64, or `/opt/MVS/lib/aarch64` on ARM.
-Obtain it from the vendor and accept its terms yourself; it is not installed by
-these instructions. Its wrapper's redistribution license is unresolved.
-
-`livox_ros_driver2` needs [Livox-SDK2](https://github.com/Livox-SDK/Livox-SDK2)
-installed separately and the ROS1 CMake selection. After installing the matching
-SDKs and configuring the sensor network:
+`livox_ros_driver2` is tracked under its MIT notice and needs
+[Livox-SDK2](https://github.com/Livox-SDK/Livox-SDK2) installed separately plus
+the ROS1 CMake selection. After installing the SDK and configuring the sensor
+network:
 
 ```bash
 cd ~/fast_livo_ug_ws
@@ -106,10 +108,19 @@ catkin_make -j2 -DROS_EDITION=ROS1 -DCATKIN_WHITELIST_PACKAGES=''
 source devel/setup.bash
 ```
 
-This is the full-workspace path, not a claim that SDK installation was verified
-on a clean host in this docs task. ROS2 and Jetson performance are not certified.
-If the MVS environment shadows system `libusb`, inspect `ldd` on the actual node;
-fix the process-local search path instead of replacing system libraries.
+This full-workspace path still does not include the external MVS camera wrapper.
+It was not rebuilt in the 2026-10-28 cleanup. ROS2 and Jetson performance are not
+certified.
+
+The MVS camera wrapper is optional and external: it needs a separately installed
+Hikrobot **MVS SDK** (`/opt/MVS/include` and `/opt/MVS/lib/64` on x86-64, or
+`/opt/MVS/lib/aarch64` on ARM) and its upstream `package.xml` license tag is
+still `TODO`. Obtain it from the vendor/LIV_handhold and accept the applicable
+terms yourself. `fast_livo/launch/live_mid360.launch` defaults to
+`enable_camera:=false`; pass `enable_camera:=true` only after installing the
+wrapper. If an MVS environment shadows system `libusb`, inspect `ldd` on the
+actual node; fix the process-local search path instead of replacing system
+libraries.
 
 ## Recording (independent from fusion)
 
@@ -119,16 +130,21 @@ a backend accepted factors. Serial devices, trigger wiring, sensor profiles,
 network settings, timestamp bridges and file permissions must be configured for
 your hardware. Use serial-group/udev permissions rather than world-writable devices.
 
-Example GNSS recording with real MCU input:
+Example GNSS recording with real MCU input and no camera:
 
 ```bash
 roslaunch sensor_recording_bringup record_all.launch \
-  enable_time_bridge:=true enable_livox:=true enable_camera:=true \
+  enable_time_bridge:=true enable_livox:=true enable_camera:=false \
   enable_gnss:=true enable_gnss_adapter:=true enable_uwb:=false \
   mcu_input_mode:=serial mcu_port:=/dev/sensor_mcu \
   gnss_port:=/dev/ttyUSB0 output_dir:="$HOME/bags" \
   bag_name:=livo_gnss record_profile:=both
 ```
+
+`enable_camera` defaults to `false` because the Hikrobot driver is external.
+Set it to `true` only after installing the MVS wrapper and SDK separately; the
+public `sensor_recording_bringup` package intentionally has no
+`mvs_ros_driver` execution dependency.
 
 For UWB-only capture use `enable_gnss:=false enable_gnss_adapter:=false
  enable_uwb:=true uwb_port:=/dev/ttyUSB1 uwb_dtr:=true uwb_rts:=false` in place

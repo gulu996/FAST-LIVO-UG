@@ -41,13 +41,15 @@ redistribution.
 - Bag clock starts at 510.32 s; replay with `--clock` and do not treat the
   epoch-shaped header values as a wall-clock date.
 
-The recording contains no GNSS or UWB stream. The tunnel replay is a frontend
-LIO/LIVO replay; do not start the GNSS adapter or fixed-lag backend nodes.
+The recording contains no GNSS or UWB stream. The tunnel replay exercises the
+frontend; with the configuration below it is **LIVO** (vision enabled), not a
+pure LiDAR/IMU run. Do not start the GNSS adapter or fixed-lag backend nodes.
 
 ## Code and configuration
 
 The 0.542 m result below was produced with the maintainer-local commit
-`5be5538b922ab3a621cd902ecb60b2658aeb3685` and this configuration:
+`5be5538b922ab3a621cd902ecb60b2658aeb3685`, whose tree is now public as
+`9fe7e510889a12b3d2f29930c7710c5fe5e264d4`. The configuration was:
 
 - `config/mid360.yaml` (MID-360/Livox profile), with `common/img_en: 1`;
 - `config/camera_pinhole_mid360.yaml` (2600x2160 model, `scale: 0.5`);
@@ -60,17 +62,16 @@ required for the visual path. The run command is in the
 [root README](../../README.md#public-tunnel-dataset-and-reproduction). Build
 instructions are in the [build guide](../BUILD_AND_CAPTURE.md).
 
-**Publication gap:** `5be5538` is one commit ahead of `origin/main`
-(`02343a3`) and was not pushed in this documentation pass. A fresh clone of the
-public branch does not contain it. The 0.542 m result is therefore tied to the
-maintainer-local revision; it is not yet reproducible from the public branch
-alone.
+The 2026-10-28 history cleanup rewrote `5be5538` to `9fe7e510` without changing
+its tree, so the algorithm tested here is present in the public branch. This page
+does not claim that an independent party has reproduced the result.
 
 ## Maintainer-run result
 
 | Item | Value |
 |---|---|
-| Code | local `5be5538` |
+| Code | tested `5be5538`; public tree `9fe7e510` |
+| Path | LIVO, `common/img_en: 1` |
 | LIO commits | 3542 |
 | First/last position distance | **0.542 m** |
 | Maximum adjacent-scan speed | 2.02 m/s |
@@ -86,7 +87,8 @@ threading; the counts in this table are not accuracy scores.
 ## Rejected candidates from the same audit
 
 These candidates were tested during the 2026-10-28 audit and are **not** part of
-`5be5538`. They are recorded here so they are not mistaken for fixed features.
+the `9fe7e510` algorithm tree (tested as `5be5538`). They are recorded here so
+they are not mistaken for fixed features.
 
 | Candidate | Public tunnel result | Status |
 |---|---|---|

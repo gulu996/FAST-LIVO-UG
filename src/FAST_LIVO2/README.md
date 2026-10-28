@@ -24,11 +24,12 @@ The self-collected tunnel recording is the public reproduction entry; see
 run commands. That share is not a redistribution grant for the competition or
 GNSS/UWB data.
 
-This package retains its [GPLv2 LICENSE](LICENSE). For an alternative commercial
-license, upstream names Chunran Zheng (`zhengcr@connect.hku.hk`) and Prof. Fu Zhang
-(`fuzhang@hku.hk`). See [third-party terms and open issues](../../THIRD_PARTY_LICENSES.md).
-The inherited `package.xml` BSD tag conflicts with the package license and has
-not been changed in this documentation-only commit; it is not a relicensing grant.
+This package retains its [GPLv2 LICENSE](LICENSE). The `package.xml` license tag
+was corrected from `BSD` to `GPLv2` in the 2026-10-28 cleanup; the old tag was
+never a relicensing grant. For an alternative commercial license, upstream names
+Chunran Zheng (`zhengcr@connect.hku.hk`) and Prof. Fu Zhang (`fuzhang@hku.hk`).
+See [third-party terms and open issues](../../THIRD_PARTY_LICENSES.md), including
+the unresolved GPLv2-only/GPLv3 combined-work question.
 
 ## Backend ownership
 
@@ -40,7 +41,8 @@ scan can publish legal prediction on measurement rejection. With managed policy,
 UWB; `rtk_backend/enable` must be true for either. UWB anchors must already be in
 the backend map frame. Legacy frontend fusion update selectors fail startup.
 
-Documentation reorganized for this fork on 2026-10-28. The public `origin/main`
-is `02343a3`; the maintainer's validated local `main` is `5be5538` (one commit
-ahead, not pushed). Original installation, GTSAM and recording guidance is
+Documentation reorganized for this fork on 2026-10-28. The public baseline is
+`e991e383`; its algorithm commit is `9fe7e510` (tree-identical to the tested
+`5be5538`). The cleanup branch adds documentation, license and public-tree
+changes on top. Original installation, GTSAM and recording guidance is
 consolidated in the [build/capture guide](../../docs/BUILD_AND_CAPTURE.md).
