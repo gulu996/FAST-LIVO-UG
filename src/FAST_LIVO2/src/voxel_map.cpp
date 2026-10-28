@@ -2421,15 +2421,13 @@ void VoxelMapManager::BuildVoxelMap(double timestamp)
 
 V3F VoxelMapManager::RGBFromVoxel(const V3D &input_point)
 {
-  int64_t loc_xyz[3];
-  for (int j = 0; j < 3; j++)
-  {
-    loc_xyz[j] = floor(input_point[j] / config_setting_.max_voxel_size_);
-  }
+  VOXEL_LOCATION position;
+  if (!storedLidarVoxelLocation(input_point, config_setting_.max_voxel_size_,
+                                position))
+    return V3F(255.0, 255.0, 255.0);
 
-  VOXEL_LOCATION position((int64_t)loc_xyz[0], (int64_t)loc_xyz[1], (int64_t)loc_xyz[2]);
-  int64_t ind = loc_xyz[0] + loc_xyz[1] + loc_xyz[2];
-  uint k((ind + 100000) % 3);
+  const int64_t ind = position.x + position.y + position.z;
+  const uint k = static_cast<uint>((ind + 100000) % 3);
   V3F RGB((k == 0) * 255.0, (k == 1) * 255.0, (k == 2) * 255.0);
   // cout<<"RGB: "<<RGB.transpose()<<endl;
   return RGB;
@@ -2721,13 +2719,9 @@ void VoxelMapManager::BuildResidualListOMP(std::vector<pointWithVar> &pv_list, s
     };
 
     pointWithVar &pv = pv_list[i];
-    float loc_xyz[3];
-    for (int j = 0; j < 3; j++)
-    {
-      loc_xyz[j] = pv.point_w[j] / voxel_size;
-      if (loc_xyz[j] < 0) { loc_xyz[j] -= 1.0; }
-    }
-    VOXEL_LOCATION position((int64_t)loc_xyz[0], (int64_t)loc_xyz[1], (int64_t)loc_xyz[2]);
+    VOXEL_LOCATION position;
+    if (!storedLidarVoxelLocation(pv.point_w, voxel_size, position))
+      continue;
     VOXEL_LOCATION matched_position = position;
     VoxelOctoTree *current_octo = find_voxel_tree(position);
     if (current_octo != nullptr)
@@ -2738,13 +2732,15 @@ void VoxelMapManager::BuildResidualListOMP(std::vector<pointWithVar> &pv_list, s
       build_single_residual(pv, current_octo, 0, is_sucess, prob, single_ptpl);
       if (!is_sucess)
       {
+        // The octree center and quarter length are metres. Compare them with
+        // the world point in metres, not with the dimensionless voxel index.
         VOXEL_LOCATION near_position = position;
-        if (loc_xyz[0] > (current_octo->voxel_center_[0] + current_octo->quater_length_)) { near_position.x = near_position.x + 1; }
-        else if (loc_xyz[0] < (current_octo->voxel_center_[0] - current_octo->quater_length_)) { near_position.x = near_position.x - 1; }
-        if (loc_xyz[1] > (current_octo->voxel_center_[1] + current_octo->quater_length_)) { near_position.y = near_position.y + 1; }
-        else if (loc_xyz[1] < (current_octo->voxel_center_[1] - current_octo->quater_length_)) { near_position.y = near_position.y - 1; }
-        if (loc_xyz[2] > (current_octo->voxel_center_[2] + current_octo->quater_length_)) { near_position.z = near_position.z + 1; }
-        else if (loc_xyz[2] < (current_octo->voxel_center_[2] - current_octo->quater_length_)) { near_position.z = near_position.z - 1; }
+        if (pv.point_w[0] > (current_octo->voxel_center_[0] + current_octo->quater_length_)) { near_position.x = near_position.x + 1; }
+        else if (pv.point_w[0] < (current_octo->voxel_center_[0] - current_octo->quater_length_)) { near_position.x = near_position.x - 1; }
+        if (pv.point_w[1] > (current_octo->voxel_center_[1] + current_octo->quater_length_)) { near_position.y = near_position.y + 1; }
+        else if (pv.point_w[1] < (current_octo->voxel_center_[1] - current_octo->quater_length_)) { near_position.y = near_position.y - 1; }
+        if (pv.point_w[2] > (current_octo->voxel_center_[2] + current_octo->quater_length_)) { near_position.z = near_position.z + 1; }
+        else if (pv.point_w[2] < (current_octo->voxel_center_[2] - current_octo->quater_length_)) { near_position.z = near_position.z - 1; }
         VoxelOctoTree *near_octo = find_voxel_tree(near_position);
         if (near_octo != nullptr)
         {
@@ -3001,18 +2997,15 @@ void VoxelMapManager::mapSliding()
   }
 
   //get global id now
+  VOXEL_LOCATION center_key;
+  if (!storedLidarVoxelLocation(position_last_,
+                                config_setting_.max_voxel_size_, center_key))
+    return;
   last_slide_position = position_last_;
   double t_sliding_start = omp_get_wtime();
-  float loc_xyz[3];
-  for (int j = 0; j < 3; j++)
-  {
-    loc_xyz[j] = position_last_[j] / config_setting_.max_voxel_size_;
-    if (loc_xyz[j] < 0) { loc_xyz[j] -= 1.0; }
-  }
-  // VOXEL_LOCATION position((int64_t)loc_xyz[0], (int64_t)loc_xyz[1], (int64_t)loc_xyz[2]);//discrete global
-  clearMemOutOfMap((int64_t)loc_xyz[0] + config_setting_.half_map_size, (int64_t)loc_xyz[0] - config_setting_.half_map_size,
-                    (int64_t)loc_xyz[1] + config_setting_.half_map_size, (int64_t)loc_xyz[1] - config_setting_.half_map_size,
-                    (int64_t)loc_xyz[2] + config_setting_.half_map_size, (int64_t)loc_xyz[2] - config_setting_.half_map_size);
+  clearMemOutOfMap(center_key.x + config_setting_.half_map_size, center_key.x - config_setting_.half_map_size,
+                    center_key.y + config_setting_.half_map_size, center_key.y - config_setting_.half_map_size,
+                    center_key.z + config_setting_.half_map_size, center_key.z - config_setting_.half_map_size);
 
   if (config_setting_.long_term_visual_map_en &&
       static_cast<int>(long_term_visual_map_.size()) > config_setting_.long_term_visual_max_voxels)

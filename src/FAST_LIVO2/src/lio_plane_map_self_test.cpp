@@ -89,11 +89,26 @@ int main()
   assert(!storedLidarVoxelLocation(V::Constant(INFINITY), .8, key));
   for (double size : {.25, .5, .8, 1., 2.})
     for (int i = -32; i <= 32; ++i) {
-      V point(i * static_cast<float>(size), .13, -.17);
+      V point(double(i) * size, .13, -.17);
       assert(storedLidarVoxelLocation(point, size, key));
-      float x = point.x() / static_cast<float>(size); if (x < 0) x -= 1;
-      assert(key.x == int64_t(x));
+      assert(key.x == int64_t(std::floor(point.x() / size)));
     }
+  // Exact negative cell boundaries must stay in their own cell (floor), not
+  // move one cell down. Whole-cell translations must shift the key equally.
+  for (double size : {.25, .5, 1., 2.}) {
+    for (int i = -4; i <= 4; ++i) {
+      const V point(double(i) * size, 0.0, 0.0);
+      assert(storedLidarVoxelLocation(point, size, key));
+      assert(key.x == i);
+      VOXEL_LOCATION shifted_key;
+      assert(storedLidarVoxelLocation(point + V(3.0 * size, 0, 0), size,
+                                      shifted_key));
+      assert(shifted_key.x == key.x + 3);
+      assert(storedLidarVoxelLocation(
+          point - V(1e-6 * size, 0, 0), size, shifted_key));
+      assert(shifted_key.x == key.x - 1);
+    }
+  }
  vk::PinholeCamera camera(1280,720,1,529.938228576,532.081773898,634.696805930,357.311987738,-.091446989773,.071009135497,0,0);
  VIOManager manager;manager.patch_size_half=4;
  const V2D center(634.696805930,357.311987738);const V3D p(0,0,5),n(0,0,1);const SE3 identity;Matrix2d a=Matrix2d::Identity();
