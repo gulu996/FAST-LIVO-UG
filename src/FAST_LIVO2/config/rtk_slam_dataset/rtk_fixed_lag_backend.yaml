@@ -66,6 +66,10 @@ rtk_backend:
   robust_kernel: "huber"
   huber_delta: 2.5
 
+  # Preserve the observed vertical of the gravity-aligned frontend; yaw stays free.
+  livo_gravity_consistency_en: true
+  raw_odom_gravity_aligned: true
+
   livo_translation_sigma_m: 0.05
   livo_lateral_vertical_sigma_m: 0.001
   livo_rotation_sigma_rad: 0.01

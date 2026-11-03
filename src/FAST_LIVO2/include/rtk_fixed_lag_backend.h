@@ -1,7 +1,10 @@
 #pragma once
 
 #include <fast_livo/GnssStatus.h>
+#include "frontend_quality_contract.h"
+#include <fast_livo/BackendStreamControl.h>
 #include <fast_livo/RtkBackendStatus.h>
+#include <fast_livo/CorrectionEvent.h>
 #include <geometry_msgs/TransformStamped.h>
 #include <gtsam/geometry/Pose3.h>
 #include <gtsam/nonlinear/NonlinearFactor.h>
@@ -227,6 +230,12 @@ class RtkFixedLagBackend {
   struct UwbMeasurement {
     ros::Time raw_stamp;
     ros::Time aligned_stamp;
+    std::uint64_t session_id = 0, round_sequence = 0, timestamp_uncertainty_ns = 0;
+    std::uint64_t host_receive_monotonic_ns = 0;
+    std::uint16_t tag_id = 0;
+    std::uint8_t timestamp_source = 0;
+    ros::Time host_receive_stamp;
+    std::int64_t diag = -1;
     int anchor_id = -1;
     double raw_range_m = 0.0;
     double range_bias_m = 0.0;
@@ -265,6 +274,24 @@ class RtkFixedLagBackend {
   void setupRos(ros::NodeHandle &nh);
   void initializeResultFiles();
   void closeResultFiles();
+  // Default private constructor is reserved for existing low-level native tests.
+  // Every ROS production instance enables the atomic quality contract.
+  bool frontend_quality_required_ = false;
+  bool quality_handoff_ = false;
+  double frontend_wait_since_ = 0.;
+  fast_livo::FrontendQualityStream frontend_quality_;
+  fast_livo::FrontendQuality applied_frontend_quality_;
+  ros::Subscriber frontend_quality_subscriber_;
+  ros::WallTimer frontend_quality_timer_;
+  ros::ServiceServer stream_control_service_;
+  std::string backend_session_id_;
+  uint64_t quality_after_boundary_ = 0;
+  bool streamControl(fast_livo::BackendStreamControl::Request&,fast_livo::BackendStreamControl::Response&);
+  void rejectPendingMeasurementsForStream(const std::string& reason);
+  void qualityCallback(const fast_livo::FrontendQualityConstPtr& message);
+  void qualityEvent(const ros::MessageEvent<fast_livo::FrontendQuality const>& event);
+  void qualityTimer(const ros::WallTimerEvent&);
+  void stopForFrontend(const std::string& reason);
   void rawOdomCallback(const nav_msgs::OdometryConstPtr &message);
   void gnssOdomCallback(const nav_msgs::OdometryConstPtr &message);
   void gnssStatusCallback(const fast_livo::GnssStatusConstPtr &message);
@@ -344,6 +371,7 @@ class RtkFixedLagBackend {
   std::int64_t gnssConservationDelta() const;
   std::uint64_t gnssSilentDropCount() const;
   void publishStatus();
+  void publishCorrectionEvent(bool valid);
 
   void queueRawPose(const RawOdomSample &sample);
   void queueOptimizedOnlinePose(const Keyframe &keyframe);
@@ -381,6 +409,9 @@ class RtkFixedLagBackend {
   ros::Publisher optimized_path_publisher_;
   ros::Publisher map_to_odom_publisher_;
   ros::Publisher status_publisher_;
+  ros::Publisher correction_event_publisher_;
+  std::uint64_t correction_event_id_ = 0;
+  std::string correction_notice_state_;
   ros::Timer status_timer_;
   ros::Timer flush_timer_;
   std::unique_ptr<tf::TransformBroadcaster> tf_broadcaster_;
@@ -391,6 +422,10 @@ class RtkFixedLagBackend {
   std::deque<GnssMeasurement> pending_alignment_gnss_;
   std::deque<GnssMeasurement> pending_factor_gnss_;
   std::deque<UwbMeasurement> pending_uwb_;
+  bool uwb_identity_bound_ = false;
+  std::uint64_t uwb_session_id_ = 0;
+  std::uint16_t uwb_tag_id_ = 0;
+  std::map<int, std::uint64_t> last_uwb_round_;
   std::vector<AlignmentPair> alignment_pairs_;
   std::deque<Keyframe> keyframes_;
 

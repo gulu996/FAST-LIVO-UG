@@ -1,0 +1,15 @@
+<launch>
+  <arg name="run_dir" />
+  <arg name="gnss_pose_topic" default="/rtk_slam/gnss/enu_pose" />
+  <arg name="use_sim_time" default="true" />
+  <include file="$(find fast_livo)/launch/mapping_rtk_slam_dataset_ours.launch">
+    <arg name="run_dir" value="$(arg run_dir)" />
+    <arg name="gnss_pose_topic" value="$(arg gnss_pose_topic)" />
+    <arg name="use_sim_time" value="$(arg use_sim_time)" />
+  </include>
+  <param name="/diagnostics/frontend_quality_en" value="true" />
+  <param name="/p4b_snapshot/record_production_audit" value="false" />
+  <param name="/rtk_backend/uwb_factor_backend_en" value="false" />
+  <node pkg="fast_livo" type="causal_readout_node" name="causal_readout"
+        required="true" output="screen" />
+</launch>

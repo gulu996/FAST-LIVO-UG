@@ -580,9 +580,13 @@ void UwbManager::ingestExternalRanges(
 
   std::vector<UwbRangeMeasurement> measurements;
   measurements.reserve(message.ranges.size());
+  const auto packet = std::make_shared<const uwb_serial_driver::UwbRangeArray>(message);
+  size_t range_index = 0;
   for (const auto &range : message.ranges)
   {
     UwbRangeMeasurement measurement;
+    measurement.external_packet = packet;
+    measurement.external_range_index = range_index++;
     measurement.anchor_id = range.anchor_id;
     measurement.raw_range_m = range.raw_range_m;
     measurement.range_bias_m = range.range_bias_m;
@@ -1001,6 +1005,12 @@ void UwbManager::publishBackendMeasurements(
       source == "file" || source == "txt" || source == "replay";
   for (const UwbRangeMeasurement &measurement : measurements)
   {
+    if (measurement.external_packet) {
+      auto message = *measurement.external_packet;
+      message.ranges = {message.ranges.at(measurement.external_range_index)};
+      factor_backend_publisher_.publish(message);
+      continue;
+    }
     double measurement_stamp = measurement.stamp;
     if (replay_source)
     {
@@ -1024,7 +1034,8 @@ void UwbManager::publishBackendMeasurements(
     message.timestamp_source =
         replay_source ? uwb_serial_driver::UwbRangeArray::REPLAY_REBASED
                       : uwb_serial_driver::UwbRangeArray::HOST_RECEIVE_LOCAL;
-    message.timestamp_uncertainty_ns = 1;
+    // Legacy text/host receive time has no established measurement-time bound.
+    message.timestamp_uncertainty_ns = 0;
     message.host_receive_stamp = ros::Time::now();
 
     uwb_serial_driver::UwbRange range;

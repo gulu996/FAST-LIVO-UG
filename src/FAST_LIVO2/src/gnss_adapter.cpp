@@ -3,6 +3,7 @@ This file is part of FAST-LIVO2: Fast, Direct LiDAR-Inertial-Visual Odometry.
 */
 
 #include "gnss_adapter.h"
+#include "gnss_covariance_contract.h"
 #include "gnss_fusion_policy.h"
 
 #include <algorithm>
@@ -163,6 +164,7 @@ bool GnssAdapter::loadConfig(ros::NodeHandle &nh, GnssAdapterConfig &config) con
   params.param<std::string>("output_status_topic", config.output_status_topic, config.output_status_topic);
   params.param<bool>("publish_local_enu_odometry", config.publish_local_enu_odometry,
                      config.publish_local_enu_odometry);
+  params.param<std::string>("pose_input_frame_id", config.pose_input_frame_id, config.pose_input_frame_id);
   params.param<int>("pose_input_quality", config.pose_input_quality,
                     config.pose_input_quality);
   params.param<int>("pose_input_num_sv", config.pose_input_num_sv,
@@ -722,6 +724,18 @@ GnssAdapterResult GnssAdapter::process(
   if (!config_.enable) return reject("ADAPTER_DISABLED");
   if (message.header.stamp.isZero()) return reject("ZERO_MEASUREMENT_TIMESTAMP");
 
+  if (!config_.pose_input_frame_id.empty() && message.header.frame_id != config_.pose_input_frame_id)
+    return reject("POSE_INPUT_FRAME_MISMATCH");
+  const auto full_covariance = fast_livo::positionCovariance(message.pose.covariance);
+  const auto covariance_check = fast_livo::checkPositionCovariance(full_covariance);
+  if (!covariance_check.valid) {
+    result.detail = fast_livo::covarianceEvidence(full_covariance, covariance_check);
+    ROS_WARN_STREAM("[GNSS_COV_REJECT] stamp_ns=" << message.header.stamp.toNSec()
+        << " configured_quality=" << config_.pose_input_quality
+        << " origin_affected=false pending_enqueued=false " << result.detail);
+    return reject(covariance_check.reason=="COV_UNKNOWN_OR_NONPOSITIVE_DIAGONAL"
+        ? "INVALID_POSITION_COVARIANCE" : covariance_check.reason);
+  }
   const geometry_msgs::Point &position = message.pose.pose.position;
   const double covariance_x = message.pose.covariance[0];
   const double covariance_y = message.pose.covariance[7];

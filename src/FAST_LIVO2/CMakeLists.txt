@@ -115,13 +115,19 @@ find_package(catkin REQUIRED COMPONENTS
 
 add_message_files(
   FILES
+  CorrectionEvent.msg
+  CausalFusedOutput.msg
+  FrontendQuality.msg
   FullStateLidarGeometry.msg
   GnssStatus.msg
   RtkBackendStatus.msg
 )
 
+add_service_files(FILES BackendStreamControl.srv)
+
 generate_messages(
   DEPENDENCIES
+  nav_msgs
   geometry_msgs
   std_msgs
 )
@@ -480,3 +486,26 @@ target_link_libraries(backend_real_input_self_test rtk_fixed_lag_backend gnss_ad
 add_executable(lio_plane_map_self_test src/lio_plane_map_self_test.cpp)
 target_link_libraries(lio_plane_map_self_test ${LIVO_TEST_LINK_LIBRARIES})
 target_compile_options(lio_plane_map_self_test PRIVATE -UNDEBUG)
+
+# P8 contract checks: no production estimator mathematics in these fixtures.
+add_executable(p8_contract_self_test tools/p8_contract/contract_self_test.cpp)
+add_dependencies(p8_contract_self_test ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+target_link_libraries(p8_contract_self_test rtk_fixed_lag_backend gnss_adapter ${catkin_LIBRARIES})
+add_executable(frontend_quality_publication_self_test tools/p8_contract/publication_self_test.cpp)
+add_dependencies(frontend_quality_publication_self_test ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+target_link_libraries(frontend_quality_publication_self_test ${LIVO_TEST_LINK_LIBRARIES} rtk_fixed_lag_backend)
+
+add_executable(p8_lifecycle_self_test tools/p8_contract/lifecycle_self_test.cpp)
+add_dependencies(p8_lifecycle_self_test ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+target_link_libraries(p8_lifecycle_self_test rtk_fixed_lag_backend gnss_adapter ${catkin_LIBRARIES})
+
+add_executable(causal_readout_node src/causal_readout_node.cpp)
+add_executable(causal_readout_self_test tools/p8_contract/causal_readout_self_test.cpp)
+foreach(target causal_readout_node causal_readout_self_test)
+  add_dependencies(${target} ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+  target_link_libraries(${target} camera_aligned_neu_logger ${catkin_LIBRARIES})
+endforeach()
+
+add_executable(p8_uwb_contract_self_test tools/p8_contract/uwb_contract_self_test.cpp)
+add_dependencies(p8_uwb_contract_self_test ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+target_link_libraries(p8_uwb_contract_self_test rtk_fixed_lag_backend uwb ${catkin_LIBRARIES})

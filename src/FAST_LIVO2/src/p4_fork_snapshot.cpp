@@ -869,6 +869,68 @@ bool saveSnapshot(const P4ForkSnapshot &snapshot, const std::string &path,
   return true;
 }
 
+std::string mapRootKeysHash(const VoxelMapManager &map)
+{
+  Writer writer;
+  for (const auto *view : {&map.voxel_map_, &map.long_term_visual_map_})
+  {
+    std::vector<std::array<std::int64_t, 3>> keys;
+    keys.reserve(view->size());
+    for (const auto &entry : *view)
+      keys.push_back({{entry.first.x, entry.first.y, entry.first.z}});
+    std::sort(keys.begin(), keys.end());
+    writer.size(keys.size());
+    for (const auto &key : keys)
+      for (auto value : key) writer.pod(value);
+  }
+  return sha256(writer.bytes());
+}
+
+std::map<std::string, std::string> productionHashes(
+    const StatesGroup &predicted, const StatesGroup &updated,
+    const PointCloudXYZI &undistorted, const PointCloudXYZI &downsampled,
+    const VoxelMapManager &map)
+{
+  std::map<std::string, std::string> hashes;
+  for (const auto &entry : {std::make_pair("predicted", &predicted),
+                             std::make_pair("updated", &updated)})
+  {
+    Writer state, covariance;
+    writeStateNominal(state, *entry.second);
+    writeEigen(covariance, entry.second->cov);
+    hashes[std::string(entry.first) + "_state"] = sha256(state.bytes());
+    hashes[std::string(entry.first) + "_covariance"] = sha256(covariance.bytes());
+  }
+  // Point values used by the estimator, excluding transport-only PCL metadata.
+  for (const auto &entry : {std::make_pair("deskew", &undistorted),
+                             std::make_pair("downsample", &downsampled)})
+  {
+    Writer writer;
+    writer.size(entry.second->size());
+    for (const auto &point : entry.second->points) writePoint(writer, point);
+    hashes[entry.first] = sha256(writer.bytes());
+  }
+  Writer geometry, matches;
+  const auto &diagnostics = map.getLastLioDiagnostics();
+  writeEigen(geometry, diagnostics.lidar_geometry_information);
+  writeEigen(geometry, diagnostics.lidar_geometry_rhs);
+  hashes["geometry"] = sha256(geometry.bytes());
+  matches.size(map.ptpl_list_.size());
+  for (const auto &match : map.ptpl_list_)
+  {
+    // Provenance point_index is populated only when P4 diagnostics are enabled.
+    // Compare the actual paired point instead of a diagnostic-only ID.
+    writeEigen(matches, match.point_b_);
+    writeEigen(matches, match.point_w_);
+    matches.pod(match.plane_id_);
+    matches.pod(match.voxel_x_); matches.pod(match.voxel_y_); matches.pod(match.voxel_z_);
+    writeEigen(matches, match.normal_); writeEigen(matches, match.center_);
+    matches.pod(match.d_); matches.pod(match.dis_to_plane_);
+  }
+  hashes["associations"] = sha256(matches.bytes());
+  return hashes;
+}
+
 bool loadSnapshot(const std::string &path, P4ForkSnapshot &snapshot,
                   std::string &error)
 {

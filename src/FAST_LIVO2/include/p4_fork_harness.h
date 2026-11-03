@@ -13,6 +13,24 @@ namespace p4b
 
 class CapturePauseGuard;
 
+// Common read-only witness for diagnostics-off and observation-only controls.
+class ProductionAudit
+{
+public:
+  explicit ProductionAudit(const std::string &directory);
+  void beforeInsertion(const VoxelMapManager &map);
+  void afterInsertion(const VoxelMapManager &map);
+  void record(const StatesGroup &predicted, const StatesGroup &updated,
+              const VoxelMapManager &map, const PointCloudXYZI &undistorted,
+              const PointCloudXYZI &downsampled, double timestamp, double fixed_t0,
+              double first_lidar_time, bool slide_called);
+private:
+  std::ofstream csv_;
+  std::string pre_insert_, post_insert_;
+  V3D pre_slide_position_ = V3D::Zero();
+  int previous_frame_ = 0;
+};
+
 struct HarnessConfig
 {
   bool enabled = false;

@@ -1,0 +1,37 @@
+# Atomic companion of the unchanged legacy raw odometry. Backend consumes this
+# envelope, not a timing-dependent join of two independent ROS deliveries.
+nav_msgs/Odometry odometry
+string session_id
+string producer_node
+uint64 output_sequence
+uint8 LIO_SCAN=1
+uint8 VIO_QUERY=2
+uint8 source_kind
+string slam_mode
+uint64 lio_frame_id
+time lio_timestamp
+bool lio_status_known
+bool lio_committed
+bool vio_status_known
+bool vio_accepted
+time last_successful_lio
+uint64 consecutive_lio_rejections
+uint8 UNKNOWN=0
+uint8 VALID=1
+uint8 INVALID=2
+uint8 imu_coverage
+uint8 input_integrity
+uint8 state_covariance_validity
+bool geometry_valid
+bool is_degenerate
+bool motion_valid
+bool motion_warning
+float64 lio_position_correction_m
+float64 lio_velocity_correction_mps
+float64 lio_rotation_correction_deg
+uint8 NORMAL_COMMITTED=1
+uint8 SUSPECT_COMMITTED=2
+uint8 FRONTEND_REJECTED=3
+uint8 INPUT_UNKNOWN=4
+uint8 quality
+string evidence_source

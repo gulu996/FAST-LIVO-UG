@@ -33,6 +33,10 @@ struct RtkFixedLagBackendSelfTestAccess {
   check(b.raw_odom_published_==published&&b.optimization_count_==optimizations&&
         b.raw_odom_duplicate_==1&&b.raw_odom_non_monotonic_==1,"duplicate/out-of-order raw odometry changed graph");
   auto u=boost::make_shared<uwb_serial_driver::UwbRangeArray>();u->header.stamp=m.header.stamp;u->round_sequence=42;
+  // Explicit synthetic device-time contract; never infer these fields from host time.
+  u->session_id=1;u->tag_id=3;
+  u->timestamp_source=uwb_serial_driver::UwbRangeArray::DEVICE_TIME_MAPPED_LOCAL;
+  u->timestamp_uncertainty_ns=1000000;
   uwb_serial_driver::UwbRange r;r.anchor_id=0;r.raw_range_m=(key.optimized_pose.translation()-b.config_.uwb_anchors[0].position).norm();r.valid=true;r.source_format="EXPLICIT_SYNTHETIC_NATIVE_FIXTURE";u->ranges.push_back(r);
   b.uwbRangeCallback(u);check(b.uwb_factor_count_==1,"UWB real callback/factor failed");
   b.uwbRangeCallback(u);check(b.uwb_factor_count_==1,"duplicate UWB entered graph");

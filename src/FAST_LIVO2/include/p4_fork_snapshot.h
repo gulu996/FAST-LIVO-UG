@@ -54,6 +54,13 @@ struct LogicalHashes
 LogicalHashes logicalHashes(const P4ForkSnapshot &snapshot);
 bool saveSnapshot(const P4ForkSnapshot &snapshot, const std::string &path,
                   std::string &error);
+std::string mapRootKeysHash(const VoxelMapManager &map);
+std::map<std::string, std::string> productionHashes(
+    const StatesGroup &predicted, const StatesGroup &updated,
+    const PointCloudXYZI &undistorted, const PointCloudXYZI &downsampled,
+    const VoxelMapManager &map);
+bool saveSnapshot(const P4ForkSnapshot &snapshot, const std::string &path,
+                  std::string &error);
 bool loadSnapshot(const std::string &path, P4ForkSnapshot &snapshot,
                   std::string &error);
 

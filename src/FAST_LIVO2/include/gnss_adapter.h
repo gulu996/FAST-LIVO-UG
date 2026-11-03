@@ -36,6 +36,7 @@ struct GnssAdapterConfig
   std::string output_odom_topic = "/gnss/enu_odom";
   std::string output_status_topic = "/gnss/status";
   bool publish_local_enu_odometry = true;
+  std::string pose_input_frame_id; // Empty only for legacy/unit-test compatibility.
   int pose_input_quality = static_cast<int>(GnssQuality::RTK_FLOAT);
   int pose_input_num_sv = 0;
   bool gnss_pose_covariance_authoritative = false;

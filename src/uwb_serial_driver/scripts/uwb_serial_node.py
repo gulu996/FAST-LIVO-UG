@@ -214,7 +214,8 @@ class UwbSerialNode:
                 result.mapping_session_id,
                 result.writer_epoch,
                 result.anchor_uncertainty_ns,
-                RawSerialFrame.DEVICE_TIME_MAPPED_LOCAL,
+                RawSerialFrame.HOST_RECEIVE_LOCAL,
+                # The mapped input is host receipt, not a UWB device measurement tick.
                 "livox_imu_anchor",
             )
 
@@ -358,7 +359,7 @@ class UwbSerialNode:
             "livox_imu_legacy_time"
             if self.timestamp_mode == "livox_imu_anchor"
             and timestamp_source
-            == RawSerialFrame.DEVICE_TIME_MAPPED_LOCAL
+            == RawSerialFrame.HOST_RECEIVE_LOCAL
             else "local_sensor_time"
         )
         raw.session_id = session_id
@@ -437,7 +438,7 @@ class UwbSerialNode:
             and (
                 stamp_ns == 0
                 or timestamp_raw.timestamp_source
-                != RawSerialFrame.DEVICE_TIME_MAPPED_LOCAL
+                != RawSerialFrame.HOST_RECEIVE_LOCAL
             )
         ):
             self.timestamp_mapping_drop_count += 1
@@ -465,9 +466,7 @@ class UwbSerialNode:
         array.round_sequence = self.round_sequence
         array.tag_id = self.tag_id
         array.timestamp_source = timestamp_raw.timestamp_source
-        array.timestamp_uncertainty_ns = max(
-            1, timestamp_raw.time_uncertainty_ns
-        )
+        array.timestamp_uncertainty_ns = timestamp_raw.time_uncertainty_ns
         array.host_receive_stamp = timestamp_raw.host_receive_stamp
         array.host_receive_monotonic_ns = (
             timestamp_raw.host_receive_monotonic_ns

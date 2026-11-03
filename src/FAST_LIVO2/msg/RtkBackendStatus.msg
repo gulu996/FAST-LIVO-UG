@@ -77,3 +77,22 @@ float64 alignment_baseline
 
 string last_reject_reason
 string backend_error
+
+# Quality-aware ROS backend; an unavailable graph emits no new optimized pose.
+bool frontend_available
+string frontend_quality_state
+time frontend_last_successful_lio
+uint64 frontend_quality_sequence
+uint32 frontend_quality_pending
+
+# Lifecycle is independent of physical measurement quality. History retained is not a truth certificate.
+string stream_lifecycle
+string stream_reason
+string backend_session_id
+string frontend_session_id
+bool historical_output_preserved
+bool realtime_available
+float64 stream_transition_wall_s
+float64 last_quality_arrival_wall_s
+uint64 quality_after_boundary
+uint8 last_applied_frontend_quality

@@ -9,6 +9,7 @@ gnss_adapter:
   # full covariance from fix-local ENU axes into origin-local ENU axes.
   input_mode: "pose_with_covariance_stamped"
   input_topic: "/rtk_slam/gnss/enu_pose"
+  pose_input_frame_id: "enu"
   output_odom_topic: "/gnss_fusion/enu_odom"
   output_status_topic: "/gnss_fusion/status"
   publish_local_enu_odometry: true

@@ -1,0 +1,8 @@
+# Explicit controller; not encoded in ordinary ROS odometry. No reset/new-session action.
+string command
+string frontend_session_id
+uint64 last_output_sequence
+---
+bool accepted
+string lifecycle
+string reason

@@ -134,6 +134,21 @@ LIVMapper::LIVMapper(ros::NodeHandle &nh)
   p4b_config.lidar_max_range_m = voxel_lidar_max_range_m_;
   p4b_config.map_sliding_enabled = voxel_config.map_sliding_en;
   p4b_config.map_update_stride = lio_map_update_stride_;
+  bool record_production_audit = false;
+  nh.param<bool>("p4b_snapshot/record_production_audit", record_production_audit, false);
+  nh.param<double>("p4b_snapshot/fixed_t0", p4b_fixed_t0_, 0.0);
+  if (record_production_audit)
+  {
+    if (p4b_config.enabled || !std::isfinite(p4b_fixed_t0_) || p4b_fixed_t0_ <= 0)
+      throw std::runtime_error("minimal witness requires P4-B off and positive fixed_t0");
+    p4b_production_audit_.reset(new fast_livo::p4b::ProductionAudit(p4b_config.output_directory));
+    std::ofstream effective(p4b_config.output_directory + "/effective_parameters.txt");
+    effective << "effective_lio_serial=" << voxelmap_manager->config_setting_.deterministic_lio_update_en
+              << "\neffective_feature_sort=" << deterministic_lio_feature_sort_en_
+              << "\nproduction_provenance_enabled=" << voxelmap_manager->config_setting_.p4b_snapshot_enable
+              << "\nshadow_branches=0\n";
+    if (!effective) throw std::runtime_error("cannot record witness parameters");
+  }
   if (p4b_config.enabled)
   {
     if (!voxel_config.p4b_retain_support_points)
@@ -1882,6 +1897,9 @@ void LIVMapper::initializeSubscribersAndPublishers(ros::NodeHandle &nh, image_tr
   pubImuPropOdom = nh.advertise<nav_msgs::Odometry>("/LIVO2/imu_propagate", 10000);
   imu_prop_timer = nh.createTimer(ros::Duration(0.004), &LIVMapper::imu_prop_callback, this);
   voxelmap_manager->voxel_map_pub_= nh.advertise<visualization_msgs::MarkerArray>("/planes", 10000);
+  nh.param<bool>("diagnostics/frontend_quality_en", frontend_quality_en_, true);
+  frontend_quality_session_ = ros::this_node::getName() + ":" + std::to_string(ros::WallTime::now().toNSec());
+  pubFrontendQuality = nh.advertise<fast_livo::FrontendQuality>(raw_backend_odom_topic_ + "/quality", 500);
   pubSubscribersReady = nh.advertise<std_msgs::Bool>("/fast_livo/subscribers_ready", 1, true);
   pubMappingReady = nh.advertise<std_msgs::Bool>("/fast_livo/mapping_ready", 1, true);
   std_msgs::Bool status;
@@ -1891,6 +1909,45 @@ void LIVMapper::initializeSubscribersAndPublishers(ros::NodeHandle &nh, image_tr
   pubSubscribersReady.publish(status);
   ROS_INFO("[STARTUP] SUBSCRIBERS_READY lidar=%d imu=%d image=%d",
            lidar_en, static_cast<int>(imu_en), img_en);
+}
+
+void LIVMapper::captureFrontendQuality(const nav_msgs::Odometry& odometry)
+{
+  using Q=fast_livo::FrontendQuality;
+  Q q;q.odometry=odometry;q.session_id=frontend_quality_session_;
+  q.producer_node=ros::this_node::getName();
+  q.source_kind=LidarMeasures.lio_vio_flg==VIO?Q::VIO_QUERY:Q::LIO_SCAN;
+  q.slam_mode=slam_mode_==LIVO?"LIVO":"LIO";
+  const auto& d=voxelmap_manager->getLastLioDiagnostics();
+  q.lio_frame_id=voxelmap_manager->current_frame_id_;
+  q.lio_status_known=q.lio_frame_id>0;
+  q.lio_committed=d.commit;
+  if(q.source_kind==Q::LIO_SCAN && q.lio_status_known) {
+    q.lio_timestamp=odometry.header.stamp;
+    if(q.lio_frame_id!=quality_last_lio_frame_) {
+      if(d.commit){quality_last_successful_lio_=odometry.header.stamp;quality_rejections_=0;}
+      else ++quality_rejections_;
+      quality_last_lio_frame_=q.lio_frame_id;
+    }
+  } else q.lio_timestamp=current_frontend_quality_.lio_timestamp;
+  q.last_successful_lio=quality_last_successful_lio_;
+  q.consecutive_lio_rejections=quality_rejections_;
+  q.vio_status_known=q.source_kind==Q::VIO_QUERY;
+  q.vio_accepted=q.vio_status_known && runtime_events_.vio_accepted>imu_vio_accepted_before_;
+  q.imu_coverage=p_imu->coveragePredictionComplete(odometry.header.stamp.toSec())?Q::VALID:Q::UNKNOWN;
+  q.input_integrity=Q::UNKNOWN; // Transport/physical sampling completeness is not inferred from commit.
+  q.state_covariance_validity=Q::UNKNOWN; // LIO candidate checks do not certify an intervening VIO posterior.
+  if(q.source_kind==Q::LIO_SCAN && d.commit && _state.cov.allFinite())q.state_covariance_validity=Q::VALID;
+  q.geometry_valid=d.observability.valid;q.is_degenerate=d.is_degenerate;
+  q.motion_valid=d.motion_consistency.valid;q.motion_warning=d.motion_consistency.shadow_warn;
+  q.lio_position_correction_m=(d.updated_state.pos_end-d.predicted_state.pos_end).norm();
+  q.lio_velocity_correction_mps=(d.updated_state.vel_end-d.predicted_state.vel_end).norm();
+  q.lio_rotation_correction_deg=Eigen::AngleAxisd(d.predicted_state.rot_end.transpose()*d.updated_state.rot_end).angle()*180./M_PI;
+  q.quality=!q.lio_status_known?Q::INPUT_UNKNOWN:(!d.commit?Q::FRONTEND_REJECTED:Q::SUSPECT_COMMITTED);
+  // ponytail: unknown transport integrity stays suspect; no invented NORMAL
+  // certification and no warning-dependent factor reweighting in this phase.
+  q.evidence_source="lio_transaction+motion_diagnostics;input_integrity_unknown;P_not_relative_covariance";
+  current_frontend_quality_=q;
 }
 
 bool LIVMapper::publishRawBackendOdometry()
@@ -1908,6 +1965,8 @@ bool LIVMapper::publishRawBackendOdometry()
   odometry.pose.pose.orientation.x = quaternion.x();
   odometry.pose.pose.orientation.y = quaternion.y();
   odometry.pose.pose.orientation.z = quaternion.z();
+
+  if (frontend_quality_en_) captureFrontendQuality(odometry);
 
   // ponytail: one estimator thread; retain the raw pre-external-update pose,
   // but never expose a working query to the independent fixed-lag backend.
@@ -1952,6 +2011,10 @@ bool LIVMapper::publishRawBackendOdometryMessage(const nav_msgs::Odometry &odome
   last_raw_backend_odom_stamp_ns_ = stamp_ns;
   pubRawBackendOdom.publish(odometry);
   ++raw_backend_odom_published_;
+  if (frontend_quality_en_) {
+    current_frontend_quality_.output_sequence = raw_backend_odom_published_;
+    pubFrontendQuality.publish(current_frontend_quality_);
+  }
   return true;
 }
 
@@ -2754,6 +2817,8 @@ void LIVMapper::handleLIO()
     map_insert_skip_reason = "p4_frozen_map_counterfactual";
   double t4 = t3;
 
+  if (p4b_production_audit_) p4b_production_audit_->beforeInsertion(*voxelmap_manager);
+
   if (skip_map_insert)
   {
     ROS_INFO_THROTTLE(1.0,
@@ -2800,6 +2865,7 @@ void LIVMapper::handleLIO()
 
   // Sliding/cropping is memory management, not map insertion. It must continue
   // even while an external or experimental guard pauses new point insertion.
+  if (p4b_production_audit_) p4b_production_audit_->afterInsertion(*voxelmap_manager);
   if (do_map_update && p4_map_mutation_allowed &&
       voxelmap_manager->config_setting_.map_sliding_en)
   {
@@ -2817,6 +2883,12 @@ void LIVMapper::handleLIO()
   logLioMotionConsistency();
   logRuntimeEventCounts(false);
   logLioDirectionalShadow();
+
+  if (p4b_production_audit_)
+    p4b_production_audit_->record(state_propagat, _state, *voxelmap_manager,
+        *feats_undistort, *feats_down_body, LidarMeasures.last_lio_update_time,
+        p4b_fixed_t0_, _first_lidar_time,
+        do_map_update && p4_map_mutation_allowed && voxelmap_manager->config_setting_.map_sliding_en);
 
   if (p4b_fork_harness_)
   {

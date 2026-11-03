@@ -13,6 +13,7 @@ which is included as part of this source code package.
 #ifndef LIV_MAPPER_H
 #define LIV_MAPPER_H
 
+#include <fast_livo/FrontendQuality.h>
 #include "IMU_Processing.h"
 #include "imu_transaction_interface.h"
 #include "vio.h"
@@ -102,6 +103,8 @@ public:
   std::unordered_map<VOXEL_LOCATION, VoxelOctoTree *> voxel_map;
   std::unique_ptr<fast_livo::p4b::P4ForkHarness> p4b_fork_harness_;
   
+  std::unique_ptr<fast_livo::p4b::ProductionAudit> p4b_production_audit_;
+  double p4b_fixed_t0_ = 0.0;
   string root_dir;
   string lid_topic, imu_topic, seq_name, img_topic;
   V3D extT;
@@ -353,6 +356,14 @@ public:
   ros::Publisher mavros_pose_publisher;
   ros::Publisher pubSubscribersReady;
   ros::Publisher pubMappingReady;
+  ros::Publisher pubFrontendQuality;
+  bool frontend_quality_en_ = true;
+  std::string frontend_quality_session_;
+  fast_livo::FrontendQuality current_frontend_quality_;
+  ros::Time quality_last_successful_lio_;
+  uint64_t quality_rejections_ = 0;
+  uint64_t quality_last_lio_frame_ = 0;
+  void captureFrontendQuality(const nav_msgs::Odometry& odometry);
   std::string raw_backend_odom_topic_ = "/backend/livo_odom_raw";
   std::string raw_backend_odom_frame_id_ = "odom";
   std::string raw_backend_body_frame_id_ = "body";

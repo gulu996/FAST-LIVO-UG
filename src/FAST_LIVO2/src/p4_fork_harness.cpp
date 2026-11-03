@@ -13,6 +13,56 @@ namespace fast_livo
 {
 namespace p4b
 {
+ProductionAudit::ProductionAudit(const std::string &directory)
+{
+  std::filesystem::create_directories(directory);
+  csv_.open(directory + "/production_audit.csv");
+  if (!csv_) throw std::runtime_error("cannot open production audit");
+  csv_ << "frame_id,sensor_timestamp,p7_relative_s,first_lidar_time,commit,status,correspondences,map_inserted,slide_called,slide_origin_changed,root_count,plane_counter,pre_insert_keys,post_insert_keys,post_slide_keys";
+  // std::map iteration fixes header/value order identically.
+  for (const char *key : {"associations", "deskew", "downsample", "geometry",
+                          "predicted_covariance", "predicted_state",
+                          "updated_covariance", "updated_state"})
+    csv_ << ',' << key << "_sha256";
+  csv_ << '\n';
+}
+
+void ProductionAudit::beforeInsertion(const VoxelMapManager &map)
+{
+  pre_insert_ = mapRootKeysHash(map);
+  pre_slide_position_ = map.last_slide_position;
+}
+
+void ProductionAudit::afterInsertion(const VoxelMapManager &map)
+{
+  post_insert_ = mapRootKeysHash(map);
+}
+
+void ProductionAudit::record(
+    const StatesGroup &predicted, const StatesGroup &updated,
+    const VoxelMapManager &map, const PointCloudXYZI &undistorted,
+    const PointCloudXYZI &downsampled, double timestamp, double fixed_t0,
+    double first_lidar_time, bool slide_called)
+{
+  if (map.current_frame_id_ != previous_frame_ + 1 || pre_insert_.empty() || post_insert_.empty())
+    throw std::runtime_error("production audit missing/duplicate transaction");
+  previous_frame_ = map.current_frame_id_;
+  const auto &d = map.getLastLioDiagnostics();
+  csv_ << std::setprecision(17) << map.current_frame_id_ << ',' << timestamp
+       << ',' << timestamp - fixed_t0 << ',' << first_lidar_time << ',' << d.commit
+       << ',' << d.convergence_status << ',' << d.correspondence_count << ','
+       << d.map_inserted << ',' << slide_called << ','
+       << !(map.last_slide_position.array() == pre_slide_position_.array()).all()
+       << ',' << map.voxel_map_.size() << ',' << p4bGetVoxelPlaneIdCounter()
+       << ',' << pre_insert_ << ',' << post_insert_ << ',' << mapRootKeysHash(map);
+  for (const auto &entry : productionHashes(predicted, updated, undistorted, downsampled, map))
+    csv_ << ',' << entry.second;
+  csv_ << '\n';
+  csv_.flush();
+  if (!csv_) throw std::runtime_error("production audit write failed");
+  pre_insert_.clear(); post_insert_.clear();
+}
+
 namespace
 {
 

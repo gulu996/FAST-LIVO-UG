@@ -23,6 +23,8 @@ enum class UwbRejectReason { INVALID_CORRECTED_RANGE, INVALID_RANGE_STATUS, INVA
 
 struct UwbRangeMeasurement
 {
+  std::shared_ptr<const uwb_serial_driver::UwbRangeArray> external_packet;
+  size_t external_range_index = 0;
   int anchor_id = -1;
   double raw_range_m = 0.0;
   double range_bias_m = 0.0;
@@ -71,6 +73,7 @@ public:
   }
   void forwardMeasurementsAt(double current_lidar_stamp, double lidar_start_stamp);
 private:
+  friend struct UwbManagerSelfTestAccess;
   bool loadParameters(ros::NodeHandle &nh);
   bool openSerial();
   bool configureSerial();

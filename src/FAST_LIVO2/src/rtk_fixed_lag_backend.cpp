@@ -1,5 +1,6 @@
 #include "rtk_fixed_lag_backend.h"
 #include "gnss_fusion_policy.h"
+#include "gnss_covariance_contract.h"
 
 #include <geometry_msgs/PoseStamped.h>
 #include <gtsam/inference/Symbol.h>
@@ -193,6 +194,8 @@ gtsam::Vector UwbRangeFactor::evaluateError(
 }
 
 RtkFixedLagBackend::RtkFixedLagBackend(ros::NodeHandle &nh) {
+  frontend_quality_required_ = true;
+  backend_session_id_ = ros::this_node::getName()+":"+std::to_string(ros::WallTime::now().toNSec());
   loadParameters(nh);
   GnssFusionPolicy fusion_policy;
   if (!loadGnssFusionPolicy(nh, fusion_policy)) {
@@ -267,26 +270,16 @@ RtkFixedLagBackend::RtkFixedLagBackend(ros::NodeHandle &nh) {
       << config_.result_pose_lever_arm_body_m.transpose() << "]");
   ROS_INFO_STREAM(
       "[RTK_BACKEND] LIVO Pose3 sigmas [rotation xyz, translation xyz]=["
-      << (config_.uwb_factor_backend_en
-              ? config_.livo_uwb_rotation_sigma_rad
-              : config_.livo_rotation_sigma_rad)
+      << config_.livo_rotation_sigma_rad
       << " "
-      << (config_.uwb_factor_backend_en
-              ? config_.livo_uwb_rotation_sigma_rad
-              : config_.livo_rotation_sigma_rad)
+      << config_.livo_rotation_sigma_rad
       << " "
-      << (config_.uwb_factor_backend_en
-              ? config_.livo_uwb_rotation_sigma_rad
-              : config_.livo_rotation_sigma_rad)
+      << config_.livo_rotation_sigma_rad
       << " "
       << config_.livo_translation_sigma_m << " "
-      << (config_.uwb_factor_backend_en
-              ? config_.livo_lateral_vertical_sigma_m
-              : config_.livo_translation_sigma_m)
+      << config_.livo_translation_sigma_m
       << " "
-      << (config_.uwb_factor_backend_en
-              ? config_.livo_lateral_vertical_sigma_m
-              : config_.livo_translation_sigma_m)
+      << config_.livo_translation_sigma_m
       << "]");
   if (config_.uwb_factor_backend_en) {
     ROS_INFO_STREAM(
@@ -790,8 +783,11 @@ void RtkFixedLagBackend::validateParameters() const {
 }
 
 void RtkFixedLagBackend::setupRos(ros::NodeHandle &nh) {
-  raw_odom_subscriber_ = nh.subscribe(config_.raw_odom_topic, 500,
-                                      &RtkFixedLagBackend::rawOdomCallback, this);
+  frontend_quality_subscriber_ = nh.subscribe(config_.raw_odom_topic + "/quality", 500,
+                                      &RtkFixedLagBackend::qualityEvent, this);
+  ros::NodeHandle private_nh("~");
+  stream_control_service_ = private_nh.advertiseService("stream_control", &RtkFixedLagBackend::streamControl, this);
+  frontend_quality_timer_ = nh.createWallTimer(ros::WallDuration(.1), &RtkFixedLagBackend::qualityTimer, this);
   if (gnss_factor_enabled_) {
     gnss_odom_subscriber_ = nh.subscribe(config_.gnss_odom_topic, 200,
                                          &RtkFixedLagBackend::gnssOdomCallback,
@@ -805,6 +801,7 @@ void RtkFixedLagBackend::setupRos(ros::NodeHandle &nh) {
         config_.uwb_range_topic, 500,
         &RtkFixedLagBackend::uwbRangeCallback, this);
   }
+  correction_event_publisher_ = nh.advertise<fast_livo::CorrectionEvent>("/rtk_backend/correction_event", 100, true);
   optimized_odom_publisher_ =
       nh.advertise<nav_msgs::Odometry>(config_.optimized_odom_topic, 20);
   optimized_path_publisher_ =
@@ -893,7 +890,7 @@ void RtkFixedLagBackend::initializeResultFiles() {
            "robust_weight,associated_key,association_dt_s,decision,reason,"
            "active_anchor_count,geometry_eigenvalue_0,"
            "geometry_eigenvalue_1,geometry_eigenvalue_2,geometry_rank,"
-           "geometry_condition,source_format,measurement_uid\n";
+           "geometry_condition,source_format,measurement_uid,raw_stamp_ns,aligned_stamp_ns,session_id,tag_id,round_sequence,timestamp_source,timestamp_uncertainty_ns,host_receive_stamp_ns,host_receive_monotonic_ns,diag\n";
     status_csv_stream_
         << "wall_time,ros_time,latest_sensor_stamp,initialized,"
            "alignment_ready,active_states,active_factors,active_livo_factors,"
@@ -1116,9 +1113,72 @@ bool RtkFixedLagBackend::poseIsFinite(const gtsam::Pose3 &pose) {
   return pose.matrix().allFinite();
 }
 
+void RtkFixedLagBackend::rejectPendingMeasurementsForStream(const std::string& reason) {
+  while (!pending_uwb_.empty()) {
+    rejectUwb(reason, &pending_uwb_.front());
+    pending_uwb_.pop_front();
+  }
+  for(auto* queue:{&pending_factor_gnss_,&pending_alignment_gnss_}) {
+    while(!queue->empty()){rejectGnss(reason,0.,0.,&queue->front().stamp);queue->pop_front();}
+  }
+}
+void RtkFixedLagBackend::stopForFrontend(const std::string& reason) {
+  if(frontend_quality_.lifecycle=="TIMEOUT")backend_error_="DATA_STREAM_TIMEOUT_RECOVERY_UNSUPPORTED:"+reason;
+  else {frontend_quality_.stop(reason);backend_error_="FRONTEND_UNAVAILABLE_RECOVERY_UNSUPPORTED:"+frontend_quality_.failure;}
+  frontend_quality_.lifecycle_wall=ros::WallTime::now().toSec();
+  backend_halted_=true;
+  rejectPendingMeasurementsForStream("FRONTEND_UNAVAILABLE");
+  ROS_ERROR_STREAM("[BACKEND_STREAM_STOP] lifecycle="<<frontend_quality_.lifecycle<<" reason="<<backend_error_);
+  publishStatus();
+}
+bool RtkFixedLagBackend::streamControl(fast_livo::BackendStreamControl::Request& request,fast_livo::BackendStreamControl::Response& reply) {
+  std::lock_guard<std::mutex> lock(state_mutex_);
+  const double now=ros::WallTime::now().toSec();
+  // Never erase an already elapsed timeout by racing a late pause/EOF command.
+  frontend_quality_.expire(now);
+  if(!frontend_quality_.failure.empty()&&!backend_halted_)stopForFrontend(frontend_quality_.failure);
+  else if(frontend_quality_.lifecycle=="TIMEOUT"&&!backend_halted_)stopForFrontend(frontend_quality_.lifecycle_reason);
+  if(backend_halted_)reply.reason="RECOVERY_UNSUPPORTED";
+  else reply.accepted=frontend_quality_.control(request.command,request.frontend_session_id,request.last_output_sequence,now,reply.reason);
+  if(reply.accepted && request.command=="EOF")rejectPendingMeasurementsForStream("EXPLICIT_EOF");
+  reply.lifecycle=frontend_quality_.lifecycle;
+  ROS_INFO_STREAM("[BACKEND_STREAM_CONTROL] command="<<request.command<<" session="<<request.frontend_session_id<<" watermark="<<request.last_output_sequence<<" accepted="<<reply.accepted<<" lifecycle="<<reply.lifecycle<<" reason="<<reply.reason);
+  publishStatus();return true;
+}
+void RtkFixedLagBackend::qualityEvent(const ros::MessageEvent<fast_livo::FrontendQuality const>& event) {
+  if(event.getPublisherName()!=event.getMessage()->producer_node){
+    std::lock_guard<std::mutex> lock(state_mutex_);stopForFrontend("PUBLISHER_ID_MISMATCH");return;
+  }
+  qualityCallback(event.getMessage());
+}
+void RtkFixedLagBackend::qualityCallback(const fast_livo::FrontendQualityConstPtr& message) {
+  std::unique_lock<std::mutex> lock(state_mutex_);
+  if(!frontend_quality_.failure.empty())return;
+  if(frontend_quality_.lifecycle!="ACTIVE"){++quality_after_boundary_;publishStatus();return;}
+  if(message->odometry.header.frame_id!=config_.odom_frame_id||message->odometry.child_frame_id!=config_.body_frame_id){stopForFrontend("RAW_FRAME_MISMATCH");return;}
+  const auto ready=frontend_quality_.push(*message,ros::WallTime::now().toSec());
+  if(!frontend_quality_.failure.empty()){stopForFrontend(frontend_quality_.failure);return;}
+  if(frontend_quality_.lifecycle=="TIMEOUT"){stopForFrontend(frontend_quality_.lifecycle_reason);return;}
+  // ponytail: node uses ros::spin, and strict mode has no independent raw
+  // subscriber. If callbacks become concurrent, make this handoff atomic.
+  for(const auto& q:ready){
+    applied_frontend_quality_=q;quality_handoff_=true;lock.unlock();rawOdomCallback(boost::make_shared<nav_msgs::Odometry>(q.odometry));lock.lock();quality_handoff_=false;
+    if(backend_halted_)break;
+  }
+}
+void RtkFixedLagBackend::qualityTimer(const ros::WallTimerEvent&) {
+  std::lock_guard<std::mutex> lock(state_mutex_);
+  if(!frontend_quality_required_||backend_halted_||frontend_quality_.lifecycle!="ACTIVE")return;
+  const double now=ros::WallTime::now().toSec();frontend_quality_.expire(now);
+  if(frontend_quality_.next==1&&frontend_wait_since_>0.&&now-frontend_wait_since_>=fast_livo::FrontendQualityStream::expiry_s){frontend_quality_.lifecycle="TIMEOUT";frontend_quality_.lifecycle_reason="QUALITY_NEVER_RECEIVED";}
+  if(!frontend_quality_.failure.empty())stopForFrontend(frontend_quality_.failure);
+  else if(frontend_quality_.lifecycle=="TIMEOUT")stopForFrontend(frontend_quality_.lifecycle_reason);
+}
+
 void RtkFixedLagBackend::rawOdomCallback(
     const nav_msgs::OdometryConstPtr &message) {
   std::lock_guard<std::mutex> lock(state_mutex_);
+  if(frontend_quality_required_ && (!quality_handoff_ || !frontend_quality_.failure.empty() || frontend_quality_.lifecycle!="ACTIVE"))return;
   ++raw_odom_received_;
   try {
     const std::int64_t stamp_ns = stampNanoseconds(message->header.stamp);
@@ -1158,7 +1218,8 @@ void RtkFixedLagBackend::rawOdomCallback(
     pruneRawOdomBuffer();
     publishStatus();
   } catch (const std::exception &error) {
-    backend_error_ = error.what();
+    if(frontend_quality_required_)stopForFrontend("INVALID_RAW_POSE");
+    else backend_error_ = error.what();
     ROS_ERROR_STREAM_THROTTLE(config_.log_interval_s,
                               "[RTK_BACKEND_RAW_ERROR] " << error.what());
     publishStatus();
@@ -1408,6 +1469,14 @@ void RtkFixedLagBackend::uwbRangeCallback(
 
   for (const auto &range : message->ranges) {
     UwbMeasurement measurement;
+    measurement.session_id = message->session_id;
+    measurement.tag_id = message->tag_id;
+    measurement.round_sequence = message->round_sequence;
+    measurement.timestamp_source = message->timestamp_source;
+    measurement.timestamp_uncertainty_ns = message->timestamp_uncertainty_ns;
+    measurement.host_receive_stamp = message->host_receive_stamp;
+    measurement.host_receive_monotonic_ns = message->host_receive_monotonic_ns;
+    measurement.diag = range.diag;
     measurement.raw_stamp = message->header.stamp;
     measurement.aligned_stamp = message->header.stamp;
     if (!measurement.aligned_stamp.isZero() &&
@@ -1423,6 +1492,26 @@ void RtkFixedLagBackend::uwbRangeCallback(
     ++uwb_received_;
     ++uwb_anchor_statistics_[measurement.anchor_id].received;
 
+    if (backend_halted_ || (frontend_quality_required_ &&
+        (!frontend_quality_.failure.empty() || frontend_quality_.lifecycle != "ACTIVE"))) {
+      rejectUwb("UWB_STREAM_UNAVAILABLE", &measurement);
+      continue;
+    }
+    // Require the original mapped device timestamp, also during bag replay.
+    // REPLAY_PRESERVED alone cannot certify the original time source.
+    if ((message->timestamp_source != uwb_serial_driver::UwbRangeArray::DEVICE_TIME_MAPPED_LOCAL) ||
+        message->timestamp_uncertainty_ns == 0 ||
+        message->timestamp_uncertainty_ns > static_cast<std::uint64_t>(
+            config_.uwb_association_max_dt_s * 1e9) ||
+        message->session_id == 0 || message->round_sequence == 0) {
+      rejectUwb("UWB_TIME_PROVENANCE", &measurement);
+      continue;
+    }
+    if (uwb_identity_bound_ &&
+        (message->session_id != uwb_session_id_ || message->tag_id != uwb_tag_id_)) {
+      rejectUwb("UWB_SESSION_TAG_CHANGED", &measurement);
+      continue;
+    }
     if (message->header.stamp.isZero() ||
         !std::isfinite(message->header.stamp.toSec()) ||
         !std::isfinite(measurement.aligned_stamp.toSec()) ||
@@ -1443,6 +1532,11 @@ void RtkFixedLagBackend::uwbRangeCallback(
       continue;
     }
 
+    if (!anchor->second.position.allFinite() ||
+        !std::isfinite(anchor->second.range_bias_m)) {
+      rejectUwb("UWB_ANCHOR_INVALID", &measurement);
+      continue;
+    }
     measurement.range_bias_m = anchor->second.range_bias_m;
     measurement.corrected_range_m =
         measurement.raw_range_m - measurement.range_bias_m;
@@ -1465,6 +1559,15 @@ void RtkFixedLagBackend::uwbRangeCallback(
                 &measurement);
       continue;
     }
+    const auto last_round = last_uwb_round_.find(measurement.anchor_id);
+    if (last_round != last_uwb_round_.end() && message->round_sequence <= last_round->second) {
+      rejectUwb("UWB_STALE_ROUND", &measurement);
+      continue;
+    }
+    uwb_identity_bound_ = true;
+    uwb_session_id_ = message->session_id;
+    uwb_tag_id_ = message->tag_id;
+    last_uwb_round_[measurement.anchor_id] = message->round_sequence;
     last_enqueued_uwb_stamp_ns_[measurement.anchor_id] = stamp_ns;
     ++uwb_parsed_;
     newest_sensor_stamp_ =
@@ -1490,6 +1593,21 @@ void RtkFixedLagBackend::tryPairGnssMessages(std::uint64_t stamp_ns) {
 void RtkFixedLagBackend::processAcceptedGnss(
     const nav_msgs::Odometry &odometry,
     const fast_livo::GnssStatus &status) {
+  if(frontend_quality_required_ && frontend_wait_since_==0.)frontend_wait_since_=ros::WallTime::now().toSec();
+  if(frontend_quality_required_ && (!frontend_quality_.failure.empty()||frontend_quality_.lifecycle!="ACTIVE")) {
+    rejectGnss(frontend_quality_.failure.empty()?"DATA_STREAM_NOT_ACTIVE":"FRONTEND_UNAVAILABLE",0.,0.,&odometry.header.stamp);return;
+  }
+  if(frontend_quality_required_ && odometry.header.frame_id!=config_.frame_id) {
+    rejectGnss("GNSS_FRAME_MISMATCH",0.,0.,&odometry.header.stamp);return;
+  }
+  const auto C=fast_livo::positionCovariance(odometry.pose.covariance);
+  const auto checked=fast_livo::checkPositionCovariance(C);
+  if(!checked.valid) {
+    ROS_WARN_STREAM("[BACKEND_GNSS_COV_REJECT] stamp_ns="<<odometry.header.stamp.toNSec()
+       <<" raw_quality="<<int(status.raw_quality)<<" origin_affected=false pending_enqueued=false "
+       <<fast_livo::covarianceEvidence(C,checked));
+    rejectGnss(checked.reason,0.,0.,&odometry.header.stamp);return;
+  }
   const std::int64_t stamp_ns = stampNanoseconds(odometry.header.stamp);
   if (last_enqueued_gnss_stamp_ns_ >= 0 &&
       stamp_ns <= last_enqueued_gnss_stamp_ns_) {
@@ -1592,6 +1710,7 @@ bool RtkFixedLagBackend::interpolateRawPose(
 }
 
 void RtkFixedLagBackend::tryCollectAlignmentPairs() {
+  if(frontend_quality_required_ && frontend_quality_.lifecycle!="ACTIVE")return;
   if (raw_odom_buffer_.empty()) return;
 
   for (auto measurement = pending_alignment_gnss_.begin();
@@ -1828,19 +1947,10 @@ bool RtkFixedLagBackend::initializeGraph(const RawOdomSample &sample) {
   const gtsam::Key key = gtsam::Symbol('x', next_keyframe_id_);
   const gtsam::Pose3 map_pose = initial_map_to_odom_.compose(sample.pose);
   gtsam::Vector6 sigmas;
-  if (config_.uwb_factor_backend_en) {
-    sigmas << config_.uwb_initial_prior_rotation_sigma_rad,
-        config_.uwb_initial_prior_rotation_sigma_rad,
-        config_.uwb_initial_prior_rotation_sigma_rad,
-        config_.uwb_initial_prior_translation_sigma_m,
-        config_.uwb_initial_prior_translation_sigma_m,
-        config_.uwb_initial_prior_translation_sigma_m;
-  } else {
-    sigmas << config_.prior_roll_pitch_sigma_rad,
-        config_.prior_roll_pitch_sigma_rad, config_.prior_yaw_sigma_rad,
-        config_.prior_translation_sigma_m, config_.prior_translation_sigma_m,
-        config_.prior_translation_sigma_m;
-  }
+  sigmas << config_.prior_roll_pitch_sigma_rad,
+      config_.prior_roll_pitch_sigma_rad, config_.prior_yaw_sigma_rad,
+      config_.prior_translation_sigma_m, config_.prior_translation_sigma_m,
+      config_.prior_translation_sigma_m;
   const auto noise = gtsam::noiseModel::Diagonal::Sigmas(sigmas);
 
   gtsam::NonlinearFactorGraph factors;
@@ -1862,13 +1972,6 @@ bool RtkFixedLagBackend::initializeGraph(const RawOdomSample &sample) {
   if (config_.livo_gravity_consistency_en) ++gravity_factor_count_;
   initialized_ = true;
   queueTextEvent("NODE_CREATED", "id=0 type=prior");
-  if (config_.uwb_factor_backend_en)
-    queueTextEvent(
-        "UWB_INITIAL_PRIOR",
-        "key=x0 source=existing_backend_initial_prior sigma_translation=" +
-            std::to_string(config_.uwb_initial_prior_translation_sigma_m) +
-            " sigma_rotation=" +
-            std::to_string(config_.uwb_initial_prior_rotation_sigma_rad));
   refreshEstimateAndPublish();
   ROS_INFO_STREAM("[RTK_BACKEND] initialized at sensor_stamp="
                   << sample.stamp.toSec());
@@ -1887,16 +1990,9 @@ bool RtkFixedLagBackend::createGraphNode(const RawOdomSample &sample,
   const gtsam::Key key = gtsam::Symbol('x', next_keyframe_id_);
   gtsam::Vector6 sigmas;
   // GTSAM Pose3 tangent order: rotation xyz followed by translation xyz.
-  const double rotation_sigma = config_.uwb_factor_backend_en
-                                    ? config_.livo_uwb_rotation_sigma_rad
-                                    : config_.livo_rotation_sigma_rad;
-  const double lateral_vertical_sigma =
-      config_.uwb_factor_backend_en
-          ? config_.livo_lateral_vertical_sigma_m
-          : config_.livo_translation_sigma_m;
-  sigmas << rotation_sigma, rotation_sigma, rotation_sigma,
-      config_.livo_translation_sigma_m, lateral_vertical_sigma,
-      lateral_vertical_sigma;
+  sigmas << config_.livo_rotation_sigma_rad, config_.livo_rotation_sigma_rad,
+      config_.livo_rotation_sigma_rad, config_.livo_translation_sigma_m,
+      config_.livo_translation_sigma_m, config_.livo_translation_sigma_m;
   const auto noise = gtsam::noiseModel::Diagonal::Sigmas(sigmas);
 
   gtsam::NonlinearFactorGraph factors;
@@ -1977,6 +2073,7 @@ RtkFixedLagBackend::Keyframe *RtkFixedLagBackend::findKeyframe(
 }
 
 void RtkFixedLagBackend::processPendingGnss() {
+  if(frontend_quality_required_ && frontend_quality_.lifecycle!="ACTIVE")return;
   if (!alignment_.valid || backend_halted_) return;
 
   for (auto measurement = pending_factor_gnss_.begin();
@@ -2293,9 +2390,16 @@ void RtkFixedLagBackend::insertPendingUwb(
         return stamp < pending.aligned_stamp;
       });
   pending_uwb_.insert(insertion, measurement);
+  const std::size_t maximum_pending =
+      static_cast<std::size_t>(config_.max_active_states) * 20;
+  while (pending_uwb_.size() > maximum_pending) {
+    rejectUwb("UWB_PENDING_CAPACITY", &pending_uwb_.front());
+    pending_uwb_.pop_front();
+  }
 }
 
 void RtkFixedLagBackend::processPendingUwb() {
+  if (frontend_quality_required_ && frontend_quality_.lifecycle != "ACTIVE") return;
   if (!config_.uwb_factor_backend_en || !alignment_.valid ||
       backend_halted_)
     return;
@@ -2370,12 +2474,7 @@ void RtkFixedLagBackend::processPendingUwb() {
     measurement = pending_uwb_.erase(measurement);
   }
 
-  const std::size_t maximum_pending =
-      static_cast<std::size_t>(config_.max_active_states) * 20;
-  while (pending_uwb_.size() > maximum_pending) {
-    rejectUwb(kUwbStale, &pending_uwb_.front());
-    pending_uwb_.pop_front();
-  }
+
 }
 
 bool RtkFixedLagBackend::addUwbFactor(
@@ -2557,7 +2656,7 @@ void RtkFixedLagBackend::commitMarginalizedArchives(
 bool RtkFixedLagBackend::updateSmoother(
     const gtsam::NonlinearFactorGraph &factors, const gtsam::Values &values,
     const gtsam::FixedLagSmoother::KeyTimestampMap &timestamps) {
-  if (!smoother_ || backend_halted_) return false;
+  if (!smoother_ || backend_halted_ || (frontend_quality_required_ && frontend_quality_.lifecycle!="ACTIVE")) return false;
   const std::vector<ArchiveRecord> candidates =
       collectMarginalizationCandidates(timestamps);
   const auto start = std::chrono::steady_clock::now();
@@ -2655,7 +2754,7 @@ void RtkFixedLagBackend::refreshEstimateAndPublish(bool publish_current) {
                      << " active=" << keyframes_.size()
                      << " limit=" << config_.max_active_states);
   }
-  if (!publish_current || !config_.enable) return;
+  if (!publish_current || !config_.enable || (frontend_quality_required_ && frontend_quality_.lifecycle!="ACTIVE")) return;
 
   const Keyframe &current = keyframes_.back();
   nav_msgs::Odometry optimized;
@@ -2708,6 +2807,7 @@ void RtkFixedLagBackend::refreshEstimateAndPublish(bool publish_current) {
     last_tf_stamp_ns_ = optimized_stamp_ns;
     ++tf_published_;
   }
+  publishCorrectionEvent(true);
   publishStatus();
 }
 
@@ -2828,9 +2928,12 @@ void RtkFixedLagBackend::rejectUwb(
   ++uwb_rejected_;
   if (measurement) ++uwb_anchor_statistics_[measurement->anchor_id].rejected;
   if (reason == kUwbInvalid || reason == kUwbUnknownAnchor ||
-      reason == "INVALID_INNOVATION_COVARIANCE")
+      reason == "INVALID_INNOVATION_COVARIANCE" ||
+      reason == "UWB_TIME_PROVENANCE" || reason == "UWB_SESSION_TAG_CHANGED" ||
+      reason == "UWB_ANCHOR_INVALID" || reason == "UWB_STREAM_UNAVAILABLE")
     ++uwb_invalid_rejected_;
-  else if (reason == kUwbStale)
+  else if (reason == kUwbStale || reason == "UWB_STALE_ROUND" ||
+           reason == "UWB_PENDING_CAPACITY")
     ++uwb_stale_rejected_;
   else if (reason == kUwbDuplicate)
     ++uwb_duplicate_rejected_;
@@ -2935,11 +3038,69 @@ void RtkFixedLagBackend::flushTimerCallback(const ros::TimerEvent &) {
   writeFileBatch(batch, true);
 }
 
+void RtkFixedLagBackend::publishCorrectionEvent(bool valid) {
+  if (!correction_event_publisher_) return;
+  const std::string state = !initialized_ && frontend_quality_.lifecycle == "ACTIVE"
+      ? "UNINITIALIZED" : frontend_quality_.lifecycle;
+  if (!valid && state == correction_notice_state_) return;
+  correction_notice_state_ = state;
+  fast_livo::CorrectionEvent e;
+  e.header.frame_id = config_.frame_id;
+  e.child_frame_id = config_.odom_frame_id;
+  e.body_frame_id = config_.body_frame_id;
+  e.backend_session = backend_session_id_;
+  e.frontend_session = frontend_quality_.session;
+  e.event_id = ++correction_event_id_;
+  e.graph_version = optimization_count_;
+  e.applied_quality_sequence = applied_frontend_quality_.output_sequence;
+  e.dependency_watermark = std::max(newest_sensor_stamp_, applied_frontend_quality_.odometry.header.stamp);
+  if (last_added_gnss_factor_stamp_ns_ >= 0) e.last_gnss_factor.fromNSec(last_added_gnss_factor_stamp_ns_);
+  e.valid = valid && initialized_ && !backend_halted_ && frontend_quality_.lifecycle == "ACTIVE";
+  e.lifecycle = state;
+  e.reason = e.valid ? "OPTIMIZED_ESTIMATE_PUBLISHED" : "READOUT_UNAVAILABLE:" + state;
+  if (e.valid) {
+    const auto& k = keyframes_.back();
+    e.header.stamp = k.stamp;
+    e.source_key = k.id;
+    e.source_raw_pose = poseToMessage(k.raw_pose);
+    e.source_optimized_pose = poseToMessage(k.optimized_pose);
+    const auto c = poseToMessage(k.optimized_pose.compose(k.raw_pose.inverse()));
+    e.map_to_odom.translation.x=c.position.x;
+    e.map_to_odom.translation.y=c.position.y;
+    e.map_to_odom.translation.z=c.position.z;
+    e.map_to_odom.rotation=c.orientation;
+  }
+  // ponytail: an atomic publish-handoff timestamp is measurable here; exact
+  // network delivery remains the subscriber's arrival timestamp, never this value.
+  e.publish_ros_time=ros::Time::now();
+  e.publish_wall_ns=ros::WallTime::now().toNSec();
+  e.publish_steady_ns=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  correction_event_publisher_.publish(e);
+}
+
 void RtkFixedLagBackend::publishStatus() {
   if (!config_.enable) return;
+  if (!initialized_ || backend_halted_ || frontend_quality_.lifecycle != "ACTIVE") publishCorrectionEvent(false);
   fast_livo::RtkBackendStatus status;
   status.header.stamp = newest_sensor_stamp_;
   status.header.frame_id = config_.frame_id;
+  status.frontend_available = frontend_quality_required_ && frontend_quality_.failure.empty() && frontend_quality_.next>1 && !backend_halted_ && frontend_quality_.lifecycle=="ACTIVE";
+  status.frontend_quality_state = !frontend_quality_required_ ? "LEGACY_UNIT_TEST_INPUT_UNKNOWN" :
+      (!frontend_quality_.failure.empty() ? "UNAVAILABLE_RECOVERY_UNSUPPORTED:"+frontend_quality_.failure :
+      (frontend_quality_.next==1 ? "WAITING_FOR_QUALITY" : "COMMITTED_QUALITY_TRACKED"));
+  status.frontend_last_successful_lio = applied_frontend_quality_.last_successful_lio;
+  status.frontend_quality_sequence = applied_frontend_quality_.output_sequence;
+  status.frontend_quality_pending = frontend_quality_.pending.size();
+  status.stream_lifecycle=frontend_quality_.lifecycle;
+  status.stream_reason=frontend_quality_.lifecycle_reason;
+  status.backend_session_id=backend_session_id_;
+  status.frontend_session_id=frontend_quality_.session;
+  status.historical_output_preserved=initialized_;
+  status.realtime_available=status.frontend_available && initialized_;
+  status.stream_transition_wall_s=frontend_quality_.lifecycle_wall;
+  status.last_quality_arrival_wall_s=frontend_quality_.last_progress_wall;
+  status.quality_after_boundary=quality_after_boundary_;
+  status.last_applied_frontend_quality=applied_frontend_quality_.quality;
   status.initialized = initialized_;
   status.alignment_ready = alignment_.valid;
   status.active_keyframes = static_cast<std::uint32_t>(keyframes_.size());
@@ -3122,7 +3283,13 @@ void RtkFixedLagBackend::queueUwbMeasurement(
        << uwb_geometry_eigenvalues_(2) << "," << uwb_geometry_rank_ << ","
        << uwb_geometry_condition_ << ","
        << csvField(measurement.source_format) << ","
-       << measurement.measurement_uid;
+       << measurement.measurement_uid << "," << measurement.raw_stamp.toNSec()
+       << "," << measurement.aligned_stamp.toNSec() << "," << measurement.session_id
+       << "," << measurement.tag_id << "," << measurement.round_sequence
+       << "," << static_cast<unsigned>(measurement.timestamp_source)
+       << "," << measurement.timestamp_uncertainty_ns
+       << "," << measurement.host_receive_stamp.toNSec()
+       << "," << measurement.host_receive_monotonic_ns << "," << measurement.diag;
   pending_file_batch_.uwb_lines.push_back(line.str());
 }
 
