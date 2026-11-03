@@ -2722,50 +2722,51 @@ void VoxelMapManager::BuildResidualListOMP(std::vector<pointWithVar> &pv_list, s
     VOXEL_LOCATION position;
     if (!storedLidarVoxelLocation(pv.point_w, voxel_size, position))
       continue;
+    // Compare the eight nearest voxel centres, including face/edge neighbours.
+    // A missing or already-matched home root must not hide a better supported
+    // plane across a cell boundary. Existing plane/radius/sigma gates remain.
+    // ponytail: fixed eight-root stencil bounds query cost; it is not a global
+    // nearest-plane search and does not change map insertion or retention.
+    const int64_t home[3] = {position.x, position.y, position.z};
+    int offset[3];
+    for (int axis = 0; axis < 3; ++axis)
+      offset[axis] = pv.point_w[axis] / voxel_size -
+                         static_cast<double>(home[axis]) < 0.5 ? -1 : 1;
+    PointToPlane single_ptpl;
+    bool is_sucess = false;
+    double prob = 0;
     VOXEL_LOCATION matched_position = position;
-    VoxelOctoTree *current_octo = find_voxel_tree(position);
-    if (current_octo != nullptr)
+    for (int mask = 0; mask < 8; ++mask)
     {
-      PointToPlane single_ptpl;
-      bool is_sucess = false;
-      double prob = 0;
-      build_single_residual(pv, current_octo, 0, is_sucess, prob, single_ptpl);
-      if (!is_sucess)
+      int64_t key[3] = {home[0], home[1], home[2]};
+      bool representable = true;
+      for (int axis = 0; axis < 3; ++axis)
       {
-        // The octree center and quarter length are metres. Compare them with
-        // the world point in metres, not with the dimensionless voxel index.
-        VOXEL_LOCATION near_position = position;
-        if (pv.point_w[0] > (current_octo->voxel_center_[0] + current_octo->quater_length_)) { near_position.x = near_position.x + 1; }
-        else if (pv.point_w[0] < (current_octo->voxel_center_[0] - current_octo->quater_length_)) { near_position.x = near_position.x - 1; }
-        if (pv.point_w[1] > (current_octo->voxel_center_[1] + current_octo->quater_length_)) { near_position.y = near_position.y + 1; }
-        else if (pv.point_w[1] < (current_octo->voxel_center_[1] - current_octo->quater_length_)) { near_position.y = near_position.y - 1; }
-        if (pv.point_w[2] > (current_octo->voxel_center_[2] + current_octo->quater_length_)) { near_position.z = near_position.z + 1; }
-        else if (pv.point_w[2] < (current_octo->voxel_center_[2] - current_octo->quater_length_)) { near_position.z = near_position.z - 1; }
-        VoxelOctoTree *near_octo = find_voxel_tree(near_position);
-        if (near_octo != nullptr)
-        {
-          build_single_residual(pv, near_octo, 0, is_sucess, prob, single_ptpl);
-          if (is_sucess) matched_position = near_position;
-        }
+        if (!(mask & (1 << axis))) continue;
+        if ((offset[axis] > 0 && key[axis] == std::numeric_limits<int64_t>::max()) ||
+            (offset[axis] < 0 && key[axis] == std::numeric_limits<int64_t>::min()))
+        { representable = false; break; }
+        key[axis] += offset[axis];
       }
-      if (is_sucess)
-      {
-        mylock.lock();
-        single_ptpl.voxel_x_ = matched_position.x;
-        single_ptpl.voxel_y_ = matched_position.y;
-        single_ptpl.voxel_z_ = matched_position.z;
-        useful_ptpl[i] = true;
-        all_ptpl_list[i] = single_ptpl;
-        mylock.unlock();
-      }
-      else
-      {
-        mylock.lock();
-        useful_ptpl[i] = false;
-        mylock.unlock();
-      }
+      if (!representable) continue;
+      const VOXEL_LOCATION candidate_key(key[0], key[1], key[2]);
+      VoxelOctoTree *node = find_voxel_tree(candidate_key);
+      if (!node) continue;
+      const double previous_probability = prob;
+      build_single_residual(pv, node, 0, is_sucess, prob, single_ptpl);
+      if (prob > previous_probability) matched_position = candidate_key;
+    }
+    if (is_sucess)
+    {
+      std::lock_guard<std::mutex> lock(mylock);
+      single_ptpl.voxel_x_ = matched_position.x;
+      single_ptpl.voxel_y_ = matched_position.y;
+      single_ptpl.voxel_z_ = matched_position.z;
+      useful_ptpl[i] = true;
+      all_ptpl_list[i] = single_ptpl;
     }
   }
+
   for (size_t i = 0; i < useful_ptpl.size(); i++)
   {
     if (useful_ptpl[i]) { ptpl_list.push_back(all_ptpl_list[i]); }

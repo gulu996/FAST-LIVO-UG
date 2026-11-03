@@ -308,6 +308,41 @@ void ImuProcess::updateLidarScanPose(double timestamp, const StatesGroup &state)
     throw std::invalid_argument("non-finite image-time scan pose");
   if (!IMUpose.empty() && offset < IMUpose.back().offset_time - 1e-6)
     throw std::logic_error("image-time scan pose moved backwards");
+  // An image-time estimator correction is not instantaneous scanner motion.
+  // Keep the retained scan history in the same pose convention as this node.
+  // ponytail: transport current-scan pose and constant velocity error only;
+  // historical bias errors would require a separate fixed-lag smoother.
+  if (!IMUpose.empty() && std::fabs(offset - IMUpose.back().offset_time) <= 1e-6)
+  {
+    M3D before_rotation;
+    before_rotation << MAT_FROM_ARRAY(IMUpose.back().rot);
+    const V3D before_position(IMUpose.back().pos[0], IMUpose.back().pos[1], IMUpose.back().pos[2]);
+    const V3D before_velocity(IMUpose.back().vel[0], IMUpose.back().vel[1], IMUpose.back().vel[2]);
+    const bool rotation_changed = (state.rot_end.array() != before_rotation.array()).any();
+    if (rotation_changed || (state.pos_end.array() != before_position.array()).any() ||
+        (state.vel_end.array() != before_velocity.array()).any())
+    {
+      const M3D correction_rotation = rotation_changed
+          ? M3D(state.rot_end * before_rotation.transpose()) : M3D::Identity();
+      const V3D correction_translation = state.pos_end - correction_rotation * before_position;
+      const V3D correction_velocity = state.vel_end - correction_rotation * before_velocity;
+      for (auto &saved : IMUpose)
+      {
+        M3D rotation;
+        rotation << MAT_FROM_ARRAY(saved.rot);
+        const V3D position(saved.pos[0], saved.pos[1], saved.pos[2]);
+        const V3D velocity(saved.vel[0], saved.vel[1], saved.vel[2]);
+        const V3D acceleration(saved.acc[0], saved.acc[1], saved.acc[2]);
+        const V3D angular_velocity(saved.gyr[0], saved.gyr[1], saved.gyr[2]);
+        saved = set_pose6d<double>(saved.offset_time, correction_rotation * acceleration,
+                          angular_velocity, correction_rotation * velocity + correction_velocity,
+                          correction_rotation * position + correction_translation +
+                              correction_velocity * (saved.offset_time - offset),
+                          M3D(correction_rotation * rotation));
+      }
+      acc_s_last = correction_rotation * acc_s_last;
+    }
+  }
   const Pose6D pose = set_pose6d(offset, acc_s_last, angvel_last,
                                 state.vel_end, state.pos_end, state.rot_end);
   if (!IMUpose.empty() && std::fabs(offset - IMUpose.back().offset_time) <= 1e-6)

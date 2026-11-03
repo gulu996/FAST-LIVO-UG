@@ -4342,7 +4342,7 @@ bool VIOManager::updateState(cv::Mat img, int level)
     G = old_gain;
     any_update = old_any_update;
   };
-  float last_error = std::numeric_limits<float>::max();
+  double last_error = std::numeric_limits<double>::max();
 
   const int H_DIM = total_points * patch_size_total;
   const int img_step = static_cast<int>(img.step);
@@ -4363,7 +4363,6 @@ bool VIOManager::updateState(cv::Mat img, int level)
     Pcw = -Rci * Rwi.transpose() * Pwi + Pci;
     Jdp_dt = Rci * Rwi.transpose();
     
-    float error = 0.0;
     int n_meas = 0;
     // int max_threads = omp_get_max_threads();
     // int desired_threads = std::min(max_threads, total_points);
@@ -4371,7 +4370,7 @@ bool VIOManager::updateState(cv::Mat img, int level)
   
     #ifdef MP_EN
       omp_set_num_threads(MP_PROC_NUM);
-      #pragma omp parallel for if(!deterministic_visual_update_en) reduction(+:error, n_meas)
+      #pragma omp parallel for if(!deterministic_visual_update_en) reduction(+:n_meas)
     #endif
     for (int i = 0; i < total_points; i++)
     {
@@ -4463,7 +4462,6 @@ bool VIOManager::updateState(cv::Mat img, int level)
         }
       }
       visual_submap->errors[i] = patch_error;
-      error += patch_error;
     }
 
     if (!z.allFinite() || !H_sub.allFinite())
@@ -4479,7 +4477,9 @@ bool VIOManager::updateState(cv::Mat img, int level)
       break;
     }
 
-    error = error / n_meas;
+    // ponytail: reuse the unweighted residuals; a float OpenMP reduction can
+    // change the uphill/rollback decision with thread completion order.
+    const double error = z.squaredNorm() / n_meas;
     if (!std::isfinite(error) || !z.allFinite() || !H_sub.allFinite() ||
         !std::isfinite(img_point_cov) || img_point_cov <= 0.0)
     {
