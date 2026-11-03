@@ -1,5 +1,17 @@
 # Release and application readiness
 
+## Research-candidate integration (2026-11-03)
+
+The integrated P12 + P8-C candidate is suitable for bounded research validation,
+not a stable complete-system release. Seq1 remains a failed robustness case;
+real synchronized UWB accuracy and automatic frontend failure recovery remain
+unverified/unsupported. Current-version competition completed the qualified 804 s replay; tunnel
+regression remains NOT_RUN because the qualified resized input is unavailable. See
+[RESEARCH_CANDIDATE.md](RESEARCH_CANDIDATE.md). Older validation and license
+assessments below keep their original version scope. No license notice or
+clearance blocker has been removed by this integration.
+
+
 Documentation baseline: **2026-10-28**. The catkin workspace root is the
 repository; `src/FAST_LIVO2` is the package.
 

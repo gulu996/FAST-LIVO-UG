@@ -8,23 +8,45 @@ A GTSAM `IncrementalFixedLagSmoother` combines that odometry with GNSS position
 and UWB range factors. Optimized poses are separate outputs: the backend does
 **not** overwrite the frontend ESIKF state or covariance.
 
-This is a research implementation, not a certified navigation product. The
-public baseline before the 2026-10-28 cleanup is `e991e383`; its algorithm
-commit is `9fe7e510` (tree-identical to the tested pre-rewrite commit `5be5538`).
-The cleanup adds the public-tree and license-documentation changes described
-below and is not pushed by this task. The public tunnel dataset is the
-recommended reproduction entry. The 804 s competition recording is private and
-is **not** the tunnel dataset; its numbers are internal validation only. See
-[versioned experiments](docs/experiments/README.md) and
-[release blockers](docs/RELEASE_READINESS.md) before redistributing a build.
+## Research candidate — 2026-11-03
 
-| Area | Current status |
-|---|---|
-| FAST-LIVO2 frontend: LIO, VIO, scan/visual transactions | Maintainer-verified with `lio_plane_map_self_test` and the public tunnel replay; the voxel-key/neighbour fix is public in `9fe7e510` |
-| GTSAM GNSS/UWB fixed-lag backend | Experimental/software-verified; no real simultaneous field-accuracy certification |
-| Public tunnel dataset | Baidu share link and extraction code checked on 2026-10-28; file name, size and local SHA-256 recorded in [the tunnel page](docs/experiments/tunnel.md) |
-| Core build without optional hardware | Whitelisted frontend/backend build checked in an isolated clone; no clean-host CI yet |
-| License clearance | Not complete; the GPLv2-only/GPLv3 combined-work question and upstream driver/firmware terms remain open |
+This branch selectively integrates the P12 deterministic frontend and the P8-C
+UWB input-protection fixes on the public `9e5fd397` tree. It is a **research
+candidate**, not a certified stable navigation baseline. Existing license and
+optional-hardware boundaries remain in force; see
+[license notices](THIRD_PARTY_LICENSES.md) and
+[release blockers](docs/RELEASE_READINESS.md).
+
+- Frontend: fixed 2×2×2 root queries, post-VIO scan-history pose/velocity
+  consistency, and a double-precision visual objective. **Seq1 robustness is
+  unresolved**, including large trajectory error with no LIO rejections.
+- Backend: quality/session contracts, explicit lifecycle control, 20 s
+  fixed lag, and causal correction readout. The RTK-SLAM preset retains the
+  existing gravity-consistency constraint **only for gravity-aligned raw input**.
+  This is correlated frontend information, not an independent IMU measurement.
+- UWB remains **experimental and off by default**. Device-time provenance,
+  session/tag preservation, bounded pending measurements and no-measurement
+  switch neutrality have software tests. Real synchronized UWB fusion has not
+  been validated. P17–P20 covariance models are not in the production estimator.
+- Automatic recovery after frontend/session failure is **unsupported**. A
+  valid propagated output during a GNSS outage does not guarantee bounded error.
+
+| Evidence scope | Reported metric (scope stated per row) | Limitation |
+|---|---|---|
+| Historical P12 complete Seq2, 16 holdouts | 1.083 / 0.642 m | Fixed early three-point SE(3); integer-nanosecond interpolation ≤200 ms; first legally available delayed causal output, not continuous ATE |
+| Historical P12 complete Seq1, 33 holdouts | 35.815 / 37.275 m | Failed robustness; retained alongside the P10 good Raw trajectory (1.890 m) |
+| This version: competition S1, complete 804 s at 1× | First/last 0.951613 m; 4029 LIO commits, 0 rejects, zero image overflow | Same SHA-256 input/config as the archived reference; endpoint diagnostic, not ATE |
+| This version: suidao2_resized | NOT_RUN — qualified input unavailable | No current-version endpoint or reverse-motion result; P9 is historical only |
+| Real GNSS + UWB / low-density anchors | NOT_VALIDATED | Requires synchronized RF-time-qualified measurements and independently surveyed anchors |
+
+The source identity for the historical P12 computation paths is checked during
+integration; these are **reused results, not new Seq1/Seq2 replays**. Online and
+Final are separate views. Endpoint distance and reverse-motion projection without
+independent truth are diagnostics, not ATE. See the
+[research-candidate contract](docs/RESEARCH_CANDIDATE.md) for input, output,
+validation and remaining requirements. The public tunnel is separate from the
+private competition recording. Earlier results under
+[versioned experiments](docs/experiments/README.md) retain their original scope.
 
 ## Repository contents
 
@@ -268,6 +290,8 @@ Names below are current configured defaults; a dataset can select different ones
 | `/petrochemical/camera/left/image_raw` | Decoded competition image input |
 | `/aft_mapped_to_init` | Frontend `nav_msgs/Odometry`, local SLAM frame |
 | `/backend/livo_odom_raw` | Transaction-completed frontend odometry for backend |
+| `/backend/livo_odom_raw/quality` | Atomic raw payload, transaction/session and quality envelope |
+| `/rtk_backend/correction_event`, `/rtk_backend/causal_fused` | Versioned correction and causal projected pose with validity |
 | `/gnss/pvt_local` | `gnss_serial_driver/GnssPvtStamped` |
 | `/gnss_fusion/enu_odom`, `/gnss_fusion/status` | Adapted GNSS and `fast_livo/GnssStatus` |
 | `/uwb/ranges` | Optional external `uwb_serial_driver/UwbRangeArray` |
@@ -311,7 +335,11 @@ and `roslaunch --files fast_livo mapping_mid360.launch` without starting hardwar
 
 ## Verification status
 
-### Verified in the maintainer environment
+### Historical verification before this integration
+
+These records retain their original source identities. Adjacent-pose speed below
+is a pose-difference diagnostic and can include estimator revisions, not physical
+velocity. Current integration results are listed at the top of this README.
 
 - `lio_plane_map_self_test` passes on the `9fe7e510` algorithm tree; the formal
   `catkin_make --pkg fast_livo` build and a 20 s exact-config replay smoke test

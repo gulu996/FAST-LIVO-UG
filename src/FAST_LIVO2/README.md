@@ -1,4 +1,4 @@
-# FAST-LIVO2 component of FAST-LIVO-UG
+# FAST-LIVO2 research-candidate component of FAST-LIVO-UG
 
 This is a modified version of **FAST-LIVO2: Fast, Direct LiDAR-Inertial-Visual
 Odometry**, developed upstream by Chunran Zheng and collaborators at HKU MARS.
@@ -7,6 +7,11 @@ Use the [workspace README](../../README.md) for this fork's build and run comman
 [GNSS/UWB modes](../../docs/FUSION_MODES.md), and
 [versioned experiments](../../docs/experiments/README.md). Clone the whole
 workspace, not this directory inside another copy of the repository.
+
+This candidate retains the known Seq1 robustness limitation. Real UWB fusion and
+automatic frontend-failure recovery are not validated/supported; see the
+[research contract](../../docs/RESEARCH_CANDIDATE.md). Historical tunnel or
+competition closure results are not results of this newly integrated build.
 
 Upstream references:
 
